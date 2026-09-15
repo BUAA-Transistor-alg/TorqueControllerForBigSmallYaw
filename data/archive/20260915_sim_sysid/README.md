@@ -53,7 +53,7 @@ python3 python/scripts/dump_sim_dataset.py --plant-lambda=1e4 \
 
 ## 注意
 
-- `datasets/*` 每套 100 个 CSV（~3.2 MB），五套合计 ~16 MB —— 归档进 git 是为了留证，不必再解压处理；
+- `datasets/*` 每套 100 个 CSV（~3.2 MB），五套合计 ~17 MB，**已随仓库入库**（`data/` 全部纳入版本管理）；
   要重新拟合直接用 CSV 路径即可，例如：
   `./build/tcbs_identify_params <csv...> --held=measured --dx=0.1 --dy=0 --lambda=100`
 - 这些数据的"真值参数"是为了验证**方法**而设的仿真量，**不能**直接当作实车参数使用。

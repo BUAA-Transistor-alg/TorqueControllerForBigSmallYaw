@@ -81,7 +81,7 @@ python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' --dx=<
 
 标定结果**一车一目录**：`data/cars/<车名>/`（`LinearParams.txt` + `params/Identified_parameters.txt`
 + `params/Figure_1.png` + `sysid_samples/*.npz`，约定见 `data/cars/README.md`）。
-`data/sysid/` 只是**工作区**（默认不入库）；本轮仿真验证数据归档在 `data/archive/20260915_sim_sysid/`。
+`data/sysid/` 是**工作区**（也在版本管理内，但定型后请归到对应车目录）；本轮仿真验证数据归档在 `data/archive/20260915_sim_sysid/`。
 
 ### E. MPC / 控制调参（不是标定，但每台车要过一遍）
 
