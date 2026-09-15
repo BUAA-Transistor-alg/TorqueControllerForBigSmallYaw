@@ -1,0 +1,139 @@
+cmake_minimum_required(VERSION 3.10)
+
+# ============================================================================
+# TorqueControllerForBigSmallYaw —— 双级 yaw（大 yaw + 小 yaw）力矩控制子模组
+#
+# 模块标识（pfx）= **tcbs**（TorqueController Big/Small），统一封装约定见
+# docs/embedding.md。要点:
+#   * target 名 / 产物文件名 / ctest 名一律带 tcbs_ 前缀，库另提供
+#     tcbs::<原名> 形式的 ALIAS，供父工程 target_link_libraries 使用；
+#   * 头文件物理位于 include/tcbs/...，对内外一律通过 "tcbs/..." 访问，
+#     因此 target_include_directories 只暴露 include 这一层（不再暴露
+#     include/communication、include/common 等二级目录）；
+#   * 所有 C++ 代码在 namespace tcbs 内，C ABI 的符号/类型/宏带 tcbs_ / Tcbs 前缀；
+#   * 本文件既可**独立**构建（bash build.sh），也可被父工程以
+#         add_subdirectory(<本目录> <binary_dir> EXCLUDE_FROM_ALL)
+#     引入。作为子目录时**不**调用 project() / enable_testing()，也**不**使用
+#     任何会污染父作用域的全局命令（CMAKE_* 全局设置 / add_compile_options /
+#     include_directories），全部改用 target_* 形式。
+# ============================================================================
+
+set(TCBS_IS_TOP_LEVEL OFF)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(TCBS_IS_TOP_LEVEL ON)
+endif()
+
+if(TCBS_IS_TOP_LEVEL)
+    project(TorqueControllerForBigSmallYaw LANGUAGES CXX)
+    # 独立构建时保持原有行为（默认 Release + -O2）；作为子目录时完全沿用父工程配置
+    # （以下 set 均为**目录作用域**变量，不会影响父工程与本目录之外的 target）
+    if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_BUILD_TYPE Release)
+    endif()
+    set(CMAKE_CXX_FLAGS_RELEASE "-O2")
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    enable_testing()
+endif()
+
+# ============================================================================
+# 依赖
+# ============================================================================
+find_library(TCBS_UDEV_LIBRARY udev)
+if(NOT TCBS_UDEV_LIBRARY)
+    message(FATAL_ERROR "libudev not found")
+endif()
+find_package(Ceres REQUIRED)
+
+# 本仓库对外暴露的唯一 include 根目录（第二级目录名不再出现在搜索路径里）
+set(TCBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# ============================================================================
+# 通信库（串口协议 + 编码器映射 + 状态估计）
+# ============================================================================
+set(TCBS_COMMUNICATION_SOURCES
+    src/communication/CRC.cpp
+    src/communication/McuDataPreprocessor.cpp
+    src/communication/YawStateEstimator.cpp
+)
+
+add_library(tcbs_communication STATIC ${TCBS_COMMUNICATION_SOURCES})
+add_library(tcbs::communication ALIAS tcbs_communication)
+set_target_properties(tcbs_communication PROPERTIES OUTPUT_NAME tcbs_communication)
+target_include_directories(tcbs_communication PUBLIC ${TCBS_INCLUDE_DIR})
+target_compile_features(tcbs_communication PUBLIC cxx_std_17)
+target_link_libraries(tcbs_communication PUBLIC ${TCBS_UDEV_LIBRARY})
+
+# ============================================================================
+# MPC + 一体化封装（动态库，供外部 cpp 与 Python ctypes 使用）
+# ============================================================================
+set(TCBS_MPC_SOURCES
+    src/mpc/dual_yaw_mpc.cpp
+    src/mpc/mcu_mpc_controller.cpp
+    src/common/FrameRateCounter.cpp
+)
+
+add_library(tcbs_robot_comm_c SHARED
+    ${TCBS_COMMUNICATION_SOURCES}
+    ${TCBS_MPC_SOURCES}
+    src/RobotController.cpp
+    src/c_api/RobotCommunicationC.cpp   # C ABI（v4: 平面 8 参模型）
+)
+add_library(tcbs::robot_comm_c ALIAS tcbs_robot_comm_c)
+set_target_properties(tcbs_robot_comm_c PROPERTIES OUTPUT_NAME tcbs_robot_comm_c)
+target_include_directories(tcbs_robot_comm_c PUBLIC
+    ${TCBS_INCLUDE_DIR}
+    ${CERES_INCLUDE_DIRS}
+)
+target_compile_features(tcbs_robot_comm_c PUBLIC cxx_std_17)
+target_link_libraries(tcbs_robot_comm_c PUBLIC ${TCBS_UDEV_LIBRARY} ${CERES_LIBRARIES})
+
+# ============================================================================
+# 测试（ctest 名带 tcbs_ 前缀；父工程 enable_testing() 后不会与其它子模组撞名）
+# ============================================================================
+add_executable(tcbs_test_planar_yaw_model tests/test_planar_yaw_model.cpp)
+set_target_properties(tcbs_test_planar_yaw_model PROPERTIES
+    OUTPUT_NAME tcbs_test_planar_yaw_model)
+target_include_directories(tcbs_test_planar_yaw_model PRIVATE ${TCBS_INCLUDE_DIR})
+target_compile_features(tcbs_test_planar_yaw_model PRIVATE cxx_std_17)
+add_test(NAME tcbs_model_verification COMMAND tcbs_test_planar_yaw_model)
+
+add_executable(tcbs_test_yaw_state_estimator tests/test_yaw_state_estimator.cpp)
+set_target_properties(tcbs_test_yaw_state_estimator PROPERTIES
+    OUTPUT_NAME tcbs_test_yaw_state_estimator)
+target_include_directories(tcbs_test_yaw_state_estimator PRIVATE ${TCBS_INCLUDE_DIR})
+target_compile_features(tcbs_test_yaw_state_estimator PRIVATE cxx_std_17)
+target_link_libraries(tcbs_test_yaw_state_estimator PRIVATE tcbs::communication)
+add_test(NAME tcbs_state_estimator COMMAND tcbs_test_yaw_state_estimator)
+
+add_executable(tcbs_test_dual_yaw_mpc tests/test_dual_yaw_mpc.cpp ${TCBS_MPC_SOURCES})
+set_target_properties(tcbs_test_dual_yaw_mpc PROPERTIES OUTPUT_NAME tcbs_test_dual_yaw_mpc)
+target_include_directories(tcbs_test_dual_yaw_mpc PRIVATE
+    ${TCBS_INCLUDE_DIR}
+    ${CERES_INCLUDE_DIRS}
+)
+target_compile_features(tcbs_test_dual_yaw_mpc PRIVATE cxx_std_17)
+target_link_libraries(tcbs_test_dual_yaw_mpc PRIVATE tcbs::communication ${CERES_LIBRARIES})
+add_test(NAME tcbs_mpc_closed_loop COMMAND tcbs_test_dual_yaw_mpc)
+
+# ============================================================================
+# 示例 / 工具
+# ============================================================================
+add_executable(tcbs_control_demo src/control_demo.cpp)
+set_target_properties(tcbs_control_demo PROPERTIES OUTPUT_NAME tcbs_control_demo)
+target_compile_features(tcbs_control_demo PRIVATE cxx_std_17)
+target_link_libraries(tcbs_control_demo PRIVATE tcbs::robot_comm_c)
+
+# 采集工具改为 Python（复用录制目标序列 + 增强 + PID，与原仓库一致）:
+#   python/scripts/collect_sysid.py
+
+add_executable(tcbs_identify_params tools/identify_params.cpp)
+set_target_properties(tcbs_identify_params PROPERTIES OUTPUT_NAME tcbs_identify_params)
+target_compile_features(tcbs_identify_params PRIVATE cxx_std_17)
+target_link_libraries(tcbs_identify_params PRIVATE tcbs::robot_comm_c)
+
+# MPC 参数评估工具: 用辨识出来的参数跑闭环，比较不同 (模型 λ, 积分子步) 的表现
+add_executable(tcbs_mpc_param_eval tools/mpc_param_eval.cpp ${TCBS_MPC_SOURCES})
+set_target_properties(tcbs_mpc_param_eval PROPERTIES OUTPUT_NAME tcbs_mpc_param_eval)
+target_compile_features(tcbs_mpc_param_eval PRIVATE cxx_std_17)
+target_link_libraries(tcbs_mpc_param_eval PRIVATE tcbs::robot_comm_c)

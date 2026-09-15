@@ -1,0 +1,48 @@
+[load] 共读入 100 段数据（100 个文件，跳过 0 个）
+[torch] 原仓库配方：epochs=600 × 段数100 个 Adam 步（epochs = 原仓库 1000 的 1/5），每次 10 步(0.1 s)随机片段，lr=0.0003（常数），损失 = 角度wrap MSE + 角速度 MSE(等权)，EULER 积分，无限位(log 参数化)
+[torch] 数据: 100 段 → 100 个 sample（最长 300 点 = 3.00 s，水平(重力=0)）；拟合轴=both，自由参数=8；参数化: log 参数化: Jbig_eff,Js,fc_big,fv_big,fc_small,fv_small; 自由参数: Px,Py；参数限位: 无（无上下界 / 无 clamp / 无投影 / 无惩罚项）
+[torch] 初值 φ0 = [+0.02400 +0.01300 +0.00000 +0.00000 +0.09000 +0.03000 +0.03000 +0.00800]（来源: 默认 CAD/占位初值 defaultModelParams()）
+[torch] epoch     0/600  loss=8.785808e-02  [+0.02425 +0.01305 -0.01173 +0.00180 +0.09130 +0.03030 +0.03055 +0.00812]
+[torch] epoch     1/600  loss=5.498253e-02  [+0.02443 +0.01317 -0.02061 +0.00085 +0.09233 +0.03044 +0.03109 +0.00823]
+[torch] epoch     2/600  loss=7.086410e-02  [+0.02472 +0.01326 -0.02913 +0.00088 +0.09382 +0.03076 +0.03168 +0.00835]
+[torch] epoch     3/600  loss=6.956750e-02  [+0.02502 +0.01336 -0.03496 +0.00321 +0.09538 +0.03114 +0.03231 +0.00847]
+[torch] epoch     4/600  loss=5.752966e-02  [+0.02527 +0.01348 -0.04000 +0.00424 +0.09680 +0.03139 +0.03292 +0.00859]
+[torch] epoch   100/600  loss=1.721921e-04  [+0.04277 +0.01742 +0.03571 +0.01321 +0.21358 +0.05165 +0.10323 +0.01815]
+[torch] epoch   200/600  loss=7.166103e-05  [+0.05109 +0.02091 -0.00288 +0.00803 +0.22530 +0.05238 +0.10009 +0.01779]
+[torch] epoch   300/600  loss=6.016174e-05  [+0.05092 +0.02093 +0.00654 -0.00015 +0.22522 +0.05155 +0.10034 +0.01839]
+[torch] epoch   400/600  loss=6.931952e-05  [+0.05111 +0.02091 -0.00266 +0.00658 +0.22428 +0.05204 +0.10017 +0.01918]
+[torch] epoch   500/600  loss=6.091026e-05  [+0.05111 +0.02081 +0.00071 +0.00471 +0.22347 +0.05202 +0.10024 +0.01927]
+[torch] epoch   595/600  loss=5.421780e-05  [+0.05127 +0.02074 -0.00106 +0.00550 +0.22444 +0.05184 +0.10016 +0.01917]
+[torch] epoch   596/600  loss=6.860163e-05  [+0.05094 +0.02093 +0.00061 +0.01364 +0.22500 +0.05211 +0.09998 +0.01914]
+[torch] epoch   597/600  loss=6.155512e-05  [+0.05080 +0.02094 +0.00069 +0.01502 +0.22503 +0.05206 +0.10013 +0.01917]
+[torch] epoch   598/600  loss=6.161996e-05  [+0.05084 +0.02097 +0.00388 +0.01130 +0.22423 +0.05195 +0.10025 +0.01918]
+[torch] epoch   599/600  loss=5.510083e-05  [+0.05099 +0.02099 +0.00244 +0.01108 +0.22458 +0.05197 +0.10057 +0.01923]
+
+==============================================================================
+辨识结果（输出误差法, 段数=100, 轴=both）  用时 1619.0s
+配方: 原仓库配方(epochs×段数 个单片段 Adam 步)；Adam/总步数=60000；参数限位=无（无上下界 / 无 clamp / 无投影 / 无惩罚项）
+ # 参数                   初值           估计           变化  单位
+ 0 Jbig_eff       0.024000     0.050988    +0.026988  kg·m²
+ 1 Js             0.013000     0.020990    +0.007990  kg·m²
+ 2 Px             0.000000     0.002443    +0.002443  kg·m
+ 3 Py             0.000000     0.011083    +0.011083  kg·m
+ 4 fc_big         0.090000     0.224585    +0.134585  N·m
+ 5 fv_big         0.030000     0.051970    +0.021970  N·m·s/rad
+ 6 fc_small       0.030000     0.100574    +0.070574  N·m
+ 7 fv_small       0.008000     0.019231    +0.011231  N·m·s/rad
+==============================================================================
+loss 曲线: 共 600 点；前 5 个 = 8.785808e-02, 5.498253e-02, 7.086410e-02, 6.956750e-02, 5.752966e-02
+           后 5 个 = 5.421780e-05, 6.860163e-05, 6.155512e-05, 6.161996e-05, 5.510083e-05
+            前 5 均值=5.988551e-02 → 后 5 均值=6.023259e-05（比值 0.0010，最小值 4.934813e-05）  ⇒ 下降 ✓
+可粘贴到 include/mpc/planar_yaw_params.h:
+  p.Jbig_eff = 0.050988;  p.Js = 0.020990;
+  p.Px = 0.002443;  p.Py = 0.011083;
+  p.fcBig = 0.224585;  p.fvBig = 0.051970;
+  p.fcSmall = 0.100574;  p.fvSmall = 0.019231;
+/home/huhu233/.config/matplotlib is not a writable directory
+Matplotlib created a temporary cache directory at /tmp/matplotlib-elzpruoj because there was an issue with the default path (/home/huhu233/.config/matplotlib); it is highly recommended to set the MPLCONFIGDIR environment variable to a writable directory, in particular to speed up the import of Matplotlib and to better support multiprocessing.
+/home/huhu233/.local/lib/python3.10/site-packages/matplotlib/projections/__init__.py:63: UserWarning: Unable to import Axes3D. This may be due to multiple versions of Matplotlib being installed (e.g. as a system package and as a pip package). As a result, the 3D projection is not available.
+  warnings.warn("Unable to import Axes3D. This may be due to multiple versions of "
+[plot] 已保存 data/sysid/ident_torch_lam100_convergence.png  (268.9 KB)
+[plot] 已保存 data/sysid/ident_torch_lam100_traj.png  (245.6 KB)
+[out] 已写入 data/sysid/ident_torch_lam100.txt

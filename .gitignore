@@ -1,0 +1,19 @@
+# 构建产物
+build/
+
+# Python
+__pycache__/
+*.pyc
+
+# ── 数据策略 ──
+# data/cars/<车名>/ 下的标定结果与样本**入库**（沿用原仓库 TorqueController 的约定，见 data/cars/README.md）
+# data/targets/*.npz（录制目标序列，辨识激励源）**入库**
+# 工作区（正在采集/分析的实机数据）默认不入库，避免误提交大文件：
+data/sysid/*.csv
+data/sysid/*.npz
+data/sysid/*.json
+data/sysid/*.log
+data/sysid/identified_params.txt
+# 仿真数据集：每套 100 个 CSV ≈ 3.2 MB，共 5 套；可用 docs 里的确定性命令重放
+# （固定 seed=42；如需入库： git add -f data/archive/20260915_sim_sysid/datasets/）
+data/archive/*/datasets/

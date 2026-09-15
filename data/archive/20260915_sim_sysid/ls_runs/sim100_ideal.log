@@ -1,0 +1,258 @@
+==============================================================
+ identify_params — 平面 8 参模型辨识 (加权 LS + SVD 截断)
+ 参数: Jbig_eff Js Px Py fc_big fv_big fc_small fv_small
+==============================================================
+几何: dx=0.1 dy=0 (defaultModelParams 被 --dx/--dy 覆盖)
+held=ideal  align-shift=auto  trunc=1e-07  tikhonov=0  SNR加权=on  smooth=3
+gravity_a(默认, m/s²) = (0, 0)
+
+---- 数据 ----
+  data/sysid/sim100/sim_big_00.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_01.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_02.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_03.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_04.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_05.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_06.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_07.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_08.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_09.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_10.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_11.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_12.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_13.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_14.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_15.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_16.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_17.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_18.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_19.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_20.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_21.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_22.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_23.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_24.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_25.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_26.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_27.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_28.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_29.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_30.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_31.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_32.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_33.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_34.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_35.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_36.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_37.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_38.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_39.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_40.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_41.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_42.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_43.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_big_44.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=300/0/0
+  data/sysid/sim100/sim_small_50.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_51.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_52.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_53.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_54.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_55.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_56.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_57.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_58.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_59.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_60.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_61.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_62.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_63.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_64.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_65.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_66.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_67.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_68.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_69.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_70.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_71.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_72.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_73.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_74.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_75.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_76.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_77.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_78.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_79.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_80.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_81.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_82.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_83.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_84.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_85.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_86.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_87.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_88.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_89.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_90.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_91.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_92.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_93.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+  data/sysid/sim100/sim_small_94.csv: 300 样本, dt中位=0.01 s, 段数=1, axis(big/small/未知)=0/300/0
+合计 27000 样本（90 段）
+gravity_a: 使用命令行常数（CSV 无该列）
+
+---- 角加速度（中心差分 + 3 遍 3 点平滑）----
+  大yaw: |qdd| p99.9=6.961, max=7.3 rad/s²；尖峰阈值 500 ⇒ 剔除 0
+  小yaw: |qdd| p99.9=3.835, max=4.374 rad/s²；尖峰阈值 2000 ⇒ 剔除 0
+  差分边界剔除 180 个样本状态（每段首尾）
+
+---- 力矩检查 ----
+  指令力矩峰值: 大yaw 0.77167 N·m, 小yaw 0.19015 N·m（饱和阈值/sample数 0.98 / 0,0）
+
+---- 加权 ----
+  关节力矩标准差: 大yaw 0.21551, 小yaw 0.064752 N·m ⇒ 权重 (4.64, 15.44)
+
+---- 时间对齐（τ 与状态平移，允许小数帧）----
+  shift     -1: 方程 53640, 先验残差 0.74655 → 拟合后残差 0.48006 N·m   ← 目前最优
+  shift     +0: 方程 53640, 先验残差 0.74502 → 拟合后残差 0.46939 N·m   ← 目前最优
+  shift     +1: 方程 53640, 先验残差 0.74462 → 拟合后残差 0.46142 N·m   ← 目前最优
+  对齐不确定度带（拟合后残差 ≤ 最优+2.0%）: shift -0.125 … +1（10 个候选）
+    该带内各参数的散布（**LS 的 σ 不含这一项**，是系统不确定度）:
+      Jbig_eff       0.083497 … 0.08592      (±1.4%)
+      Js             0.019216 … 0.020229     (±2.6%)
+      Px             -0.16632 … -0.15847     (±2.4%)
+      Py            -0.031758 … -0.031313    (±0.7%)
+      fc_big          0.24589 … 0.24888      (±0.6%)
+      fv_big         0.031409 … 0.041675     (±14.0%)
+      fc_small        0.15401 … 0.15666      (±0.9%)
+      fv_small              0 … 0            (±0.0%)
+⇒ 选择 shift = +1（拟合后残差最小，相对 shift 0 改善 1.70%）
+  相对次优 shift 领先 1.73%
+  ⚠ 对齐差异不显著（<2%）：残差本身对半帧错位不敏感，但摩擦参数
+    （fc/fv）对它很敏感 —— 建议同时跑 --align-shift=fine 与
+    --align-shift=0/-1 比较参数稳定性。
+  方程数 53640（held=ideal, shift=+1）
+
+  列级 SNR（信号 σ / 噪声 σ，噪声由段内高通残差估计）:
+    列           σ_signal     σ_noise        SNR        w   说明
+    Jbig_eff          10.95       0.4138      26.47   0.9986   
+    Js                21.15        1.017      20.79   0.9977   
+    Px                2.454      0.09505      25.82   0.9985   
+    Py               0.9709      0.01313      73.92   0.9998   
+    fc_big            3.177      0.09466      33.56   0.9991   
+    fv_big            3.105      0.01678      185.1   1.0000   
+    fc_small          8.099        0.386      20.98   0.9977   
+    fv_small            2.5      0.05353      46.69   0.9995   
+
+---- 求解 ----
+  列共线性诊断（关节加权后）: 无 |corr| ≥ 0.90 的列对
+  方程 53640, 参数 8, 数值秩 8（不可辨识方向 0 个保持先验）
+  奇异值(前 8): 1.48 1.376 1.326 0.9934 0.878 0.4623 0.3253 0.2786
+  列归一化因子 ||col||: 1277 4919 495.3 254.1 413.8 415.6 1016 303
+  Tikhonov λ = 0（归一化坐标）, 截断阈值 = 1.48e-07
+
+---- 参数 ----
+  name       先验(默认)     估计值     变化量  标准差 σ
+  Jbig_eff           0.024      0.083497     +0.059497     0.0004768
+  Js                 0.013     0.0192155   +0.00621553     0.0002235
+  Px                     0     -0.158471     -0.158471      0.002496
+  Py                     0     -0.031758     -0.031758      0.001823
+  fc_big              0.09      0.245893     +0.155893      0.001806
+  fv_big              0.03     0.0416747    +0.0116747      0.001795
+  fc_small            0.03      0.154011     +0.124011      0.001012
+  fv_small           0.008             0        -0.008      0.003401   ← 已钳制
+      ⚠ 物理约束: fv_small 越界（原始估计 -0.111432）⇒ 钳到下限 0，该方向不再是最优拟合
+
+---- 残差（τ_meas − inverseDynamics）----
+  加权 RMS: 先验 0.74462 → 辨识后 0.48392（最小二乘解 0.46142），实测 τ 加权 RMS 1.001
+  相对降低 35.0%
+  大yaw （未加权, N·m）: 先验 0.13359 → 辨识后 0.072823（τ RMS 0.21579）
+  小yaw （未加权, N·m）: 先验 0.05512 → 辨识后 0.038535（τ RMS 0.06479）
+  对齐复核: 用辨识参数重搜仍是 shift=+1 ✓
+  数值可积性: recommendedFrictionLambda(dt=0.01) = 28.2（λ 固定 10） ✓
+
+---- 真值对比（--truth）----
+  name              真值     估计值 相对误差
+  Jbig_eff            0.05      0.083497      66.994%
+  Js                  0.02     0.0192155      -3.922%
+  Px                0.0087     -0.158471   -1921.509%
+  Py                 0.005     -0.031758    -735.160%
+  fc_big              0.22      0.245893      11.770%
+  fv_big             0.055     0.0416747     -24.228%
+  fc_small          0.0973      0.154011      58.285%
+  fv_small           0.028             0    -100.000%
+
+已写出: data/sysid/ls_runs/sim100_ideal.txt
+
+================ 验证集 ================
+  data/sysid/sim100/sim_big_45.csv: 300 样本, 1 段, dt中位 0.01 s
+    力矩预测残差 RMS (未加权, N·m), align-shift=+1:
+      大yaw : 先验 0.19432 → 辨识后 0.053928  ✓改善
+      小yaw : 先验 0.031566 → 辨识后 0.020317  ✓改善
+    前向仿真（开环、用实测 τ 驱动）角度误差 RMS / max [rad]，顺序 大yaw / 小yaw:
+      用先验  参数:   RMS 1.672 / 0.8046   max 2.368 / 1.992
+      用辨识后参数:   RMS 0.008168 / 0.01291   max 0.01546 / 0.03443
+  data/sysid/sim100/sim_big_46.csv: 300 样本, 1 段, dt中位 0.01 s
+    力矩预测残差 RMS (未加权, N·m), align-shift=+1:
+      大yaw : 先验 0.16573 → 辨识后 0.083687  ✓改善
+      小yaw : 先验 0.026738 → 辨识后 0.014422  ✓改善
+    前向仿真（开环、用实测 τ 驱动）角度误差 RMS / max [rad]，顺序 大yaw / 小yaw:
+      用先验  参数:   RMS 1.191 / 0.774   max 1.944 / 1.432
+      用辨识后参数:   RMS 0.01989 / 0.01276   max 0.03993 / 0.0199
+  data/sysid/sim100/sim_big_47.csv: 300 样本, 1 段, dt中位 0.01 s
+    力矩预测残差 RMS (未加权, N·m), align-shift=-1:
+      大yaw : 先验 0.05568 → 辨识后 0.054334  ✓改善
+      小yaw : 先验 0.023946 → 辨识后 0.023799  ✓改善
+    前向仿真（开环、用实测 τ 驱动）角度误差 RMS / max [rad]，顺序 大yaw / 小yaw:
+      用先验  参数:   RMS 0.1807 / 0.2031   max 0.2145 / 0.3114
+      用辨识后参数:   RMS 0.03568 / 0.02345   max 0.04282 / 0.03827
+  data/sysid/sim100/sim_big_48.csv: 300 样本, 1 段, dt中位 0.01 s
+    力矩预测残差 RMS (未加权, N·m), align-shift=+1:
+      大yaw : 先验 0.20617 → 辨识后 0.044677  ✓改善
+      小yaw : 先验 0.044708 → 辨识后 0.035057  ✓改善
+    前向仿真（开环、用实测 τ 驱动）角度误差 RMS / max [rad]，顺序 大yaw / 小yaw:
+      用先验  参数:   RMS 4.777 / 1.22   max 7.588 / 2.397
+      用辨识后参数:   RMS 0.05071 / 0.03615   max 0.0799 / 0.05075
+  data/sysid/sim100/sim_big_49.csv: 300 样本, 1 段, dt中位 0.01 s
+    力矩预测残差 RMS (未加权, N·m), align-shift=+1:
+      大yaw : 先验 0.18616 → 辨识后 0.047162  ✓改善
+      小yaw : 先验 0.039537 → 辨识后 0.014984  ✓改善
+    前向仿真（开环、用实测 τ 驱动）角度误差 RMS / max [rad]，顺序 大yaw / 小yaw:
+      用先验  参数:   RMS 2.529 / 1.172   max 4.587 / 2.231
+      用辨识后参数:   RMS 0.02136 / 0.01279   max 0.04158 / 0.02007
+  data/sysid/sim100/sim_small_95.csv: 300 样本, 1 段, dt中位 0.01 s
+    力矩预测残差 RMS (未加权, N·m), align-shift=+1:
+      大yaw : 先验 0.049102 → 辨识后 0.046962  ✓改善
+      小yaw : 先验 0.062914 → 辨识后 0.035304  ✓改善
+    前向仿真（开环、用实测 τ 驱动）角度误差 RMS / max [rad]，顺序 大yaw / 小yaw:
+      用先验  参数:   RMS 0.2233 / 0.7801   max 0.4162 / 1.159
+      用辨识后参数:   RMS 0.02896 / 0.02432   max 0.04941 / 0.05729
+  data/sysid/sim100/sim_small_96.csv: 300 样本, 1 段, dt中位 0.01 s
+    力矩预测残差 RMS (未加权, N·m), align-shift=+1:
+      大yaw : 先验 0.10617 → 辨识后 0.10501  ✓改善
+      小yaw : 先验 0.062954 → 辨识后 0.0367  ✓改善
+    前向仿真（开环、用实测 τ 驱动）角度误差 RMS / max [rad]，顺序 大yaw / 小yaw:
+      用先验  参数:   RMS 1.15 / 0.9522   max 1.659 / 1.422
+      用辨识后参数:   RMS 0.06818 / 0.08394   max 0.1164 / 0.1211
+  data/sysid/sim100/sim_small_97.csv: 300 样本, 1 段, dt中位 0.01 s
+    力矩预测残差 RMS (未加权, N·m), align-shift=+1:
+      大yaw : 先验 0.030276 → 辨识后 0.025387  ✓改善
+      小yaw : 先验 0.060965 → 辨识后 0.039098  ✓改善
+    前向仿真（开环、用实测 τ 驱动）角度误差 RMS / max [rad]，顺序 大yaw / 小yaw:
+      用先验  参数:   RMS 0.08977 / 0.6711   max 0.139 / 0.9725
+      用辨识后参数:   RMS 0.01523 / 0.07135   max 0.02587 / 0.09783
+  data/sysid/sim100/sim_small_98.csv: 300 样本, 1 段, dt中位 0.01 s
+    力矩预测残差 RMS (未加权, N·m), align-shift=+1:
+      大yaw : 先验 0.099884 → 辨识后 0.098052  ✓改善
+      小yaw : 先验 0.064424 → 辨识后 0.039754  ✓改善
+    前向仿真（开环、用实测 τ 驱动）角度误差 RMS / max [rad]，顺序 大yaw / 小yaw:
+      用先验  参数:   RMS 1.122 / 0.8619   max 2.079 / 2.064
+      用辨识后参数:   RMS 0.06311 / 0.04612   max 0.1077 / 0.1062
+  data/sysid/sim100/sim_small_99.csv: 300 样本, 1 段, dt中位 0.01 s
+    力矩预测残差 RMS (未加权, N·m), align-shift=+1:
+      大yaw : 先验 0.02917 → 辨识后 0.02626  ✓改善
+      小yaw : 先验 0.059105 → 辨识后 0.033579  ✓改善
+    前向仿真（开环、用实测 τ 驱动）角度误差 RMS / max [rad]，顺序 大yaw / 小yaw:
+      用先验  参数:   RMS 0.1332 / 1.812   max 0.2822 / 3.407
+      用辨识后参数:   RMS 0.01594 / 0.03195   max 0.02712 / 0.05965
+
+完成。

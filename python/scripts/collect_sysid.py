@@ -1,0 +1,1589 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""collect_sysid.py — 双级 yaw 云台的**系统辨识数据采集**（分轴激励版）
+
+用法::
+
+    # 真实硬件（先在 build/ 里构建 libtcbs_robot_comm_c.so）
+    python3 python/scripts/collect_sysid.py --segments=10
+    python3 python/scripts/collect_sysid.py --segments=4 --tag=exp1 --max-temp=50
+    # 无硬件自检（内置仿真代替串口；用来验证脚本逻辑与数据格式）
+    python3 python/scripts/collect_sysid.py --dry-run --segments=1
+
+数据格式见 ``docs/sysid_data.md``。
+
+================================================================================
+一、为什么这样采集（设计理由，先读这一段）
+================================================================================
+
+1) **不用固定激励（正弦/傅里叶/多正弦）**，而是"**提前录制的目标序列 + 增强 + 上位机 PID**"。
+   原因: 待辨识的是 ``include/tcbs/mpc/planar_yaw_model.h`` 的 8 参模型，其中摩擦是
+   ``fc·tanh(λθ̇) + fv·θ̇``、耦合是 ``M11/M12/μ(θ_s)``、重力/一阶矩项与 θ_s 强相关。
+   这些项在真实工况下的**力矩-速度工作点在整个范围内连续变化**（含换向、低速滞留、
+   变速段）；单一正弦只在一条窄带（固定频率/幅值）里激励，摩擦的库仑段与换向段
+   几乎没有数据，参数会病态。录制的目标序列来自真实跟踪工况 ⇒ **工况相符**
+   （``data/targets/*.npz`` 就是实机录的参考角序列），再叠加"随机截取 + 连续化 +
+   随机等比缩放 + 随机偏置"做数据增强，得到多样化的激励形态。
+
+2) **大小 yaw 分开采集（每段只激励一个关节，另一个由 PID 保持在固定位置）**。
+   原因: 两轴通过 ``M12 = J_s + d·Q(θ_s)`` 强耦合。若两轴同时被驱动，回归矩阵的两列
+   高度相关（分不清谁动了谁），8 参最小二乘会病态。分轴采集让"被激励轴的
+   τ↔θ↔θ̇"这条主链干净可辨。
+   同时 **held 轴不是"关掉不管"**: 它由同一套 PID 闭环守在固定角度上，其**下发力矩
+   恰好是耦合项的观测量** —— 保持轴要顶住被激励轴带来的惯性/离心/科氏扰动力矩才能
+   不动，因此 ``tau_small``(held) 里含有 ``M12·θ̈_big + μ 项`` 的信息，是辨识耦合与
+   惯量参数的关键通道（这正是"两轴力矩都要记录"的原因）。
+
+3) **held 轴的目标位置随机化**（大 yaw: 现有角度附近 ±π 内随机；小 yaw: ±40° 内随机）。
+   原因: ``M12``、``μ = ∂M11/∂θ_s``、重力项 ``G_s = Q_x g_y − Q_y g_x`` 都是 **θ_s 的
+   函数**。只有让 θ_s 在多个不同值上取数据，才能把它们辨识出来（只在一点标定只能定
+   一个切片，Px/Py 与 μ 完全不可辨）。
+
+4) **两个关节在采样前都要像 driven 轴一样先 PID 到位并稳定**。
+   原因: 采样段必须是"纯激励响应"。若保持轴在采样开始时还在大幅移动，它的加减速会给
+   被激励轴注入额外的、未记录的扰动力矩，把数据污染成"激励 + 未知阶跃"；同理被激励轴
+   也要从静止、无积分饱和的状态起步，这样数据段起点的状态是已知的（θ̇≈0）。
+
+5) **小 yaw 超范围序列整体等比缩放到 ±40° 以内（不截断）**。
+   原因: 小 yaw 机械/电控硬限位是 ±45°。截断会破坏轨迹形状（人为引入尖角与额外高频），
+   而**等比缩放保形状**，只把幅值映射到安全区；形状（换向次数、速度分布、停留段）
+   才是激励多样性的来源。
+
+6) **pitch 固定 0**。原因: ``planar_yaw_model.h`` 的化简前提③明确"忽略 pitch 转动对
+   上装质心的影响 ⇒ pitch 不进动力学"。本项目只用两个 yaw 的数据标定，动 pitch 只会
+   白白引入未建模扰动。
+
+7) **100 Hz 固定、用 ``time.perf_counter_ns()`` 忙等到绝对时间点**。
+   原因: 上位机 PID 的 dt 必须真是 0.01 s（积分/微分项直接乘除 dt）；``time.sleep()``
+   有毫秒级抖动 + 调度延迟，会让 dt 不准、力矩抖动，直接污染辨识。忙等绝对时间点可把
+   抖动压到微秒级。**不允许更高**频率: 电控的力矩接收周期、状态估计的更新率
+   （大 yaw/底盘 IMU 只有 ~10 Hz）都跟不上，高于 100 Hz 只是重复下发同一份估计值，
+   反而破坏"力矩-状态"的时间对应关系。
+
+8) **仅力矩模式下发（``yaw_*_mode = 0``）+ 上位机 PID**。原因: 要辨识的是**力矩 → 运动**
+   的动力学，力矩通道必须由上位机独占；若开电控内环（mode 1），电控的位置环会吃掉上位机
+   力矩的因果性，辨识出来的就不是机械参数而是"电控环 + 机械"的混合模型。
+   反馈: 大 yaw 用 IMU 直测的 ``platform_azimuth``（实时无延迟），小 yaw 用编码器
+   ``small_joint_angle``（实时可信）—— 两者都是估计器里的**可信实时量**。
+
+9) **力矩变化率限幅 0.1 N·m/步**。原因: 保护减速器（力矩阶跃会激发齿隙冲击），并让激励
+   在高频段的能量更接近真实工况；**记录的是限幅后的最终下发值**，否则辨识用的力矩与实际
+   作用力矩不一致。
+
+10) ``theta_big`` 记录的是**延迟补偿估计** ``big_joint_angle``（而不是原始编码器值）:
+    大 yaw 编码器经 MCU1↔MCU2 链路（~10 Hz、间隔不规则、值被保持），原始值带不确定延迟；
+    估计器用 IMU 角速度做一阶外推补偿到当前时刻。同时记录 ``big_enc_age``，供拟合时判断
+    哪些时刻的补偿可信（用户要求"可以记录但拟合不用"）。
+
+================================================================================
+二、每段数据流（一个 segment）
+================================================================================
+
+    读当前状态 → 规划本段:
+        · 选轴: 偶数段驱动大 yaw(axis=0)，奇数段驱动小 yaw(axis=1)
+        · [可选 --tilted] 打印显著提示: 请把底盘以固定倾角静置（见 §五）
+        · driven 参考 = 录制序列 → 连续化(np.unwrap) → 去直流/归一化 → 随机幅值
+                        → TrajectoryPlanner+StepRefinementWrapper 平滑
+                        → **校验平滑后确实有激励幅值**(大 yaw ≥14° / 小 yaw ≥7°)，
+                          不够则放大输入重试、再换窗口
+                        → 叠加随机中心
+                          （大 yaw: 现有方位角附近 ±30°；小 yaw: 落在参考包络
+                            [−17°, +12°] 内，中心在可行中心区间内随机，见 §七）
+        · held 目标 = 大 yaw: 现有方位角 ±π 随机；小 yaw: 行程中心 −2.5° ± 10.15°（常量序列）
+    到位: 两个 PID 把 driven 轴拉到 ref[0]、held 轴拉到 held_target，稳定 ~2 s
+          （移动参考同样由轨迹规划器整形 —— 直接给阶跃会饱和过冲，把小 yaw 顶到硬限位；
+            未收敛最多再等 2 轮；到位后 PID 状态**不清零**，见"与旧脚本差异"）
+    采样: 300 点 @100 Hz（3 s），每点:
+          忙等到绝对时间点 → 读 est/mcu → 安全判定（小 yaw 行程界限、温度）
+          → 两轴各跑 PID(误差 e = wrap(目标 − 反馈)) → 各轴力矩变化率限幅
+          → 仅力矩模式下发 → 记录（含重力 A 系平面分量 gravity_ax/ay）
+    收尾: 主动回到**行程中心 −2.5°** 保持（大 yaw 保持当前方位角）
+    保存: ``data/sysid/sysid_<tag>_<时间戳>_<序号>.npz`` 与同名 ``.csv``（同时写）
+          **零力矩只在程序退出时发**（见 safe_shutdown）
+
+================================================================================
+三、安全策略
+================================================================================
+
+* 小 yaw θ 超出**硬限位 [−25°, +20°]** → 立即中止本段（**不保存**被污染的数据）→ PID 回
+  **行程中心 −2.5°** → 零力矩；距界限 < 3° 时只打印告警（见 §七）;
+* 电机温度 ≥ ``--max-temp`` → 中止本段 → 零力矩 100 Hz 保温等待降温后重试（超时退出）；
+* ``--tilt-rolling`` 段间改倾角时，两轴**保持闭环守位**（倾斜后重力会在小 yaw 上产生力矩，
+  撒手会让它自己滑到限位），不撒手、也不做补偿；
+* Ctrl+C → 立刻按限幅斜坡把力矩压到 0 并**连发若干帧零力矩**再关闭句柄；
+* 任何退出路径（正常/异常/中断）都经过同一个 ``safe_shutdown()``。
+
+================================================================================
+四、dry-run（无硬件）
+================================================================================
+
+``--dry-run`` 用**内置仿真**代替串口: 被控对象用 ``include/tcbs/mpc/planar_yaw_model.h``
+的同一组方程（M(θ_s)、μ、科氏/离心、重力、``fc·tanh(λθ̇)+fv·θ̇``）在 Python 里积分，
+λ = 100（模拟真实库仑摩擦的陡峭软符号），积分步长 0.05 ms（RK4，200 子步/控制周期）。
+仿真对象对外暴露与 ``TcbsRobotCommunication`` 相同的字段语义
+（``platform_azimuth`` / ``small_joint_angle`` / ``big_joint_angle``(延迟补偿) /
+``mcu2_seq`` / ``big_enc_age`` …），因此**同一套采集代码**在仿真与实机上走同一条路径
+—— dry-run 能真正验证脚本逻辑与输出格式。
+
+================================================================================
+五、静态倾斜段（可选: --tilted / --tilt-rolling，默认关闭）
+================================================================================
+
+**为什么需要**: `P = m_u·ρ`（上装一阶矩）是本项目的重点（小 yaw 载荷质心不在小 yaw 转轴上）。
+但底盘**水平**时 `gravity_a` 的平面分量为 0 ⇒ 重力项 `G_s = Qx·gy − Qy·gx` 恒为 0，
+`Px/Py` 只能靠 `M11/M12/μ` 里的 `d·Q = d·R(θ_s)·P` 间接观测，而 `d ≈ 0.03 m` 很小 ——
+`tools/identify_params.cpp` 的自检显示此时 `P` 与惯量参数**共线（corr ≈ −0.93）**，
+虽然仍能估到 ~10% 以内，但一旦有摩擦形状失配/柔度等未建模误差，`P` 的偏差会被放大。
+
+**倾斜为什么有效**: 底盘以固定倾角静置后，`gravity_a` 的平面分量 ≈ `g·sin(tilt)`（10° ⇒ 1.7 m/s²），
+而 `∂G_s/∂P` 的灵敏度正是这个 g 量级，比水平时仅 `d ≈ 0.03 m` 的惯性耦合项强两个数量级
+⇒ `Px/Py` 的回归条件数改善约两个数量级。
+
+**倾斜 ≠ 底盘运动**（关键）: 采集期间底盘仍然**静止**，只是**静置姿态**不同（如垫起一侧车轮）；
+模型里的 `base_omega` / `base_alpha` **依旧取 0**。倾斜只改变重力在 A 系的投影。
+
+**脚本只做两件事**（都不影响默认行为）:
+  1) 逐样本记录 `gravity_ax` / `gravity_ay`（CSV 末两列 + npz 数组），元数据记 `tilted=1`；
+  2) 每段前打印显著提示，要求把底盘以固定倾角静置。
+**不做**: 任何倾角补偿、任何激励方式改动、任何"倾角是否足够"的自动判断。
+`--tilt-rolling` 额外在段间提示轮换倾角（+10° / 0° / −10° 槽位循环），并留 10 s 让操作者调整，
+期间两轴**保持闭环守位**（倾斜后重力会在小 yaw 上产生力矩，撒手会滑到限位）。
+
+不传 `--tilted` 时，脚本行为与之前**逐字相同**，只是 CSV/npz 多了两列恒为 0 的重力列
+（全 0 ⇒ 下游等价于原来的"水平假设"）。
+
+================================================================================
+七、小 yaw 行程三档（**非对称** −25° … +20°）
+================================================================================
+
+实测机械行程是 **min = −25°、max = +20°**（不是 ±45°，也不是 ±40°）。三档含义:
+
+| 档 | 区间 | 用途 |
+|---|---|---|
+| ① 硬限位（机械行程） | **[−25°, +20°]** | 电控侧也按它限位；`SMALL_TRAVEL_MIN/MAX` |
+| ② 中止阈值（上位机） | 同上（触及即中止本段、数据不保存、PID 回中心） | 对应旧版的 ±45° 中止 |
+| ③ 参考包络 | **[−17°, +12°]**（两侧各留 8° 跟踪超调余量） | 激励参考、到位目标、held 保持目标都用它 |
+
+**中心是 −2.5°，不是 0**（`SMALL_CENTER_RAD = (min+max)/2`）: 行程不对称时 0 偏向 +20° 一侧，
+停在中心才能让到两端的余量相等（各 22.5°）。回中心/段尾保持/初始条件都用它。
+
+**非对称 ⇒ 所有"±band"的对称写法全部改成区间运算**:
+  · 参考中心: 从**可行中心区间** `[env_min + 半幅, env_max − 半幅]` 里随机取
+    （`random_center_for()`；而不是 `±(band − 半幅)`）；
+  · 越界 guard: **整体等比缩放 + 平移到包络内**（`fit_into_interval()`；而不是绕 0 缩放）；
+  · held（小 yaw 作为保持轴）目标: 行程中心 ± `0.7 × 包络半宽`（保留 0.7 安全余量，
+    因为大 yaw 摆动会通过 M12 把小 yaw 推偏十几度）；
+  · 中止判定: `θ > max` **或** `θ < min`（两个阈值不再同号对称）。
+
+================================================================================
+八、小 yaw 零点标定（配套脚本 python/scripts/calibrate_small_zero.py）
+================================================================================
+
+本仓库另有一个**离心平衡点法**的小 yaw 编码器零位标定脚本（见 docs/small_zero_calib.md）:
+底盘水平时把大 yaw 以恒定 Ω 转起来、小 yaw 松手（力矩 0），它会停到 `μ(θ_s) = 0` 的
+稳定平衡点（上装质心被离心力甩到"大 yaw 轴 ↔ 小 yaw 轴"连线的径向外侧），
+该位置与编码器零位无关 ⇒ 多次测量取平均即可标出零位偏移。
+它同样使用本文件的行程三档与小 yaw 安全判据。
+
+================================================================================
+九、与旧采集脚本（TorqueController/python/scripts/collect_sysid_data.py）的差异
+================================================================================
+
+1. **分轴采集**: 旧脚本只采一个 yaw 轴。新脚本每段只激励**一个**关节（driven），
+   另一个（held）由同一套 PID 守在随机固定位置，**两轴力矩都记录** —— held 轴的力矩
+   是耦合项（M12·θ̈ 等）的观测量，是辨识耦合/惯量的关键通道。
+2. **过热保护换了判据**: 旧脚本靠"两次 PID 移动的角度差 < 20°"猜过热/卡死；新脚本直接
+   用协议里的电机温度 ``yaw_big_temperature`` / ``yaw_small_temperature``（阈值
+   ``--max-temp``），过温就零力矩保温等待降温后重采该段。
+3. **到位移动也整形**: 旧脚本直接把阶跃目标丢给 PID；新脚本把"当前 → 目标"交给同一个
+   轨迹规划器（``homing_sequence``），避免 PID 饱和过冲把小 yaw 顶到 45° 保护。
+4. **PID 状态跨相位连续**: 旧脚本在采样开始时 ``reset()`` PID —— 等于把顶着重力/摩擦的
+   积分力矩瞬间清零，那是一个**未记录的阶跃扰动**；新脚本"到位 → 采样"之间不清零。
+5. **采样后不撒手**: 旧脚本每段结束发零力矩（被激励轴还有残余角速度时，会通过耦合把
+   另一轴推着走）；新脚本每段结束**主动回中保持**，只在程序退出时才连发零力矩。
+6. **参考增强更严格**: 平滑**之后**校验激励幅值（≥14°），不够就放大输入重试、再换窗口
+   —— 旧脚本没有这层校验，可能采到"平滑完几乎不动"的静止段。
+7. **数据格式**: npz + csv 双写，含 ``axis`` / ``held_target`` / ``mcu2_seq`` /
+   底盘数据 / ``big_enc_age`` 以及全部标量元数据（dt、PID 增益、参考来源与幅值）。
+8. **两个关节都要到位**: 旧脚本只有"把单轴 PID 到某角度"；新脚本 driven 与 held **两轴
+   都先 PID 到位并稳定**（未收敛最多再等 2 轮），否则段内会混入未记录的扰动力矩。
+9. **dry-run 内置仿真**: 旧脚本必须有硬件才能跑；新脚本用 ``planar_yaw_model.h`` 的同一
+   组方程在 Python 里积分被控对象（λ=100、0.05 ms 步长），无硬件即可验证全流程与格式。
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import math
+import os
+import sys
+import time
+from collections import deque
+from dataclasses import dataclass, field
+
+import numpy as np
+
+# ── 让脚本能直接 `python3 python/scripts/collect_sysid.py` 跑（不依赖 PYTHONPATH）──
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.abspath(os.path.join(_HERE, os.pardir, os.pardir))
+for _p in (_REPO, os.path.join(_REPO, "python"), _HERE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from torque_controller import TcbsRobotCommunication  # noqa: E402  (低层 ctypes API)
+from trajectory_planner import StepRefinementWrapper, TrajectoryPlanner  # noqa: E402
+
+# ============================================================================
+# 常量（采样/控制规格）
+# ============================================================================
+RATE = 100.0                       # 采样率固定 100 Hz（规格: 不允许更高）
+DT = 1.0 / RATE                    # 0.01 s（写进 npz 的 dt）
+DT_NS = int(round(DT * 1e9))       # 10_000_000 ns
+SAMPLE_LEN = 300                   # 标准段长 = 3 s @100 Hz
+TWO_PI = 2.0 * math.pi
+
+# ── 协议模式位（include/tcbs/communication/Protocol.hpp）──
+YAW_MODE_TORQUE_ONLY = 0           # 0 = 仅力矩（上位机独占力矩通道）
+AUTO_AIM_ENABLE = 1                # 自瞄总开关（与电控手动开关相与）；与旧脚本一致
+PITCH_TARGET_ANGLE = 0.0           # pitch 固定 0（不进动力学）
+
+# ── 上位机 PID（与旧采集脚本一致，两批数据可直接对比/合并）──
+PID_KP, PID_KI, PID_KD = 2.0, 0.1, 0.2
+PID_OUT_MIN, PID_OUT_MAX = -1.0, 1.0
+MAX_TORQUE_DELTA = 0.1             # 相邻两步力矩变化限幅 N·m（保护减速器）
+MAX_TX_FAIL = 50                   # 连续 50 帧发不出去 ⇒ 判定链路断开，报错退出（0.5 s）
+
+# ── 小 yaw 行程限位（**非对称**: −25° … +20°，用户实测机械行程）──
+#   三档含义（详见文件头 "七、小 yaw 行程三档" 与 docs/sysid_data.md §5）:
+#     ① 硬限位（机械行程, 电控侧也按它限位）: [SMALL_TRAVEL_MIN, SMALL_TRAVEL_MAX] = [−25°, +20°]
+#     ② 中止阈值（上位机）: 与硬限位同值 —— 一旦触碰立刻中止本段、数据不保存、PID 回中心
+#     ③ 参考包络（激励/到位/保持都用它）: [SMALL_ENV_MIN, SMALL_ENV_MAX] = [−17°, +12°]
+#        = 硬限位两侧各留 SMALL_TRACK_MARGIN(8°) 的跟踪超调余量
+#   ★ 行程非对称 ⇒ **任何地方都不能再用 ±band 的对称写法**: 一律改成基于 [min, max] 的
+#     区间运算（中心 = (min+max)/2 = −2.5°，而**不是 0**）。
+SMALL_TRAVEL_MIN = math.radians(-25.0)   # 硬限位下界（机械行程）
+SMALL_TRAVEL_MAX = math.radians(20.0)    # 硬限位上界
+SMALL_CENTER_RAD = 0.5 * (SMALL_TRAVEL_MIN + SMALL_TRAVEL_MAX)   # −2.5°（行程几何中心）
+#   ↑ 回中/段尾保持/初始条件都用**行程中心**而不是 0: 行程不对称时 0 偏向 +20° 一侧，
+#     停在中心才能让到两端的余量相等（−2.5° 到 −25° 有 22.5°，到 +20° 有 22.5°）。
+SMALL_ABORT_MIN = SMALL_TRAVEL_MIN       # 中止阈值（规格: 触及硬界限即中止本段）
+SMALL_ABORT_MAX = SMALL_TRAVEL_MAX
+SMALL_WARN_MARGIN = math.radians(3.0)    # 距硬限位 < 3° 只**告警**（不中止）
+SMALL_TRACK_MARGIN = math.radians(8.0)   # 参考包络相对硬限位留的跟踪超调余量（原为 8°）
+SMALL_ENV_MIN = SMALL_TRAVEL_MIN + SMALL_TRACK_MARGIN   # −17°
+SMALL_ENV_MAX = SMALL_TRAVEL_MAX - SMALL_TRACK_MARGIN   # +12°
+SMALL_ENV_HALF = 0.5 * (SMALL_ENV_MAX - SMALL_ENV_MIN)  # 包络半宽 = 14.5°
+SMALL_REF_AMP = SMALL_ENV_HALF           # driven 参考的半幅上限（= 包络半宽）
+#   ↑ PID 跟带尖角（换向）的参考时实际角度会超出参考峰值（仿真实测 2°~14°）:
+#     参考只用到 ±(硬限位 − 8°) 的包络内，实际峰值才有余量不触碰中止阈值。
+HELD_SMALL_MAX = 0.7 * SMALL_ENV_HALF    # held 小 yaw 随机目标半宽（保留 0.7 安全余量）
+#   ↑ driven 轴是**大 yaw** 时，held 小 yaw 的目标在包络内随机抽，但收进 0.7 倍:
+#     大 yaw 摆动会通过 M12 给小 yaw 注入扰动力矩（M12·θ̈_big 可达 ~0.3 N·m），
+#     PID 顶回来需要几度到十几度的瞬时偏差，收窄一点才有余量不触碰中止阈值。
+#     抽取范围 = SMALL_CENTER_RAD ± HELD_SMALL_MAX（⊂ 参考包络），见 docs/sysid_data.md §6.2。
+BIG_REF_AMP = math.radians(60.0)      # driven 大 yaw 参考半幅上限（大 yaw 多圈自由，仅防大摆）
+BIG_CENTER_JITTER = math.radians(30.0)  # driven 大 yaw 参考中心相对当前方位角的随机抖动
+HELD_BIG_OFFSET = math.pi             # held 大 yaw 目标: 现有角度 ±π 内随机（多圈连续）
+BIG_HOME_TOL = 0.05                   # 到位判据（rad）
+SMALL_HOME_TOL = 0.02
+
+# ── 参考幅值: 既要"每段都有有效激励"，又不能超过该轴的安全半幅 ──
+#   下限**按轴给**: 小 yaw 行程只有 45° 宽（包络半宽才 14.5°），下限不能沿用大 yaw 的 14°。
+MIN_EXCITE_AMP_BIG = math.radians(14.0)     # 大 yaw 参考半幅下限（≈14°）
+MIN_EXCITE_AMP_SMALL = math.radians(7.0)    # 小 yaw 参考半幅下限（≈7°: 峰峰 14°，
+#   仍远高于编码器噪声/到位判据 0.02 rad ≈ 1.1°，且能产生可观的力矩变化）
+MIN_SHAPE_SPAN = 0.20                 # 挑选录制窗口的峰峰值下限 rad（≈11°）: 丢掉"平段"
+WINDOW_TRIES = 20                     # 挑窗口最多重试次数（录制序列里有大量静止段）
+AMP_JITTER = (0.6, 1.0)               # 半幅在上限的 60%~100% 间随机（幅值多样性）
+REF_TRIES = 6                         # 参考幅值不达标时换窗口重试次数
+AMP_BOOST_TRIES = 4                   # 平滑抹平了激励时，放大输入重试次数
+AMP_BOOST_FACTOR = 4.0                # 每次放大倍数
+
+# ── 参考轨迹规划器（按轴给参数；理由: 参考必须是执行器跟得动的）──
+#   · 大 yaw: 惯量大、力矩上限 ±1 N·m，允许较快的摆动（主要激励惯量/耦合）
+#   · 小 yaw: 必须一直守在 ±45° 内，参考越"温柔"，PID 跟踪误差越小、越安全
+REFINE_N = 1000                       # StepRefinementWrapper 细化系数（与旧脚本一致）
+BIG_PLANNER = dict(max_velocity=8.0, max_acceleration=30.0, max_jerk=800.0)
+SMALL_PLANNER = dict(max_velocity=3.0, max_acceleration=15.0, max_jerk=400.0)
+
+# ── 时序 ──
+SETTLE_SEC = 2.0                      # 采样前的到位+稳定时间（规格 1.5~2 s）
+SETTLE_MAX_ROUNDS = 3                 # 未收敛时最多再等几轮（每轮 SETTLE_SEC）
+ZERO_FRAMES_AT_EXIT = 20              # 退出前必发的零力矩帧数（规格: 连发几帧）
+MAX_COOL_WAIT_S = 600.0               # 过热等待上限（超过则退出）
+COOL_HYSTERESIS_C = 5.0               # 降温到 max_temp − 5 ℃ 才恢复
+RECENTER_SEC = 1.5                    # 小 yaw 越限后的回中时间
+
+# ── 静态倾斜段（--tilted / --tilt-rolling）──
+#   倾斜只为让重力在 A 系有平面分量（gravity_a[0..1] ≠ 0），从而把 P = m_u·ρ 的回归
+#   条件数改善约两个数量级，见文件头 "五、静态倾斜段" 与 docs/sysid_data.md §6.4。
+#   **倾斜 ≠ 底盘运动**: 采集期间底盘仍是静止的（只是静置姿态不同），
+#   模型外生量 base_omega / base_alpha 依旧取 0。
+TILT_SLOTS = (
+    "+10° 倾角（例如垫起一侧车轮）",
+    "0° 水平（恢复水平静置）",
+    "−10° 倾角（例如垫起另一侧车轮）",
+)
+TILT_CHANGE_SEC = 10.0                # --tilt-rolling: 段间留给操作者改倾角的时间（闭环守位）
+
+# ── 路径 ──
+TARGET_DIR = os.path.join(_REPO, "data", "targets")
+DEFAULT_OUT_DIR = os.path.join(_REPO, "data", "sysid")
+
+# ── 轴编号（写进数据的约定）──
+AXIS_BIG = 0        # 0 = 大 yaw 被激励
+AXIS_SMALL = 1      # 1 = 小 yaw 被激励
+AXIS_NAME = {AXIS_BIG: "big", AXIS_SMALL: "small"}
+
+# ── CSV 列头（前 10 列与 docs/sysid_data.md §2 逐字一致；末尾两列是可选的重力列）──
+#   gravity_ax / gravity_ay: 重力在 **A 系（大 yaw 转子系）** 的平面分量 (m/s²)，
+#   水平静置时 ≈ 0。**追加在最后**是为了让 tools/identify_params.cpp 的按列名取列
+#   (findCol) 继续工作；只有这两列"有非零值"时，下游才会启用重力项。
+CSV_HEADER = ["t", "theta_big", "theta_small", "dtheta_big", "dtheta_small",
+              "tau_big", "tau_small", "axis", "held_target", "mcu2_seq",
+              "gravity_ax", "gravity_ay"]
+
+# ── dry-run 仿真参数（与 mpc/planar_yaw_model.h 的 ModelParams 默认值一致）──
+SIM_INT_STEP = 5e-5          # 0.05 ms 积分步长（RK4 稳定: 摩擦模态时间常数 ~2 ms ≫ 0.05 ms）
+SIM_FRICTION_LAMBDA = 100.0  # ★ 大 λ: 模拟真实库仑摩擦（tanh 软符号很陡）
+SIM_CHASSIS_AZIMUTH = 0.0    # 仿真里底盘静止（底盘数据只记录、不参与拟合）
+SIM_TRANSPORT_DELAY = 0.015  # 链路传输时延（s），与估计器默认 transport_delay_s 一致
+SIM_ENC_NOISE = 2e-5         # 编码器噪声标准差（rad），仅让 PID 微分项有真实感
+
+
+def log(msg: str = "") -> None:
+    """带 flush 的打印（串口/仿真循环里需要立即看到进度）。"""
+    print(msg, flush=True)
+
+
+# ============================================================================
+# 小工具
+# ============================================================================
+def busy_wait_until(target_ns: int) -> None:
+    """忙等到绝对时间点（微秒级抖动；sleep 的毫秒抖动会污染辨识）。"""
+    while time.perf_counter_ns() < target_ns:
+        pass
+
+
+def wrap_pi(x: float) -> float:
+    """把角度折叠到 [−π, π]（大 yaw 多圈方位角/小 yaw 相对角都安全）。"""
+    return math.remainder(x, TWO_PI)
+
+
+def _deg(rad: float) -> float:
+    return math.degrees(rad)
+
+
+def _gravity_a_plane(est):
+    """从估计结果里取重力在 **A 系（大 yaw 转子系）** 的平面分量 ``(gx, gy)``。
+
+    字段名: C API v4 起是 ``gravity_a``（旧版本叫 ``gravity_c``，语义不同），因此这里
+    两种都试着取；字段不存在时返回 ``(0, 0)``（= 与旧数据等价的"水平假设"），
+    保证脚本在任何库版本下都不会因为缺字段而崩掉。
+    """
+    for name in ("gravity_a", "gravity_c"):
+        g = getattr(est, name, None)
+        if g is None:
+            continue
+        try:
+            return float(g[0]), float(g[1])
+        except (TypeError, IndexError, ValueError):
+            continue
+    return 0.0, 0.0
+
+
+# ============================================================================
+# PID + 力矩变化率限幅
+# ============================================================================
+class PidController:
+    """位置式 PID: out = kp·e + ki·∫e + kd·ė，输出限幅 ±1.0 N·m，条件积分抗饱和。
+
+    与旧采集脚本**逐行同构**，便于两批数据合并。
+    """
+
+    def __init__(self, kp, ki, kd, out_min, out_max, name="pid"):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.out_min, self.out_max = out_min, out_max
+        self.name = name
+        self.integral = 0.0
+        self.prev_error = 0.0
+
+    def update(self, error: float, dt: float) -> float:
+        deriv = (error - self.prev_error) / dt if dt > 1e-6 else 0.0
+        self.prev_error = error
+        out = self.kp * error + self.ki * self.integral + self.kd * deriv
+        sat_hi = out > self.out_max
+        sat_lo = out < self.out_min
+        if sat_hi:
+            out = self.out_max
+        if sat_lo:
+            out = self.out_min
+        do_int = True
+        if sat_hi and error > 0:
+            do_int = False
+        if sat_lo and error < 0:
+            do_int = False
+        if do_int:
+            self.integral += error * dt
+        return out
+
+    def reset(self):
+        self.integral = 0.0
+        self.prev_error = 0.0
+
+
+class TorqueRateLimiter:
+    """相邻两步力矩变化 ≤ MAX_TORQUE_DELTA（每轴一个实例，跨相位共享状态）。
+
+    记录进数据的必须是**限幅后真正下发**的值，否则辨识用的力矩 ≠ 实际作用力矩。
+    """
+
+    def __init__(self, max_delta=MAX_TORQUE_DELTA):
+        self.max_delta = max_delta
+        self.last = 0.0
+
+    def limit(self, torque: float) -> float:
+        delta = torque - self.last
+        if delta > self.max_delta:
+            torque = self.last + self.max_delta
+        elif delta < -self.max_delta:
+            torque = self.last - self.max_delta
+        self.last = torque
+        return torque
+
+    def clear(self):
+        self.last = 0.0
+
+
+# ============================================================================
+# 录制目标序列: 加载 / 增强 / 平滑
+# ============================================================================
+def load_all_targets() -> list:
+    """加载 ``data/targets/*.npz`` 的 ``target`` 列（100 Hz 录制的参考角序列, rad）。"""
+    if not os.path.isdir(TARGET_DIR):
+        raise SystemExit(f"[ERROR] 找不到目标序列目录: {TARGET_DIR}")
+    files = sorted(f for f in os.listdir(TARGET_DIR) if f.endswith(".npz"))
+    if not files:
+        raise SystemExit(f"[ERROR] {TARGET_DIR} 下没有 *.npz 目标序列")
+    targets = []
+    for name in files:
+        with np.load(os.path.join(TARGET_DIR, name)) as data:
+            targets.append((name, np.asarray(data["target"], dtype=np.float64)))
+    total = sum(len(t) for _n, t in targets)
+    log(f"加载目标序列: {len(files)} 个文件, 共 {total} 点 @100Hz")
+    return targets
+
+
+def _load_unit_shape(rng, targets, n: int):
+    """随机挑一个"确实有运动"的录制窗口，返回**半幅归一化为 1 的零均值形状**。
+
+    返回 ``(文件名, 起点, 单位形状, 原始半幅)``。
+
+    · **连续化**: 录制的是绝对角度，可能带 ±2π 卷绕 → ``np.unwrap`` 成连续曲线；
+    · **去直流**: 只保留"形状"（激励形态 + 换向次数），绝对位置交给随机中心
+      （给平滑后的序列整体加常量不影响规划器行为: ``step()`` 只看 ``target − p``）；
+    · **挑窗口重试**: 录制序列里存在大量静止段（整段一字不动），随机截取可能截到平段 ——
+      那样的段没有任何激励信息。因此重试直到峰峰值 ≥ ``MIN_SHAPE_SPAN``。
+    """
+    best = None
+    for _ in range(WINDOW_TRIES):
+        idx = int(rng.integers(0, len(targets)))
+        name, arr = targets[idx]
+        if len(arr) <= n:
+            start, seq = 0, arr.copy()
+        else:
+            start = int(rng.integers(0, len(arr) - n + 1))
+            seq = arr[start:start + n].copy()
+        seq = np.unwrap(seq)
+        span = float(seq.max() - seq.min()) if len(seq) else 0.0
+        if best is None or span > best[0]:
+            best = (span, name, start, seq)
+        if span >= MIN_SHAPE_SPAN:
+            break
+    _span, name, start, seq = best
+    seq = seq - float(seq.mean())
+    amp0 = float(np.max(np.abs(seq))) if len(seq) else 0.0
+    if amp0 <= 1e-9:                       # 理论上到不了（上面已挑过有运动的窗口）
+        amp0 = 1.0
+    return name, start, seq / amp0, amp0
+
+
+def build_driven_reference(rng, targets, n: int, cap: float, min_amp: float,
+                           refined: StepRefinementWrapper):
+    """构造 driven 轴的参考: 单位形状 → 随机幅值 → 平滑 → **校验平滑后确实激励起来了**。
+
+    这条流水线必须校验**平滑之后**的幅值，而不是缩放之前的幅值: 录制片段里有不少
+    "尖刺型"窗口（相邻点跳变 1~2 rad），轨迹规划器会把它们抹平成一条几乎不动的直线 ——
+    只看输入幅值会以为"这段有激励"，实际采到的是一段静止数据（实测出现过 3° 的段）。
+    因此: 平滑后幅值 < ``min_amp`` 就**放大输入重试**，仍不行就**换窗口**。
+
+    ``cap`` / ``min_amp`` **按轴给**: 小 yaw 行程只有 45° 宽，包络半宽才 14.5°，
+    所以它的下限（7°）比大 yaw（14°）小得多。
+
+    返回 ``(文件名, 起点, 平滑参考形状, 实际缩放系数)``；参考半幅不超过 ``cap``，
+    且 ≥ ``min_amp``（除非所有候选窗口都是尖刺型，此时取最好的一个并告警）。
+    """
+    best = None
+    for _ in range(REF_TRIES):
+        name, start, unit, amp0 = _load_unit_shape(rng, targets, n)
+        # 目标半幅: 该轴安全上限的 60%~100%，再乘一次随机缩放 ⇒ 幅值有多样性
+        amp_goal = max(min_amp,
+                       cap * float(rng.uniform(*AMP_JITTER)) * float(rng.uniform(0.5, 1.0)))
+        amp_try = amp_goal
+        ref = unit * amp_try
+        amp_now = float(np.max(np.abs(ref))) if len(ref) else 0.0
+        for _boost in range(AMP_BOOST_TRIES):
+            ref = smooth_sequence(unit * amp_try, refined)
+            amp_now = float(np.max(np.abs(ref))) if len(ref) else 0.0
+            if amp_now >= min_amp or amp_now <= 1e-9:
+                break
+            amp_try = min(amp_try * AMP_BOOST_FACTOR, amp_goal * AMP_BOOST_FACTOR ** 2)
+        if best is None or amp_now > best[0]:
+            best = (amp_now, name, start, ref, amp_try, amp0)
+        if amp_now >= min_amp:
+            break
+    amp_now, name, start, ref, amp_try, amp0 = best
+    if amp_now < min_amp:
+        log(f"  [WARN] 参考平滑后幅值仅 {_deg(amp_now):.1f}°（< {_deg(min_amp):.0f}°）: "
+            f"候选窗口都是尖刺型，本段激励偏弱")
+    ref = fit_into_band(ref, cap)          # 统一等比缩放，绝不截断
+    return name, start, ref, (amp_try / amp0)
+
+
+def smooth_sequence(shape: np.ndarray, refined: StepRefinementWrapper) -> np.ndarray:
+    """用 TrajectoryPlanner + StepRefinementWrapper 把形状序列变成**可跟踪的平滑参考**。
+
+    录制序列含真实工况的换向与跳变；直接当参考会让 PID 长期饱和打滑（力矩恒为 ±1，
+    回归矩阵几乎常数，信息量极低）。规划器把参考限制在速度/加速度/加加速度上限内，
+    得到"跟得住"的参考 ⇒ 力矩随工况连续变化，辨识才有信息。
+    """
+    n = len(shape)
+    out = np.zeros(n, dtype=np.float64)
+    pos = float(shape[0])
+    vel = 0.0
+    acc = 0.0
+    for i in range(n):
+        pos, vel, acc, _ = refined.step(float(shape[i]), pos, vel, acc, DT)
+        out[i] = pos
+    return out
+
+
+def fit_into_band(seq: np.ndarray, limit: float) -> np.ndarray:
+    """超范围时**整体等比缩放**到 ±limit 以内（保留轨迹形状，绝不截断）。"""
+    peak = float(np.max(np.abs(seq))) if len(seq) else 0.0
+    if peak > limit and peak > 0.0:
+        seq = seq * (limit / peak)
+    return seq
+
+
+def fit_into_interval(seq: np.ndarray, lo: float, hi: float):
+    """**整体等比缩放 + 平移**，把 ``seq`` 放进非对称区间 ``[lo, hi]``（保形状、绝不截断）。
+
+    为什么不是 ``fit_into_band`` 那种"绕 0 缩放": 小 yaw 行程是 **−25° … +20°** 的非对称区间，
+    绕 0 缩放会把轨迹推向一侧、白吃余量。这里:
+      1) 先按区间**宽度**统一等比缩放（形状不变）: ``k = min(1, (hi−lo)/峰峰值)``；
+      2) 再把缩放后序列的**中点平移到区间中点**（此时必定落在区间内，因为峰峰值 ≤ 宽度）；
+      3) 最后做一次数值兜底平移（浮点误差/极端形状时也不会越界）。
+    返回 ``(新序列, 缩放系数 k, 平移量 shift)``。
+    """
+    seq = np.asarray(seq, dtype=np.float64)
+    if len(seq) == 0:
+        return seq, 1.0, 0.0
+    width = float(hi) - float(lo)
+    span = float(seq.max() - seq.min())
+    k = 1.0 if span <= 1e-12 else min(1.0, width / span)
+    out = seq * k
+    mid = 0.5 * (float(hi) + float(lo))
+    shift = mid - 0.5 * float(out.max() + out.min())      # 中点对齐 ⇒ 整体落在区间内
+    out = out + shift
+    if float(out.max()) > hi:                             # 数值兜底（不该发生）
+        out = out - (float(out.max()) - float(hi))
+    if float(out.min()) < lo:
+        out = out + (float(lo) - float(out.min()))
+    return out, k, shift
+
+
+def random_center_for(rng, amp: float, lo: float, hi: float,
+                      jitter: float | None = None) -> float:
+    """在"让整条 ±amp 的轨迹落在 [lo, hi] 内"的**可行中心区间**里随机取一个中心。
+
+    非对称行程下**不能**再用 ``±(band − amp)`` 那种对称写法:
+    可行中心区间 = ``[lo + amp, hi − amp]``（lo=硬限位下界+余量, hi=硬限位上界−余量）。
+    可行区间为空（幅值比区间还宽）时退回区间中点。
+    """
+    c_lo, c_hi = float(lo) + amp, float(hi) - amp
+    if c_lo > c_hi:
+        return 0.5 * (float(lo) + float(hi))
+    if jitter is not None:                                # 额外围绕区间中点收窄（可选）
+        mid = 0.5 * (float(lo) + float(hi))
+        c_lo, c_hi = max(c_lo, mid - jitter), min(c_hi, mid + jitter)
+        if c_lo > c_hi:
+            c_lo = c_hi = mid
+    return float(rng.uniform(c_lo, c_hi))
+
+
+def homing_sequence(current: float, target: float, n: int,
+                    refined: StepRefinementWrapper) -> np.ndarray:
+    """到位阶段的参考: 把"当前角 → 目标角"的**阶跃**交给同一个轨迹规划器整形。
+
+    为什么不能直接给阶跃: PID 面对阶跃会一直饱和到限幅，靠 kd 与限幅刹车，
+    **必然过冲**（仿真实测: 小 yaw 从 +15° 走到 −31° 时中途冲到 47°，直接触发
+    45° 中止保护，白白浪费一段）。规划器给的参考有速度/加速度/加加速度上限，
+    并且会"提前刹车"，移动平滑且不过冲。
+    """
+    raw = np.empty(n, dtype=np.float64)
+    raw[0] = float(current)
+    raw[1:] = float(target)
+    return smooth_sequence(raw, refined)
+
+
+def make_planners() -> dict:
+    """两条轴的参考规划器（细化 1000 子步/控制周期，与旧脚本一致）。"""
+    return {
+        "big": StepRefinementWrapper(
+            TrajectoryPlanner(**BIG_PLANNER).step, REFINE_N),
+        "small": StepRefinementWrapper(
+            TrajectoryPlanner(**SMALL_PLANNER).step, REFINE_N),
+    }
+
+
+# ============================================================================
+# 数据容器
+# ============================================================================
+class RobotSample:
+    """一次读数。两种链路（真实/仿真）的 ``read()`` 返回同一种对象，
+    采集逻辑因此与硬件完全解耦 —— dry-run 与实机走同一条代码路径。"""
+
+    __slots__ = ("platform_azimuth", "big_joint_angle", "big_joint_rate",
+                 "small_joint_angle", "small_joint_rate", "chassis_yaw",
+                 "chassis_omega", "big_enc_age", "mcu2_seq", "temp_big",
+                 "temp_small", "est_valid", "mcu_valid",
+                 # 重力在 A 系的平面分量（m/s²）；水平静置 ≈ 0；倾斜静置时 ≠ 0
+                 "gravity_ax", "gravity_ay")
+
+    def __init__(self, **kw):
+        for k in self.__slots__:
+            setattr(self, k, kw.get(k, 0.0))
+
+
+@dataclass
+class SegmentPlan:
+    """一段采集的完整计划。"""
+
+    axis: int
+    held_target: float        # held 轴目标角（大 yaw: 平台方位角；小 yaw: 关节角）
+    ref_big: np.ndarray       # 每步大 yaw 目标（平台方位角语义；held 时为常量）
+    ref_small: np.ndarray     # 每步小 yaw 目标（关节角语义；held 时为常量）
+    ref_center: float = 0.0   # driven 参考的随机中心（大 yaw: 平台方位角; 小 yaw: 关节角）
+    ref_amp: float = 0.0      # driven 参考的半幅（相对 ref_center）
+    tilted: int = 0           # 1 = 本段是在 --tilted（静态倾斜静置）下采集的
+    tilt_slot: int = -1       # --tilt-rolling 时的倾角槽位下标（-1 = 未轮换）
+    held_strat_index: int = -1   # --held-big-stratified: 本段 held 方位角的下标
+    held_strat_count: int = 0    # --held-big-stratified: 分层总数（0 = 未启用）
+    held_strat_offset: float = 0.0   # 相对分层基准的偏移 rad
+    src_file: str = ""        # 参考来源（录制文件名）
+    src_start: int = 0        # 参考在录制文件中的起点下标
+    src_scale: float = 0.0    # 随机缩放系数
+
+
+@dataclass
+class SegmentRecord:
+    """一段采集的落盘数据（各列等长，长度 = 段点数）。"""
+
+    t: list = field(default_factory=list)
+    theta_big: list = field(default_factory=list)
+    theta_small: list = field(default_factory=list)
+    dtheta_big: list = field(default_factory=list)
+    dtheta_small: list = field(default_factory=list)
+    tau_big: list = field(default_factory=list)
+    tau_small: list = field(default_factory=list)
+    axis: list = field(default_factory=list)
+    held_target: list = field(default_factory=list)
+    mcu2_seq: list = field(default_factory=list)
+    # ── 只进 npz（用户: "可以记录但拟合不用"）──
+    chassis_yaw: list = field(default_factory=list)
+    chassis_omega: list = field(default_factory=list)
+    big_enc_age: list = field(default_factory=list)
+    # ── 重力平面分量（m/s²）: 逐样本记录；倾斜静置时 ≠ 0，下游据此启用重力项 ──
+    gravity_ax: list = field(default_factory=list)
+    gravity_ay: list = field(default_factory=list)
+    # ── 参考序列（便于复核/画图；拟合不需要）──
+    target_big: list = field(default_factory=list)
+    target_small: list = field(default_factory=list)
+
+    def append(self, row: dict) -> None:
+        for key, value in row.items():
+            getattr(self, key).append(value)
+
+    def __len__(self) -> int:
+        return len(self.t)
+
+
+# ============================================================================
+# 采集计划: driven 参考 + held 目标
+# ============================================================================
+def build_segment_plan(rng, targets, axis: int, st, planners: dict, n: int,
+                       held_big_override: float | None = None) -> SegmentPlan:
+    """构造一段的参考: driven 轴 = 增强后的录制序列；held 轴 = 常量目标。
+
+    · driven = 大 yaw: 参考中心取**现有平台方位角附近**（±BIG_CENTER_JITTER），
+      半幅 ≤ BIG_REF_AMP(60°)；held = 小 yaw 目标在**参考包络内**随机
+      （收进 0.7 倍 ⇒ SMALL_CENTER_RAD ± 10.15°，给大 yaw 摆动经 M12 传来的耦合偏移留余量）。
+    · driven = 小 yaw: 参考落在**非对称参考包络 [−17°, +12°]** 内（硬限位 [−25°, +20°]
+      两侧各留 8° 跟踪超调余量），中心在可行中心区间 [env_min+amp, env_max−amp] 内随机；
+      超出包络时**整体等比缩放 + 平移到包络内**（保形状、不截断）；
+      held = 大 yaw 目标取现有方位角 ±π 内随机（多圈连续，无需限幅）。
+    """
+    if axis == AXIS_BIG:
+        # ── 大 yaw 被激励; 小 yaw 由 PID 保持在包络内的随机固定角 ──
+        held_target = float(SMALL_CENTER_RAD) + float(
+            rng.uniform(-HELD_SMALL_MAX, HELD_SMALL_MAX))
+        name, start, ref_shape, scale = build_driven_reference(
+            rng, targets, n, BIG_REF_AMP, MIN_EXCITE_AMP_BIG, planners["big"])
+        # 随机中心: 现在角度附近 ±BIG_CENTER_JITTER（不跳到大角度，避免采样前的大行程）
+        center = float(st.platform_azimuth) + float(
+            rng.uniform(-BIG_CENTER_JITTER, BIG_CENTER_JITTER))
+        ref_big = ref_shape + center
+        ref_small = np.full(n, held_target, dtype=np.float64)
+        ref_center, ref_amp = center, float(np.max(np.abs(ref_big - center)))
+    else:
+        # ── 小 yaw 被激励; 大 yaw 由 PID 保持在随机方位角 ──
+        held_target = (float(held_big_override) if held_big_override is not None
+                       else float(st.platform_azimuth) + float(
+                           rng.uniform(-HELD_BIG_OFFSET, HELD_BIG_OFFSET)))
+        name, start, ref_shape, scale = build_driven_reference(
+            rng, targets, n, SMALL_REF_AMP, MIN_EXCITE_AMP_SMALL, planners["small"])
+        amp = float(np.max(np.abs(ref_shape)))
+        # 随机中心: 在"让整条轨迹落在参考包络内"的**可行中心区间**里随机取
+        # （非对称行程 ⇒ 不能用 ±(band−amp) 的对称写法）
+        center = random_center_for(rng, amp, SMALL_ENV_MIN, SMALL_ENV_MAX)
+        ref_small = ref_shape + center
+        # 规格: 若仍超出包络（规划器过冲/浮点）→ **整体等比缩放 + 平移到包络内**（不截断）
+        ref_small, _k, _shift = fit_into_interval(ref_small, SMALL_ENV_MIN, SMALL_ENV_MAX)
+        ref_big = np.full(n, held_target, dtype=np.float64)
+        ref_center, ref_amp = center, float(np.max(np.abs(ref_small - center)))
+
+    return SegmentPlan(
+        axis=axis, held_target=held_target,
+        ref_big=np.asarray(ref_big, dtype=np.float64),
+        ref_small=np.asarray(ref_small, dtype=np.float64),
+        ref_center=ref_center, ref_amp=ref_amp,
+        src_file=name, src_start=start, src_scale=scale)
+
+
+# ============================================================================
+# 链路 1: 真实硬件（低层 TcbsRobotCommunication，直接下发力矩）
+# ============================================================================
+class HwRobotLink:
+    """串口链路。**只用低层 API** ``get_latest_data`` / ``get_estimate`` /
+    ``send_to_mcu`` —— 采集必须自己掌握力矩通道，不能用高层 MPC 控制器。"""
+
+    def __init__(self):
+        self.comm = TcbsRobotCommunication()
+        self.tx_fail = 0
+
+    def wait_ready(self, timeout_s: float = 10.0) -> bool:
+        t0 = time.perf_counter()
+        while time.perf_counter() - t0 < timeout_s:
+            data = self.comm.get_latest_data()
+            if data.mcu.valid and data.imu.valid:
+                return True
+            time.sleep(0.01)
+        return False
+
+    def read(self) -> RobotSample:
+        data = self.comm.get_latest_data()
+        est = self.comm.get_estimate()
+        mcu = data.mcu
+        gx, gy = _gravity_a_plane(est)
+        return RobotSample(
+            # 反馈: 大 yaw 用 IMU 直测平台世界方位角（实时、无延迟、多圈解卷绕）
+            platform_azimuth=float(est.platform_azimuth),
+            # 记录用: 大 yaw **延迟补偿后的关节角** + 角速度估计
+            big_joint_angle=float(est.big_joint_angle),
+            big_joint_rate=float(est.big_joint_rate),
+            # 反馈: 小 yaw 编码器（实时可信）
+            small_joint_angle=float(est.small_joint_angle),
+            small_joint_rate=float(est.small_joint_rate),
+            # 底盘数据（只记录，不参与拟合）
+            chassis_yaw=float(est.chassis_azimuth),
+            chassis_omega=float(est.chassis_yaw_rate),
+            big_enc_age=float(est.big_enc_age),
+            mcu2_seq=int(mcu.mcu2_seq),
+            temp_big=int(mcu.yaw_big_temperature),
+            temp_small=int(mcu.yaw_small_temperature),
+            est_valid=int(est.valid),
+            mcu_valid=int(mcu.valid),
+            # 重力在 A 系的平面分量（水平静置 ≈ 0；倾斜静置 ≠ 0）
+            gravity_ax=gx, gravity_ay=gy)
+
+    def send(self, tau_big, tau_small, big_joint_target, small_joint_target) -> bool:
+        # 仅力矩模式（yaw_*_mode = 0）: 电控直接施加 yaw_*_torque。
+        # 目标角/角速度字段在 mode 0 下电控不使用，但仍按"关节角语义"填上当前意图:
+        #   大 yaw = 关节角（多圈连续）; 小 yaw = 相对角（±45° 内）。
+        ok = self.comm.send_to_mcu(
+            auto_aim_enable=AUTO_AIM_ENABLE, fire=0,
+            pitch_target_angle=PITCH_TARGET_ANGLE,
+            yaw_big_mode=YAW_MODE_TORQUE_ONLY,
+            yaw_big_target_angle=float(big_joint_target),
+            yaw_big_target_velocity=0.0,
+            yaw_big_torque=float(tau_big),
+            yaw_small_mode=YAW_MODE_TORQUE_ONLY,
+            yaw_small_target_angle=float(small_joint_target),
+            yaw_small_target_velocity=0.0,
+            yaw_small_torque=float(tau_small))
+        if not ok:
+            self.tx_fail += 1
+            # 连续发不出去 = 串口断了。此时继续"采样"只是在录一份没有力矩的垃圾数据，
+            # 而且电控侧收不到指令会进保护 → 直接报错退出（finally 里仍会尝试发零力矩）。
+            if self.tx_fail >= MAX_TX_FAIL:
+                raise RuntimeError(
+                    f"连续 {self.tx_fail} 帧未写入串口（send_to_mcu 返回 0）—— 链路断开，停止采集")
+        else:
+            self.tx_fail = 0
+        return bool(ok)
+
+    def close(self) -> None:
+        try:
+            self.comm.stop()
+        finally:
+            self.comm.close()
+
+
+# ============================================================================
+# 链路 2: dry-run 内置仿真（planar_yaw_model.h 同方程）
+# ============================================================================
+class PlanarYawPlant:
+    """dry-run 的被控对象: 与 ``include/tcbs/mpc/planar_yaw_model.h`` **同一组方程**。
+
+        Q(θ_s) = R(θ_s)·P,  dQ = d·Q,  μ = 2(d_y Q_x − d_x Q_y)
+        M11 = Jbig_eff + J_s + 2dQ,  M12 = J_s + dQ,  M22 = J_s
+        G_s = Q_x g_y − Q_y g_x,  G_b = m_u_known(d_x g_y − d_y g_x) + G_s
+        h_b = μ θ̇_b θ̇_s + ½μ θ̇_s² − G_b + μ θ̇_s ω_c + M11 α_c + fric_b + τ_off_b
+        h_s = −½μ θ̇_b² − G_s − μ θ̇_b ω_c − ½μ ω_c² + M12 α_c + fric_s + τ_off_s
+        fric = fc·tanh(λ θ̇) + fv θ̇
+        q̈ = M⁻¹(τ − h)          （RK4，力矩零阶保持）
+    """
+
+    def __init__(self, int_step: float = SIM_INT_STEP, tilt_deg: float = 0.0,
+                 gravity_a=None, **overrides):
+        # ★ 真实量级参数（用户 + 原仓库 data/cars/*/params/Identified_parameters.txt:
+        #   J=0.0165/0.0250, tau_c=0.0973/0.1225, b=0.0321/0.0256; 大小 yaw 同量级、
+        #   大 yaw 因承载小 yaw ≈翻倍; 轴间距 ≈0.1 m; 小 yaw 上装 m_u≈0.1 kg、ρ≈0.1 m
+        #   ⇒ |P|≈0.01 kg·m, 方向与 d 偏 30°）
+        p = dict(
+            dx=0.1, dy=0.0, gravity=9.81, m_u_known=0.0,
+            Jbig_eff=0.050, Js=0.020, Px=0.00866, Py=0.005,
+            fcBig=0.22, fvBig=0.055, fcSmall=0.0973, fvSmall=0.028,
+            frictionLambda=SIM_FRICTION_LAMBDA,     # ★ 大 λ = 更接近真实库仑摩擦
+            tau_offset_big=0.0, tau_offset_small=0.0)
+        p.update(overrides)
+        self.p = p
+        self.int_step = float(int_step)
+        self.q = [0.0, 0.0]        # [θ_big, θ_small]
+        self.qd = [0.0, 0.0]
+        # 外生量 (g_x, g_y, ω_c, α_c)。默认底盘**水平静止** ⇒ 重力平面分量为 0、
+        # 底盘角速度/角加速度为 0。两种给重力的方式（这**不是**底盘运动，只是静置姿态不同，
+        # base_omega/base_alpha 仍为 0）:
+        #   · tilt_deg=X  : 绕 y 轴倾斜 X 度 ⇒ g_x = g·sinX, g_y = 0（采集脚本 --tilted 用）
+        #   · gravity_a=(gx, gy): 直接给 A 系平面分量（标定脚本的"倾斜消融"需要 g_y ≠ 0）
+        if gravity_a is None:
+            gx = p["gravity"] * math.sin(math.radians(float(tilt_deg)))
+            gy = 0.0
+        else:
+            gx, gy = float(gravity_a[0]), float(gravity_a[1])
+        self.exo = (gx, gy, 0.0, 0.0)
+
+    # ── 派生量 ──
+    def _derived(self, qs):
+        p = self.p
+        cs, sn = math.cos(qs), math.sin(qs)
+        Qx = p["Px"] * cs - p["Py"] * sn
+        Qy = p["Px"] * sn + p["Py"] * cs
+        dQ = p["dx"] * Qx + p["dy"] * Qy
+        mu = 2.0 * (p["dy"] * Qx - p["dx"] * Qy)
+        M11 = p["Jbig_eff"] + p["Js"] + 2.0 * dQ
+        M12 = p["Js"] + dQ
+        return Qx, Qy, M11, M12, mu
+
+    def _fric(self, w, fc, fv):
+        return fc * math.tanh(self.p["frictionLambda"] * w) + fv * w
+
+    def _h(self, q, qd):
+        p = self.p
+        Qx, Qy, M11, M12, mu = self._derived(q[1])
+        gx, gy, wc, ac = self.exo
+        Gs = Qx * gy - Qy * gx
+        Gb = p["m_u_known"] * (p["dx"] * gy - p["dy"] * gx) + Gs
+        tb, ts = qd[0], qd[1]
+        h0 = (mu * tb * ts + 0.5 * mu * ts * ts - Gb + mu * ts * wc + M11 * ac
+              + self._fric(tb, p["fcBig"], p["fvBig"]) + p["tau_offset_big"])
+        h1 = (-0.5 * mu * tb * tb - Gs - mu * tb * wc - 0.5 * mu * wc * wc + M12 * ac
+              + self._fric(ts, p["fcSmall"], p["fvSmall"]) + p["tau_offset_small"])
+        return M11, M12, h0, h1
+
+    def _accel(self, q, qd, tau):
+        M11, M12, h0, h1 = self._h(q, qd)
+        M22 = self.p["Js"]
+        det = M11 * M22 - M12 * M12
+        if abs(det) <= 1e-12:
+            return 0.0, 0.0
+        inv = 1.0 / det
+        r0 = tau[0] - h0
+        r1 = tau[1] - h1
+        return ((M22 * r0 - M12 * r1) * inv, (-M12 * r0 + M11 * r1) * inv)
+
+    def _rk4(self, hh, tau):
+        q, qd = self.q, self.qd
+        k1 = self._accel(q, qd, tau)
+        q2 = [q[0] + 0.5 * hh * qd[0], q[1] + 0.5 * hh * qd[1]]
+        qd2 = [qd[0] + 0.5 * hh * k1[0], qd[1] + 0.5 * hh * k1[1]]
+        k2 = self._accel(q2, qd2, tau)
+        q3 = [q[0] + 0.5 * hh * qd2[0], q[1] + 0.5 * hh * qd2[1]]
+        qd3 = [qd[0] + 0.5 * hh * k2[0], qd[1] + 0.5 * hh * k2[1]]
+        k3 = self._accel(q3, qd3, tau)
+        q4 = [q[0] + hh * qd3[0], q[1] + hh * qd3[1]]
+        qd4 = [qd[0] + hh * k3[0], qd[1] + hh * k3[1]]
+        k4 = self._accel(q4, qd4, tau)
+        h6 = hh / 6.0
+        self.q = [q[0] + h6 * (qd[0] + 2.0 * qd2[0] + 2.0 * qd3[0] + qd4[0]),
+                  q[1] + h6 * (qd[1] + 2.0 * qd2[1] + 2.0 * qd3[1] + qd4[1])]
+        self.qd = [qd[0] + h6 * (k1[0] + 2.0 * k2[0] + 2.0 * k3[0] + k4[0]),
+                   qd[1] + h6 * (k1[1] + 2.0 * k2[1] + 2.0 * k3[1] + k4[1])]
+
+    def step(self, tau, dt: float) -> None:
+        """积分一个控制周期（力矩零阶保持），内部按 int_step 细分（默认 0.05 ms）。"""
+        n = max(1, int(round(dt / self.int_step)))
+        hh = dt / float(n)
+        for _ in range(n):
+            self._rk4(hh, tau)
+
+
+class SimRobotLink:
+    """无硬件时替代 ``TcbsRobotCommunication``: 内置仿真 + 模拟 MCU2 链路语义。
+
+    仿真对外暴露的字段与实机一致:
+      · ``platform_azimuth`` = 真值平台世界方位角（IMU 直测、实时）
+      · ``small_joint_angle`` = 真值小 yaw 关节角（编码器，加微小噪声）
+      · ``big_joint_angle``   = **延迟补偿**估计 = 最近一次链路新样本值 + 平台角速度×年龄
+      · ``mcu2_seq``/``big_enc_age`` = 模拟 ~10 Hz、间隔不规则、值被保持的 MCU2 链路
+        （年龄从"上位机首次看到该新样本"起算，与估计器语义一致）
+    """
+
+    def __init__(self, rng, int_step: float = SIM_INT_STEP, tilt_deg: float = 0.0):
+        self.rng = rng
+        self.plant = PlanarYawPlant(int_step=int_step, tilt_deg=tilt_deg)
+        self.t = 0.0                 # 仿真时钟（每个控制周期 +DT）
+        self.frames = 0              # 已下发的帧数
+        self._hist = deque(maxlen=128)
+        self._meas = {"q0": 0.0, "t": 0.0, "seq": 0}
+        self._since = 1
+        self._next = 1               # 首帧即视为一次新样本
+
+    def wait_ready(self, timeout_s: float = 10.0) -> bool:
+        return True
+
+    def _lookup(self, t_target: float) -> float:
+        """取 (t_target − 传输时延) 时刻的真值（模拟链路里的采样时刻）。"""
+        best = self._hist[0][1] if self._hist else 0.0
+        for ts, q0, _qd0 in self._hist:
+            if ts <= t_target:
+                best = q0
+            else:
+                break
+        return float(best)
+
+    def read(self) -> RobotSample:
+        q, qd = self.plant.q, self.plant.qd
+        age = max(0.0, self.t - self._meas["t"])
+        platform_rate = qd[0]
+        # 延迟补偿: 一阶（速度）外推 —— 与 YawStateEstimator 的做法一致
+        big_est = self._meas["q0"] + platform_rate * age
+        return RobotSample(
+            platform_azimuth=q[0] + SIM_CHASSIS_AZIMUTH,
+            big_joint_angle=big_est,
+            big_joint_rate=platform_rate,
+            small_joint_angle=q[1] + float(self.rng.normal(0.0, SIM_ENC_NOISE)),
+            small_joint_rate=qd[1],
+            chassis_yaw=SIM_CHASSIS_AZIMUTH,
+            chassis_omega=0.0,
+            big_enc_age=age,
+            mcu2_seq=int(self._meas["seq"]),
+            temp_big=30, temp_small=30,
+            est_valid=1, mcu_valid=1,
+            gravity_ax=float(self.plant.exo[0]), gravity_ay=float(self.plant.exo[1]))
+
+    def send(self, tau_big, tau_small, big_joint_target, small_joint_target) -> bool:
+        self.frames += 1
+        self._hist.append((self.t, self.plant.q[0], self.plant.qd[0]))
+        t_new = self.t + DT
+        # ── 模拟 MCU2 链路: ~10 Hz、间隔不规则（80~120 ms）、两次之间值被保持 ──
+        self._since += 1
+        if self._since >= self._next:
+            self._since = 0
+            self._next = int(self.rng.integers(8, 13))
+            self._meas = {"q0": self._lookup(t_new - SIM_TRANSPORT_DELAY),
+                          "t": t_new,
+                          "seq": (self._meas["seq"] + 1) % 256}
+        self.t = t_new
+        # 被控对象推进一个控制周期（力矩零阶保持，内部 0.05 ms 细分）
+        self.plant.step([float(tau_big), float(tau_small)], DT)
+        return True
+
+    def close(self) -> None:
+        pass
+
+
+# ============================================================================
+# 控制相位驱动（到位 / 采样 / 回中 共用同一段代码）
+# ============================================================================
+def drive_steps(link, ref_big: np.ndarray, ref_small: np.ndarray, pids, limiters,
+                max_temp: float, small_guard: bool = True,
+                record: SegmentRecord | None = None, axis: int = AXIS_BIG,
+                held_target: float = 0.0):
+    """按 100 Hz 跑完 ``len(ref_big)`` 个控制周期（绝对时间点忙等）。
+
+    返回 ``(abort_reason, steps_done)``；``abort_reason`` 为 None 表示正常结束。
+    每个周期: 读状态 → 安全检查 → 两轴 PID → 各轴力矩限幅 → 仅力矩下发 →（可选）记录。
+    """
+    n = len(ref_big)
+    t0_ns = time.perf_counter_ns()
+    for k in range(n):
+        busy_wait_until(t0_ns + k * DT_NS)
+        st = link.read()
+
+        # ── 安全 1: 小 yaw 硬限位（**非对称** −25°/+20°; 规格: 触及即中止本段）──
+        if small_guard:
+            th_s = float(st.small_joint_angle)
+            if th_s > SMALL_ABORT_MAX or th_s < SMALL_ABORT_MIN:
+                log(f"  [SAFETY] 小 yaw θ={_deg(th_s):+.1f}° 触及行程界限 "
+                    f"[{_deg(SMALL_ABORT_MIN):+.0f}°, {_deg(SMALL_ABORT_MAX):+.0f}°] "
+                    f"→ 中止本段并回中心")
+                return "small_limit", k
+            if (th_s > SMALL_ABORT_MAX - SMALL_WARN_MARGIN
+                    or th_s < SMALL_ABORT_MIN + SMALL_WARN_MARGIN) and k % 50 == 0:
+                log(f"  [WARN] 小 yaw θ={_deg(th_s):+.1f}° 已接近行程界限"
+                    f"（余量 < {_deg(SMALL_WARN_MARGIN):.0f}°）")
+        # ── 安全 2: 电机温度 ──
+        if max(st.temp_big, st.temp_small) >= max_temp:
+            return "overheat", k
+
+        tgt_big = float(ref_big[k])
+        tgt_small = float(ref_small[k])
+        # 误差: 大 yaw 用平台方位角（多圈，wrap 到 ±π）；小 yaw 相对角误差本身 ≪π，wrap 无副作用
+        e_big = wrap_pi(tgt_big - st.platform_azimuth)
+        e_small = wrap_pi(tgt_small - st.small_joint_angle)
+        tau_big = limiters[0].limit(pids[0].update(e_big, DT))
+        tau_small = limiters[1].limit(pids[1].update(e_small, DT))
+        # 下发给电控的"关节角目标"（mode=0 时电控不使用，仅供电控限位/日志参考）:
+        #   大 yaw = 估计关节角 + 平台误差; 小 yaw = 关节相对角目标
+        big_joint_target = st.big_joint_angle + e_big
+        link.send(tau_big, tau_small, big_joint_target, tgt_small)
+
+        if record is not None:
+            record.append(dict(
+                t=(time.perf_counter_ns() - t0_ns) * 1e-9,       # 段内秒（perf_counter 之差）
+                theta_big=st.big_joint_angle,                    # 延迟补偿估计的关节角
+                theta_small=st.small_joint_angle,                # 编码器（可信）
+                dtheta_big=st.big_joint_rate,
+                dtheta_small=st.small_joint_rate,
+                tau_big=tau_big,                                 # 限幅后真正下发的力矩
+                tau_small=tau_small,
+                axis=axis,
+                held_target=held_target,
+                mcu2_seq=st.mcu2_seq,
+                chassis_yaw=st.chassis_yaw,
+                chassis_omega=st.chassis_omega,
+                big_enc_age=st.big_enc_age,
+                gravity_ax=st.gravity_ax,       # 重力 A 系平面分量（水平≈0; 倾斜≠0）
+                gravity_ay=st.gravity_ay,
+                target_big=tgt_big,
+                target_small=tgt_small))
+    return None, n
+
+
+def run_zero_torque(link, limiters, seconds: float, stop_temp: float | None = None):
+    """零力矩保温（过热等待用）: 100 Hz 发零力矩，必要时监测温度。
+
+    返回 ``(ok, cooled)``；``stop_temp`` 给定时，温度降到该值以下提前返回 True。
+    """
+    n = max(1, int(round(seconds * RATE)))
+    t0_ns = time.perf_counter_ns()
+    cooled = False
+    for k in range(n):
+        busy_wait_until(t0_ns + k * DT_NS)
+        tb = limiters[0].limit(0.0)
+        ts = limiters[1].limit(0.0)
+        link.send(tb, ts, 0.0, 0.0)
+        if stop_temp is not None and k % 100 == 99:
+            st = link.read()
+            if k % 1000 == 999:
+                log(f"    降温中… temp=({st.temp_big},{st.temp_small})℃")
+            if max(st.temp_big, st.temp_small) < stop_temp:
+                cooled = True
+                break
+    return True, cooled
+
+
+def cooldown(link, limiters, max_temp: float, reason: str) -> bool:
+    """过热保护: 零力矩 + 100 Hz 保温等待降温（规格: 等待或退出）。"""
+    target = max_temp - COOL_HYSTERESIS_C
+    log(f"  [SAFETY] {reason}: 零力矩降温等待（目标 < {target:.0f}℃, 上限 "
+        f"{MAX_COOL_WAIT_S:.0f}s）")
+    ok, cooled = run_zero_torque(link, limiters, MAX_COOL_WAIT_S, stop_temp=target)
+    if cooled:
+        log("    温度已回落，继续采集")
+        return True
+    log(f"    [ERROR] {MAX_COOL_WAIT_S:.0f}s 内未降到 {target:.0f}℃ 以下")
+    return False
+
+
+def recenter(link, pids, limiters, max_temp: float, seconds: float = RECENTER_SEC) -> None:
+    """回中心/守位: 小 yaw 回到**行程中心 −2.5°**，大 yaw 保持在当前平台方位角。
+
+    为什么是行程中心而不是 0: 小 yaw 行程是**非对称**的 [−25°, +20°]，0 并不在几何中心 ——
+    停在 −2.5° 时到两端的余量相等（各 22.5°），这是"段间静置/初始条件"最安全的位置；
+    若停在 0，则朝 +20° 一侧只剩 20° 余量、朝 −25° 一侧有 25°，偏置一侧更容易先撞界。
+
+    用在小 yaw 触碰行程界限之后、每段结束、以及 `--tilt-rolling` 段间改倾角的等待
+    （倾斜后重力会在小 yaw 上产生力矩，"撒手"会让它自己滑到限位，所以这里保持闭环）。
+    过程中关闭小 yaw 限位判定（否则刚越限时会被立刻再次中止），力矩仍受限幅保护。
+    """
+    st = link.read()
+    n = max(1, int(round(seconds * RATE)))
+    ref_big = np.full(n, float(st.platform_azimuth), dtype=np.float64)
+    ref_small = np.full(n, float(SMALL_CENTER_RAD), dtype=np.float64)
+    pids[0].reset()
+    pids[1].reset()
+    drive_steps(link, ref_big, ref_small, pids, limiters, max_temp, small_guard=False)
+
+
+# ============================================================================
+# 保存（npz + csv 同时写）
+# ============================================================================
+def _unique_paths(out_dir: str, tag: str, segment_index: int):
+    base = f"sysid_{tag}_{time.strftime('%Y%m%d_%H%M%S')}_{segment_index:02d}"
+    npz_path = os.path.join(out_dir, base + ".npz")
+    csv_path = os.path.join(out_dir, base + ".csv")
+    k = 1
+    while os.path.exists(npz_path) or os.path.exists(csv_path):
+        npz_path = os.path.join(out_dir, f"{base}_{k}.npz")
+        csv_path = os.path.join(out_dir, f"{base}_{k}.csv")
+        k += 1
+    return npz_path, csv_path
+
+
+def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
+                 tag_override: str | None, segment_index: int):
+    """同时写 npz 与 csv。npz 里的 ``axis``/``held_target`` 是**标量**（段内恒定），
+    CSV 里它们是每行一列（同值）；其余列一一对应。详见 docs/sysid_data.md。
+
+    CSV = 10 个固定列 + 末尾两列 ``gravity_ax,gravity_ay``（重力 A 系平面分量，
+    水平静置时全 0）——追加在最后，保证 tools/identify_params.cpp 的按列名取列不失效。
+    """
+    tag = tag_override or AXIS_NAME[plan.axis]
+    npz_path, csv_path = _unique_paths(out_dir, tag, segment_index)
+    axis = int(plan.axis)
+
+    def arr(name):
+        return np.asarray(getattr(rec, name), dtype=np.float64)
+
+    np.savez(
+        npz_path,
+        # ── 与 CSV 逐列对应的时段数组 ──
+        t=arr("t"), theta_big=arr("theta_big"), theta_small=arr("theta_small"),
+        dtheta_big=arr("dtheta_big"), dtheta_small=arr("dtheta_small"),
+        tau_big=arr("tau_big"), tau_small=arr("tau_small"),
+        mcu2_seq=np.asarray(rec.mcu2_seq, dtype=np.int64),
+        # ── 底盘/诊断（用户: 可以记录但拟合不用）──
+        chassis_yaw=arr("chassis_yaw"), chassis_omega=arr("chassis_omega"),
+        big_enc_age=arr("big_enc_age"),
+        # ── 重力 A 系平面分量（m/s²）: 水平静置全 0；倾斜静置非 0 ⇒ 下游启用重力项 ──
+        gravity_ax=arr("gravity_ax"), gravity_ay=arr("gravity_ay"),
+        # ── 下发的参考（便于复核/画图）──
+        target_big=arr("target_big"), target_small=arr("target_small"),
+        # ── 标量元数据（规格要求）──
+        axis=np.int32(axis),
+        dt=np.float64(DT),
+        held_target=np.float64(plan.held_target),
+        kp=np.float64(PID_KP), ki=np.float64(PID_KI), kd=np.float64(PID_KD),
+        # ── 附加元数据（便于溯源；不影响拟合）──
+        n_points=np.int32(len(rec)),
+        rate=np.float64(RATE),
+        pid_out_limit=np.float64(PID_OUT_MAX),
+        max_torque_delta=np.float64(MAX_TORQUE_DELTA),
+        tag=np.str_(tag),
+        source_file=np.str_(plan.src_file),
+        source_start=np.int32(plan.src_start),
+        source_scale=np.float64(plan.src_scale),
+        ref_center=np.float64(plan.ref_center),
+        ref_amp=np.float64(plan.ref_amp),
+        # ── 静态倾斜段标记（--tilted / --tilt-rolling）──
+        tilted=np.int32(plan.tilted),
+        tilt_slot=np.int32(plan.tilt_slot),
+        # ── held 大 yaw 方位角分层（--held-big-stratified）──
+        held_big_stratified=np.int32(1 if plan.held_strat_count else 0),
+        held_strat_index=np.int32(plan.held_strat_index),
+        held_strat_count=np.int32(plan.held_strat_count),
+        held_strat_offset=np.float64(plan.held_strat_offset),
+        # ── 小 yaw 行程（**非对称**）: 三档数值都写进去，便于下游核对待遇 ──
+        small_travel_min=np.float64(SMALL_TRAVEL_MIN),
+        small_travel_max=np.float64(SMALL_TRAVEL_MAX),
+        small_env_min=np.float64(SMALL_ENV_MIN),
+        small_env_max=np.float64(SMALL_ENV_MAX),
+        small_center=np.float64(SMALL_CENTER_RAD))
+
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.writer(fh, lineterminator="\n")
+        writer.writerow(CSV_HEADER)
+        for i in range(len(rec)):
+            writer.writerow([
+                f"{rec.t[i]:.4f}",
+                f"{rec.theta_big[i]:.6f}",
+                f"{rec.theta_small[i]:.6f}",
+                f"{rec.dtheta_big[i]:.6f}",
+                f"{rec.dtheta_small[i]:.6f}",
+                f"{rec.tau_big[i]:.6f}",
+                f"{rec.tau_small[i]:.6f}",
+                axis,
+                f"{plan.held_target:.6f}",
+                int(rec.mcu2_seq[i]),
+                # ── 末尾两列: 重力 A 系平面分量（水平静置全 0）──
+                f"{rec.gravity_ax[i]:.6f}",
+                f"{rec.gravity_ay[i]:.6f}",
+            ])
+    return npz_path, csv_path
+
+
+# ============================================================================
+# 单段采集
+# ============================================================================
+def tilt_banner(segment_index: int, slot: int, rolling: bool) -> None:
+    """静态倾斜段的显著提示（每段一次）。
+
+    **只提示，不做任何补偿**: 脚本不会去估计/抵消倾角，也不改变激励方式 ——
+    模型的重力项 `G_s = Qx·gy − Qy·gx` 只在数据里"本来就非零"时才有信息量，
+    由下游辨识工具决定是否启用（见 docs/sysid_data.md §6.4）。
+    """
+    name = TILT_SLOTS[slot % len(TILT_SLOTS)]
+    log("  " + "!" * 74)
+    log(f"  !! 静态倾斜段（--tilted）  第 {segment_index + 1} 段")
+    if rolling:
+        log(f"  !! 本段要求的静置姿态: 【{name}】")
+    else:
+        log(f"  !! 请把底盘以固定倾角静置（例如垫起一侧车轮，约 10°）: 建议【{name}】")
+    log("  !! 采集期间底盘**保持静止不动**（倾斜 ≠ 底盘运动: 模型里 base_omega/")
+    log("  !! base_alpha 仍取 0）; 脚本不做事后倾角补偿，重力分量原样记录进数据。")
+    log("  " + "!" * 74)
+
+
+def collect_segment(link, rng, targets, planners, pids, limiters, args,
+                    segment_index: int, samples: int):
+    """采集一段。返回 ``"saved"`` / ``"retry"``（过热，未保存）/ ``"abort"``（中止，未保存）。"""
+    axis = AXIS_BIG if segment_index % 2 == 0 else AXIS_SMALL
+    drive_axis = AXIS_NAME[axis]
+    hold_axis = AXIS_NAME[AXIS_SMALL if axis == AXIS_BIG else AXIS_BIG]
+
+    st = link.read()
+    log(f"\n=== 段 {segment_index + 1} === driven={drive_axis} 轴 / held={hold_axis} 轴"
+        f"  温度=({st.temp_big},{st.temp_small})℃")
+    if max(st.temp_big, st.temp_small) >= args.max_temp:
+        if not cooldown(link, limiters, args.max_temp, "段前温度过高"):
+            return "abort"
+        st = link.read()
+
+    # ── 静态倾斜段: 每段前显著提示（默认关闭，开启时元数据记 tilted=1）──
+    tilt_slot = -1
+    if args.tilted:
+        tilt_slot = segment_index % len(TILT_SLOTS)
+        tilt_banner(segment_index, tilt_slot, bool(args.tilt_rolling))
+        if args.tilt_rolling and segment_index > 0:
+            # 段间给操作者留出改倾角的时间。期间**保持闭环守位**（不是撒手零力矩）:
+            # 倾斜后重力会在小 yaw 上产生力矩，撒手会让它自己滑到限位。
+            log(f"  请在 {TILT_CHANGE_SEC:.0f}s 内把底盘调到该倾角（两轴保持闭环守位）…")
+            recenter(link, pids, limiters, args.max_temp, seconds=TILT_CHANGE_SEC)
+            st = link.read()
+
+    # ── 分层 held 大 yaw 方位角（可选）: 均匀铺满 ±π, 让固定倾角下的 g_A 方向覆盖更均匀 ──
+    held_override = None
+    strat_k = -1
+    if getattr(args, "held_big_stratified", False) and axis == AXIS_SMALL:
+        n_small = max(1, args.segments // 2)
+        strat_k = segment_index // 2
+        if getattr(args, "_held_base", None) is None:
+            args._held_base = float(st.platform_azimuth)
+        held_override = args._held_base + (-math.pi + (strat_k + 0.5)
+                                           * 2.0 * math.pi / n_small)
+        log(f"  held 大 yaw 方位角（分层 {strat_k + 1}/{n_small}）= "
+            f"{held_override:+.3f} rad ({_deg(held_override):+.1f}°)"
+            f"（基准 {args._held_base:+.3f} rad, 偏移 "
+            f"{_deg(held_override - args._held_base):+.1f}°）")
+
+    plan = build_segment_plan(rng, targets, axis, st, planners, samples,
+                              held_big_override=held_override)
+    plan.tilted = 1 if args.tilted else 0
+    plan.tilt_slot = tilt_slot
+    plan.held_strat_index = strat_k
+    plan.held_strat_count = (max(1, args.segments // 2)
+                             if getattr(args, "held_big_stratified", False) else 0)
+    plan.held_strat_offset = (held_override - args._held_base) if held_override is not None else 0.0
+    log(f"  参考来源: {plan.src_file}[{plan.src_start}:{plan.src_start + samples}] "
+        f"随机缩放={plan.src_scale:.2f}")
+    if axis == AXIS_BIG:
+        log(f"  driven 大 yaw: 中心={plan.ref_center:+.3f} rad "
+            f"半幅=±{plan.ref_amp:.3f} rad(±{_deg(plan.ref_amp):.1f}°)")
+        log(f"  held   小 yaw: 目标={plan.held_target:+.3f} rad "
+            f"({_deg(plan.held_target):+.1f}°)  [包络 "
+            f"{_deg(SMALL_ENV_MIN):+.0f}°…{_deg(SMALL_ENV_MAX):+.0f}°]")
+    else:
+        log(f"  driven 小 yaw: 中心={plan.ref_center:+.3f} rad"
+            f"({_deg(plan.ref_center):+.1f}°) 半幅=±{plan.ref_amp:.3f} rad"
+            f"(±{_deg(plan.ref_amp):.1f}°)")
+        log(f"    整条位于参考包络 [{_deg(SMALL_ENV_MIN):+.0f}°, {_deg(SMALL_ENV_MAX):+.0f}°] 内"
+            f"（硬限位 [{_deg(SMALL_TRAVEL_MIN):+.0f}°, {_deg(SMALL_TRAVEL_MAX):+.0f}°]，"
+            f"两侧各留 {_deg(SMALL_TRACK_MARGIN):.0f}° 跟踪余量; 中心 {_deg(SMALL_CENTER_RAD):+.1f}°）")
+        log(f"  held   大 yaw: 目标={plan.held_target:+.3f} rad（现有方位角 ±π 内随机）")
+
+    # ── 到位: 两个关节都像 driven 轴一样 PID 到位并稳定（规格 1.5~2 s）──
+    #    参考由轨迹规划器整形（不是阶跃），避免饱和过冲、也避免把小 yaw 顶到 45° 保护
+    settle_n = max(1, int(round(args.settle_sec * RATE)))
+    pids[0].reset()
+    pids[1].reset()
+    settled = False
+    for round_i in range(SETTLE_MAX_ROUNDS):
+        st = link.read()
+        ref_big_home = homing_sequence(st.platform_azimuth, float(plan.ref_big[0]),
+                                       settle_n, planners["big"])
+        ref_small_home = homing_sequence(st.small_joint_angle, float(plan.ref_small[0]),
+                                         settle_n, planners["small"])
+        reason, _ = drive_steps(link, ref_big_home, ref_small_home, pids, limiters,
+                                args.max_temp)
+        if reason == "small_limit":
+            recenter(link, pids, limiters, args.max_temp)
+            return "abort"
+        if reason == "overheat":
+            if not cooldown(link, limiters, args.max_temp, "到位阶段温度过高"):
+                return "abort"
+            return "retry"
+        st = link.read()
+        e_big = wrap_pi(plan.ref_big[0] - st.platform_azimuth)
+        e_small = wrap_pi(plan.ref_small[0] - st.small_joint_angle)
+        log(f"  到位 {round_i + 1}/{SETTLE_MAX_ROUNDS}: "
+            f"err_big={_deg(e_big):+.2f}° err_small={_deg(e_small):+.2f}°")
+        if abs(e_big) < BIG_HOME_TOL and abs(e_small) < SMALL_HOME_TOL:
+            settled = True
+            break
+    if not settled:
+        log("  [WARN] 到位判据未满足（继续采样；起始段可能有残余瞬态）")
+
+    # ── 采样: 300 点 @100 Hz ──
+    log(f"  采样 {samples} 点 ({samples * DT:.2f} s @100Hz)…")
+    rec = SegmentRecord()
+    reason, steps_done = drive_steps(link, plan.ref_big, plan.ref_small, pids, limiters,
+                                     args.max_temp, record=rec, axis=axis,
+                                     held_target=plan.held_target)
+
+    if reason == "small_limit":
+        recenter(link, pids, limiters, args.max_temp)
+        log("  [SKIP] 本段因小 yaw 越限中止，数据不保存")
+        return "abort"
+    if reason == "overheat":
+        if not cooldown(link, limiters, args.max_temp, "采样阶段温度过高"):
+            return "abort"
+        log("  [SKIP] 本段因过热中止，数据不保存（降温后重采）")
+        return "retry"
+    if steps_done != samples:
+        log(f"  [SKIP] 只采到 {steps_done}/{samples} 点，丢弃")
+        return "abort"
+
+    # ── 段尾: 主动回中保持（小 yaw → 0，大 yaw 保持当前方位角）──
+    #    比"直接零力矩撒手"更安全: 段末被激励轴仍有残余角速度，它通过耦合会把
+    #    已撒手的另一轴推着走（仿真实测可漂 20°+），主动闭环可以把它按回去。
+    #    * 真正的"零力矩"只在程序退出时发（规格要求），见 safe_shutdown()。
+    recenter(link, pids, limiters, args.max_temp)
+
+    npz_path, csv_path = save_segment(rec, plan, args.out, args.tag, segment_index)
+    log(f"  保存: {npz_path}")
+    log(f"        {csv_path}  ({len(rec)} 行)")
+    return "saved"
+
+
+# ============================================================================
+# 退出: 任何路径都走这里（力矩斜坡到零 + 连发零力矩）
+# ============================================================================
+def safe_shutdown(link, limiters) -> None:
+    """退出前: 按 0.1 N·m/步的斜坡把力矩压到 0，再连发若干帧"纯零力矩"。
+
+    斜坡而不是直接置零: 力矩阶跃会激发齿隙冲击（保护减速器）；斜坡总共 ≤ 0.4 s。
+    """
+    limiters[0].last = float(limiters[0].last)
+    limiters[1].last = float(limiters[1].last)
+    t0_ns = time.perf_counter_ns()
+    k = 0
+    ok = True
+    try:
+        while k < 40 and (abs(limiters[0].last) > 1e-12 or abs(limiters[1].last) > 1e-12):
+            busy_wait_until(t0_ns + k * DT_NS)
+            k += 1
+            tb = limiters[0].limit(0.0)
+            ts = limiters[1].limit(0.0)
+            link.send(tb, ts, 0.0, 0.0)
+        limiters[0].clear()
+        limiters[1].clear()
+        for i in range(ZERO_FRAMES_AT_EXIT):
+            busy_wait_until(t0_ns + (k + i) * DT_NS)
+            link.send(0.0, 0.0, 0.0, 0.0)
+    except KeyboardInterrupt:
+        # Ctrl+C 之后仍然尽力把零力矩发出去
+        try:
+            for _ in range(ZERO_FRAMES_AT_EXIT):
+                link.send(0.0, 0.0, 0.0, 0.0)
+        except Exception:
+            ok = False
+    except Exception as exc:  # pragma: no cover - 串口异常
+        ok = False
+        log(f"  [WARN] 退出时发零力矩失败: {exc}")
+    log(f"  已发送 {ZERO_FRAMES_AT_EXIT} 帧零力矩并停止" if ok
+        else "  [WARN] 零力矩帧未能全部发出（链路已断）")
+
+
+# ============================================================================
+# 命令行
+# ============================================================================
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="双级 yaw 系统辨识数据采集（分轴激励 + 录制序列增强 + 上位机 PID）",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("--segments", type=int, default=1, help="采集段数（偶数段驱动大 yaw，奇数段驱动小 yaw）")
+    p.add_argument("--duration-sec", type=float, default=3.0,
+                   help="每段秒数（标准 3 s = 300 点 @100 Hz）")
+    p.add_argument("--rate", type=float, default=RATE,
+                   help="采样率 Hz（**固定 100**；传更高会被拒绝并回到 100）")
+    p.add_argument("--out", default=DEFAULT_OUT_DIR, help="保存目录")
+    p.add_argument("--tag", default=None, help="文件名 tag（默认按 axis 自动取 big/small）")
+    p.add_argument("--seed", type=int, default=42, help="随机数种子（增强可复现）")
+    p.add_argument("--max-temp", type=float, default=55.0, help="电机过温阈值 ℃")
+    p.add_argument("--settle-sec", type=float, default=SETTLE_SEC,
+                   help="采样前到位+稳定时间 s（规格 1.5~2 s）")
+    p.add_argument("--tilted", action="store_true",
+                   help="静态倾斜段: 每段前提示把底盘以固定倾角静置（**不做任何倾角补偿、"
+                        "不改变激励方式**），并把 gravity_ax/ay 记进数据、元数据记 tilted=1")
+    p.add_argument("--tilt-rolling", action="store_true",
+                   help="静态倾斜段 + 段间提示操作者轮换倾角（隐含 --tilted）；"
+                        "段与段之间留出改倾角的时间，采集期间底盘仍然不动")
+    p.add_argument("--held-big-stratified", action="store_true",
+                   help="小 yaw 被激励的段里, held 大 yaw 方位角**按下标均匀铺满 ±π**"
+                        "（默认关: 纯随机 ±π）。固定一个底盘倾角时, 这样能让 A 系里的 "
+                        "g_A 方向覆盖更均匀 ⇒ P 的条件数更好")
+    p.add_argument("--dry-run", action="store_true",
+                   help="无硬件自检: 用内置仿真（planar_yaw_model.h 同方程）代替串口")
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_arg_parser().parse_args(argv)
+
+    # ── 采样率: 固定 100 Hz，不允许更高 ──
+    if abs(args.rate - RATE) > 1e-9:
+        log(f"[WARN] --rate={args.rate:g} 不被支持: 采集固定 {RATE:g} Hz"
+            f"（更高频率只会重复下发同一份估计值，破坏力矩-状态的时间对应关系）→ 使用 {RATE:g} Hz")
+        args.rate = RATE
+    samples = int(round(args.duration_sec * RATE))
+    if samples != SAMPLE_LEN:
+        log(f"[WARN] --duration-sec={args.duration_sec:g} → {samples} 点（标准段为 "
+            f"{SAMPLE_LEN} 点 = 3 s @100Hz）")
+    if samples <= 0:
+        raise SystemExit("[ERROR] --duration-sec 必须 > 0")
+
+    # ── 静态倾斜段: --tilt-rolling 隐含 --tilted（只提示 + 记录，不改激励、不做补偿）──
+    if args.tilt_rolling and not args.tilted:
+        log("[INFO] --tilt-rolling 隐含 --tilted（段间会提示轮换倾角）")
+        args.tilted = True
+
+    os.makedirs(args.out, exist_ok=True)
+    targets = load_all_targets()
+    planners = make_planners()
+    rng = np.random.default_rng(args.seed)
+    pids = [PidController(PID_KP, PID_KI, PID_KD, PID_OUT_MIN, PID_OUT_MAX, "big"),
+            PidController(PID_KP, PID_KI, PID_KD, PID_OUT_MIN, PID_OUT_MAX, "small")]
+    limiters = [TorqueRateLimiter(), TorqueRateLimiter()]
+
+    log("=" * 78)
+    log("双级 yaw 系统辨识数据采集 — 分轴激励（录制序列 + 增强 + 上位机 PID）")
+    log(f"  段数={args.segments}  每段={samples} 点 ({samples * DT:.2f}s @{RATE:g}Hz)  "
+        f"到位={args.settle_sec:g}s  种子={args.seed}")
+    log(f"  PID: kp={PID_KP} ki={PID_KI} kd={PID_KD} 输出限幅 ±{PID_OUT_MAX:g} N·m  "
+        f"力矩变化限幅 {MAX_TORQUE_DELTA:g} N·m/步")
+    log(f"  仅力矩模式(mode=0)  pitch=0  小 yaw 行程="
+        f"[{_deg(SMALL_TRAVEL_MIN):+.0f}°, {_deg(SMALL_TRAVEL_MAX):+.0f}°]（非对称）"
+        f"  参考包络=[{_deg(SMALL_ENV_MIN):+.0f}°, {_deg(SMALL_ENV_MAX):+.0f}°]"
+        f"  中止阈值=同硬限位  中心={_deg(SMALL_CENTER_RAD):+.1f}°  过温={args.max_temp:g}℃")
+    if getattr(args, "held_big_stratified", False):
+        n_small = max(1, args.segments // 2)
+        offs = [(-180.0 + (k + 0.5) * 360.0 / n_small) for k in range(n_small)]
+        log(f"  ★ held 大 yaw 方位角分层: 开（{n_small} 个小 yaw 段）; 相对首个"
+            f"小 yaw 段的平台方位角的偏移 = [{', '.join(f'{o:+.1f}°' for o in offs)}]"
+            f" ⇒ 固定一个倾角时 A 系里的 g_A 方向覆盖 ±π")
+    if args.tilted:
+        log(f"  静态倾斜段: 开（tilted=1{'; 段间轮换倾角' if args.tilt_rolling else ''}）"
+            f" —— 只提示静置姿态 + 记录 gravity_ax/ay，不做补偿、不改激励")
+    log(f"  保存目录: {args.out}")
+    if args.dry_run:
+        log("  [DRY-RUN] 无硬件: 用内置仿真代替串口"
+            f"（planar_yaw_model.h 同方程, λ={SIM_FRICTION_LAMBDA:g}, "
+            f"积分步长 {SIM_INT_STEP * 1e3:.3f} ms）")
+    log("=" * 78)
+
+    args._held_base = None          # --held-big-stratified 的基准平台方位角（首个小 yaw 段时确定）
+    link = SimRobotLink(rng) if args.dry_run else HwRobotLink()
+    saved, attempts = 0, 0
+    exit_code = 0
+    interrupted = False
+    try:
+        if not link.wait_ready(15.0):
+            log("[ERROR] 15s 内没有收到有效的 MCU/IMU 数据（串口未连接？）")
+            return 2
+        log("数据链路就绪")
+
+        idx = 0                                   # 逻辑段号（决定 driven 轴与文件名序号）
+        while idx < args.segments:
+            attempts += 1
+            if attempts > args.segments * 4:
+                log("[ERROR] 连续中止/过热次数过多，退出")
+                exit_code = 1
+                break
+            result = collect_segment(link, rng, targets, planners, pids, limiters,
+                                     args, idx, samples)
+            if result == "saved":
+                saved += 1
+                idx += 1
+            elif result == "retry":
+                continue                          # 过热: 重采同一段号
+            else:
+                log("  [SKIP] 本段中止（小 yaw 越限或链路异常），跳过该段号")
+                idx += 1
+    except KeyboardInterrupt:
+        interrupted = True
+        log("\n[Ctrl+C] 立即停止激励并回零…")
+    finally:
+        try:
+            safe_shutdown(link, limiters)
+        finally:
+            try:
+                link.close()
+            except Exception:
+                pass
+
+    log("-" * 78)
+    log(f"完成: 保存 {saved}/{args.segments} 段 → {args.out}")
+    if isinstance(link, SimRobotLink):
+        log(f"  [DRY-RUN] 仿真下发 {link.frames} 帧, 结束状态 "
+            f"θ_big={link.plant.q[0]:+.4f} θ_small={link.plant.q[1]:+.4f} rad")
+    if interrupted:
+        return 130
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
