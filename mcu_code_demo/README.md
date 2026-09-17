@@ -6,7 +6,7 @@
 | 文件 | 说明 |
 | --- | --- |
 | `yaw_control_single_reference.c` | 旧版**单轴** yaw 示例（仅作写法参考：多圈累计、限幅、力矩下发） |
-| `dual_yaw_control.c` | **本版双级 yaw**（大 yaw + 小 yaw）完整示例：协议解析/组包、两关节控制、小 yaw 安全层（非对称行程 −25°~+20°）、看门狗、**MCU2 新样本序号** |
+| `dual_yaw_control.c` | **本版双级 yaw**（大 yaw + 小 yaw）完整示例：协议解析/组包、两关节控制、小 yaw 安全层（行程 ±30°）、看门狗、**MCU2 新样本序号** |
 | `dual_yaw_control_selftest.c` | 小 yaw 安全层的**PC 自检 runner**（自带硬件桩 + `main`，`gcc ... -lm` 直接跑） |
 
 协议权威定义在 `include/tcbs/communication/Protocol.hpp`（v0x03），CRC 实现在
@@ -137,9 +137,9 @@ void YawTask_1kHz(void) {
   （大 yaw 由 MCU2 驱动时，大 yaw 的 KP/KD 与力矩换算属于 **MCU2 的工程**）
 - 力矩换算：`YAW_*_KT_NM_PER_A`、`YAW_*_GEAR_RATIO`、`YAW_*_CURRENT_FS_A`
   → `YAW_*_TORQUE_TO_CMD_SCALE`（两电机的力矩常数/减速比不同，**必须分别标定**）
-- 小 yaw 限位（**机械行程非对称 −25° ~ +20°**，中心 −2.5°）：
-  硬限位 `YAW_SMALL_MIN_RAD = −25°` / `YAW_SMALL_MAX_RAD = +20°`、
-  目标角夹取余量 2°（→ `[−23°, +18°]`）、减速区 `YAW_SMALL_DECEL_ZONE_LEN_RAD = 10°`
+- 小 yaw 限位（**机械行程 ±30°**，中心 0）：
+  硬限位 `YAW_SMALL_MIN_RAD = −30°` / `YAW_SMALL_MAX_RAD = +30°`、
+  目标角夹取余量 2°（→ `[−28°, +28°]`）、减速区 `YAW_SMALL_DECEL_ZONE_LEN_RAD = 10°`
   （距任一侧限位 10° 起降速，即 `[−15°, +10°]` 之外）、
   限速 `YAW_SMALL_RATE_MAX_RAD_S` / `YAW_SMALL_RATE_AT_HARD_LIMIT_RAD_S`、
   硬限位回中力矩 `YAW_SMALL_HARD_CENTER_TORQUE_NM`（默认 0 = 零力矩）
@@ -170,10 +170,10 @@ void YawTask_1kHz(void) {
 
 ## 6. 安全逻辑（小 yaw，最后一道防线）
 
-机械行程是**非对称的 −25° ~ +20°**（0 不是行程中心，中心是 −2.5°），撞死会打坏电机/线束，
+机械行程是 **±30°**（中心 0），撞死会打坏电机/线束，
 因此 `small_yaw_guard()` 做四件事：
 
-1. **目标角限位**：θ\* 夹到 `[−23°, +18°]`（两侧各留 2° 余量）→ 越界后位置误差天然指向内侧；
+1. **目标角限位**：θ\* 夹到 `[−28°, +28°]`（两侧各留 2° 余量）→ 越界后位置误差天然指向内侧；
 2. **接近限位限速**：距**任一侧**硬限位 10° 以内（即 θ < −15° 或 θ > +10°）起，
    允许 |ω\*| 随剩余角度线性下降，贴到限位时只剩 0.2 rad/s；
 3. **越软限位禁止向外施力**：正侧禁正力矩、负侧禁负力矩，**只允许回中方向力矩**；

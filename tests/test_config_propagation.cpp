@@ -71,9 +71,9 @@ int main() {
     cfg.mpc.big.max_torque_rate = 55.0;
     cfg.mpc.small.max_torque = 0.8;
     cfg.mpc.small.max_torque_rate = 90.0;
-    cfg.mpc.small.min_angle = -25.0 * M_PI / 180.0;
-    cfg.mpc.small.max_angle =  20.0 * M_PI / 180.0;
-    cfg.mpc.small_center_angle = -2.5 * M_PI / 180.0;
+    cfg.mpc.small.min_angle = -30.0 * M_PI / 180.0;
+    cfg.mpc.small.max_angle =  30.0 * M_PI / 180.0;
+    cfg.mpc.small_center_angle = 0.0;
 
     // ③ 编码器/指令映射（标定结果）
     cfg.mcu_linear.recv_pitch_scale = 1.005207;
@@ -163,9 +163,9 @@ int main() {
     check(near(mp.smooth_eps, 1e-5) && mp.ref_delay_steps == 2, "smooth_eps / ref_delay_steps");
     check(near(mp.big.max_torque, 1.7) && near(mp.big.max_torque_rate, 55.0), "big 力矩与变化率");
     check(near(mp.small.max_torque, 0.8) && near(mp.small.max_torque_rate, 90.0), "small 力矩与变化率");
-    check(near(mp.small.min_angle, -25.0 * M_PI / 180.0) &&
-          near(mp.small.max_angle, 20.0 * M_PI / 180.0), "小 yaw 行程 [-25°, +20°]");
-    check(near(mp.small_center_angle, -2.5 * M_PI / 180.0), "small_center_angle = -2.5°");
+    check(near(mp.small.min_angle, -30.0 * M_PI / 180.0) &&
+          near(mp.small.max_angle, 30.0 * M_PI / 180.0), "小 yaw 行程 [-30°, +30°]");
+    check(near(mp.small_center_angle, 0.0), "small_center_angle = 0");
 
     std::printf("\n[③ 编码器/指令映射 mcu_linear]\n");
     check(near(lin.recv_pitch_scale, 1.005207) && near(lin.recv_pitch_offset, -0.021541), "recv_pitch_*");

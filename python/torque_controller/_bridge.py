@@ -333,10 +333,10 @@ class TcbsDualYawMpcConfig(Structure):
     注 1: v4 起**没有** ``extrapolate_pitch`` —— 平面模型不含 pitch 自由度。
     注 2: 本 C ABI 结构体布局已冻结, **没有** ``small_center_angle`` 字段：
           C++ 侧的小 yaw 回中目标角由行程中心派生
-          （``0.5·(small.min_angle + small.max_angle)``，默认行程 [−25°, +20°] ⇒ −2.5°），
+          （``0.5·(small.min_angle + small.max_angle)``，默认行程 ±30° ⇒ 0），
           与 ``defaultMpcConfig()`` 的默认值一致。需要自定中心请用 C++ 的
           ``DualYawMpc::setConfig()``。
-    注 3: ``small.min_angle/max_angle`` 是**非对称**机械行程（默认 −25° / +20°）；
+    注 3: ``small.min_angle/max_angle`` 是机械行程（默认 ±30°；**允许非对称**）；
           软限位由 ``small_limit_soft_ratio`` 从**两侧各自**向内推：
           ``soft_min = min + (1−ratio)·(max−min)``、``soft_max = max − (1−ratio)·(max−min)``
           （默认 ratio=0.75 ⇒ 软限位区 [−13.75°, +8.75°]）。
@@ -976,7 +976,7 @@ class TcbsRobotController:
         """按**关节系**角度设置目标（内部按当前底盘方位角估计换算为世界方位角）。
 
         big_joint_angle: 大 yaw 关节角（相对底盘，多圈，rad）
-        small_joint_angle: 小 yaw 关节角（相对大 yaw，行程 −25° ~ +20°，非对称，rad）
+        small_joint_angle: 小 yaw 关节角（相对大 yaw，行程 ±30°，rad）
         """
         lib = _require_lib()
         _check(lib.tcbs_robot_controller_set_joint_angles(

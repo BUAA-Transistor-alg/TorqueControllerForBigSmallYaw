@@ -224,8 +224,8 @@ typedef struct TcbsRobotEstimate_C {
 typedef struct TcbsDualYawJointLimits_C {
     double max_torque;       // N·m，硬限幅
     double max_torque_rate;  // N·m/s，硬约束
-    double min_angle;        // rad，机械行程下界（**可非对称**；代价中的双侧障碍项用）
-    double max_angle;        // rad，机械行程上界（小 yaw 默认 −25° / +20°）
+    double min_angle;        // rad，机械行程下界（小 yaw 默认 −30°；**允许非对称**）
+    double max_angle;        // rad，机械行程上界（小 yaw 默认 +30°）
 } TcbsDualYawJointLimits_C;
 
 // 模型参数（对应 dual_yaw::ModelParams — **平面 2 自由度 8 参模型**，字段顺序与 C++ 一致）
@@ -279,7 +279,7 @@ typedef struct TcbsDualYawMpcConfig_C {
     //       pitch 只作为下发给电控的目标角，不进入动力学/预测窗。
     // 注意: **没有** small_center_angle 字段（C ABI 布局冻结，不新增字段/不升版本号）：
     //       小 yaw 的回中目标角由 C 侧按行程中心 0.5·(min_angle+max_angle) 派生
-    //       （[−25°,+20°] ⇒ −2.5°），与 C++ defaultMpcConfig() 的默认值一致；
+    //       （当前行程对称 ±30° ⇒ 0），与 C++ defaultMpcConfig() 的默认值一致；
     //       需要自定中心时请用 C++ 的 DualYawMpc::setConfig()。
 } TcbsDualYawMpcConfig_C;
 
@@ -443,7 +443,7 @@ int tcbs_robot_comm_send_to_mcu(TcbsRobotCommHandle* handle,
                            float   yaw_big_target_velocity,  // 大 yaw 目标角速度，rad/s
                            float   yaw_big_torque,           // 大 yaw 力矩，N·m
                            uint8_t yaw_small_mode,           // 小 yaw 模式位
-                           float   yaw_small_target_angle,   // 小 yaw 关节目标角，rad（行程 −25° ~ +20°，由电控侧再限位）
+                           float   yaw_small_target_angle,   // 小 yaw 关节目标角，rad（行程 ±30°，由电控侧再限位）
                            float   yaw_small_target_velocity,// 小 yaw 目标角速度，rad/s
                            float   yaw_small_torque);        // 小 yaw 力矩，N·m
 
@@ -505,7 +505,7 @@ int tcbs_robot_controller_set(TcbsRobotController_C* handle,
                          uint8_t integral_enable);       // 是否启用积分补偿
 
 // 关节系便捷接口（内部按当前底盘方位角估计换算为世界方位角）
-// big_joint_angle: 大 yaw 关节角（相对底盘，多圈）；small_joint_angle: 小 yaw 关节角（行程 −25° ~ +20°）
+// big_joint_angle: 大 yaw 关节角（相对底盘，多圈）；small_joint_angle: 小 yaw 关节角（行程 ±30°）
 int tcbs_robot_controller_set_joint_angles(TcbsRobotController_C* handle,
                                       uint8_t auto_aim_enable,
                                       uint8_t big_torque_only,

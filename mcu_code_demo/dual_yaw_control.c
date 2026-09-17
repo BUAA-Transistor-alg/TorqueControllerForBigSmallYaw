@@ -66,7 +66,7 @@
  *   19     4   f32   yaw_big_target_velocity     rad/s
  *   23     4   f32   yaw_big_torque              N·m(前馈 / 纯力矩)
  *   27     1   u8    yaw_small_mode              0=仅力矩 1=力矩+位置/速度内环
- *   28     4   f32   yaw_small_target_angle      rad, 关节系(相对大yaw), 行程 −25° ~ +20°
+ *   28     4   f32   yaw_small_target_angle      rad, 关节系(相对大yaw), 行程 ±30°
  *   32     4   f32   yaw_small_target_velocity   rad/s
  *   36     4   f32   yaw_small_torque            N·m
  *   40     1   u8    crc8                        CRC8(byte 0..39), 初值 0xFF
@@ -149,9 +149,9 @@
  *   [编码器换算] YAW_BIG_ENCODER_COUNTS_PER_TURN=8192, YAW_BIG_RPM_TO_RAD_S
  *                YAW_SMALL_RAD_PER_COUNT, YAW_SMALL_ENCODER_ZERO_COUNTS,
  *                YAW_SMALL_RPM_TO_RAD_S, YAW_SMALL_ANGLE_WRAP_TO_PM_PI
- *   [小 yaw 限位] YAW_SMALL_MIN_RAD=−25°, YAW_SMALL_MAX_RAD=+20°（**非对称**硬限位）,
+ *   [小 yaw 限位] YAW_SMALL_MIN_RAD=−30°, YAW_SMALL_MAX_RAD=+30°（硬限位）,
  *                YAW_SMALL_SOFT_MARGIN_RAD=2°
- *                → 目标角夹取 [YAW_SMALL_TARGET_MIN_RAD, YAW_SMALL_TARGET_MAX_RAD] = [−23°, +18°],
+ *                → 目标角夹取 [YAW_SMALL_TARGET_MIN_RAD, YAW_SMALL_TARGET_MAX_RAD] = [−28°, +28°],
  *                YAW_SMALL_DECEL_ZONE_LEN_RAD=10°（距任一侧限位 10° 开始降速 ⇒ [−15°, +10°]）,
  *                YAW_SMALL_RATE_MAX_RAD_S, YAW_SMALL_RATE_AT_HARD_LIMIT_RAD_S,
  *                YAW_SMALL_HARD_CENTER_TORQUE_NM (默认 0 = 硬限位处零力矩)
@@ -270,24 +270,25 @@
 /* 小 yaw 电机速度报文 rpm → 关节角速度 rad/s（含减速比） */
 #define YAW_SMALL_RPM_TO_RAD_S      ((float)(YAW_RPM2RADS / YAW_SMALL_GEAR_RATIO))
 
-/* ---- 1.5 小 yaw 安全限位（**非对称行程 −25° ~ +20°**；最后一道安全防线, 宁可误触发不可漏触发）
+/* ---- 1.5 小 yaw 安全限位（**行程 ±30°**；最后一道安全防线, 宁可误触发不可漏触发）
  *
- * 机械行程**两侧不对称**: 负侧只能到 −25°, 正侧只能到 +20°（0 不是行程中心, 中心是 −2.5°）。
+ * 机械行程 **±30°**（中心 0）。**两侧仍各自独立判断**（不写死成对称）—— 万一以后行程改成
+ * 非对称（例如 [−25°,+20°]），这里的区间运算不用改。
  * 因此这里**两个方向各用独立的宏**, 严禁写成 `±LIMIT` / `fabsf(angle) > LIMIT` 这种
  * 对称写法 —— 那会让负侧按正侧的余量算, 提前 5° 就限速/夹目标角。
  *
- *   硬限位   : [YAW_SMALL_MIN_RAD, YAW_SMALL_MAX_RAD] = [−25°, +20°]
- *   目标夹取 : [YAW_SMALL_TARGET_MIN_RAD, YAW_SMALL_TARGET_MAX_RAD] = [−23°, +18°]（各留 2°）
- *   减速区   : 距**任一侧**硬限位 10° 开始降速 ⇒ [−15°, +10°] 之外开始降速
+ *   硬限位   : [YAW_SMALL_MIN_RAD, YAW_SMALL_MAX_RAD] = [−30°, +30°]
+ *   目标夹取 : [YAW_SMALL_TARGET_MIN_RAD, YAW_SMALL_TARGET_MAX_RAD] = [−28°, +28°]（各留 2°）
+ *   减速区   : 距**任一侧**硬限位 10° 开始降速 ⇒ [−20°, +20°] 之外开始降速
  */
-#define YAW_SMALL_MIN_RAD               ((float)(-25.0 * YAW_DEG2RAD)) /* 机械硬限位（负侧）−25° */
-#define YAW_SMALL_MAX_RAD               ((float)( 20.0 * YAW_DEG2RAD)) /* 机械硬限位（正侧）+20° */
+#define YAW_SMALL_MIN_RAD               ((float)(-30.0 * YAW_DEG2RAD)) /* 机械硬限位（负侧）−30° */
+#define YAW_SMALL_MAX_RAD               ((float)( 30.0 * YAW_DEG2RAD)) /* 机械硬限位（正侧）+30° */
 #define YAW_SMALL_SOFT_MARGIN_RAD       ((float)(2.0 * YAW_DEG2RAD))   /* 目标角夹取余量 2°（两侧各自留） */
 #define YAW_SMALL_TARGET_MIN_RAD \
-    (YAW_SMALL_MIN_RAD + YAW_SMALL_SOFT_MARGIN_RAD)                    /* = −23° 目标角下限 */
+    (YAW_SMALL_MIN_RAD + YAW_SMALL_SOFT_MARGIN_RAD)                    /* = −28° 目标角下限 */
 #define YAW_SMALL_TARGET_MAX_RAD \
-    (YAW_SMALL_MAX_RAD - YAW_SMALL_SOFT_MARGIN_RAD)                    /* = +18° 目标角上限 */
-/* 减速区长度（距硬限位的距离）: 10° ⇒ 负侧从 −15° 起、正侧从 +10° 起开始降速 */
+    (YAW_SMALL_MAX_RAD - YAW_SMALL_SOFT_MARGIN_RAD)                    /* = +28° 目标角上限 */
+/* 减速区长度（距硬限位的距离）: 10° ⇒ 负侧从 −20° 起、正侧从 +20° 起开始降速 */
 #define YAW_SMALL_DECEL_ZONE_LEN_RAD    ((float)(10.0 * YAW_DEG2RAD))
 #define YAW_SMALL_DECEL_START_MIN_RAD \
     (YAW_SMALL_MIN_RAD + YAW_SMALL_DECEL_ZONE_LEN_RAD)                 /* = −15° */
@@ -948,7 +949,7 @@ static float yaw_small_read_omega(void)
 }
 
 /* 安全层输出。
- * ⚠ 行程**非对称**（−25° ~ +20°）, 所以"越限"必须分成两侧各自判断:
+ * ⚠ "越限"必须分成**两侧各自判断**（不写死成对称写法）, 这样非对称行程也能直接用:
  *   硬限位: hard_min = θ ≤ YAW_SMALL_MIN_RAD（撞负侧）; hard_max = θ ≥ YAW_SMALL_MAX_RAD（撞正侧）
  *   软限位: soft_min = θ ≤ YAW_SMALL_TARGET_MIN_RAD; soft_max = θ ≥ YAW_SMALL_TARGET_MAX_RAD
  *   hard_limit / soft_limit 是两者的"或", 只作汇总位（日志/示波器）用, 逻辑判断请用分侧位。 */
@@ -957,10 +958,10 @@ typedef struct {
     float   target_velocity;  /* 已限速目标角速度 rad/s */
     float   torque;           /* 已约束的力矩 N·m（含前馈） */
     float   allowed_rate;     /* 当前允许的 |ω| rad/s */
-    uint8_t hard_min;         /* 1 = 已越过负侧硬限位（θ ≤ −25°） */
-    uint8_t hard_max;         /* 1 = 已越过正侧硬限位（θ ≥ +20°） */
-    uint8_t soft_min;         /* 1 = 已越过负侧软限位（θ ≤ −23°） */
-    uint8_t soft_max;         /* 1 = 已越过正侧软限位（θ ≥ +18°） */
+    uint8_t hard_min;         /* 1 = 已越过负侧硬限位（θ ≤ YAW_SMALL_MIN_RAD = −30°） */
+    uint8_t hard_max;         /* 1 = 已越过正侧硬限位（θ ≥ +30°） */
+    uint8_t soft_min;         /* 1 = 已越过负侧软限位（θ ≤ −20°） */
+    uint8_t soft_max;         /* 1 = 已越过正侧软限位（θ ≥ +20°） */
     uint8_t hard_limit;       /* 1 = hard_min || hard_max（汇总） */
     uint8_t soft_limit;       /* 1 = soft_min || soft_max（汇总） */
 } small_yaw_guard_t;
@@ -968,14 +969,15 @@ typedef struct {
 /* ---------------------------------------------------------------------------
  * small_yaw_guard(): 小 yaw 安全层（**最后一道安全防线**）
  *
- * 机械行程**非对称 −25° ~ +20°**（中心 −2.5°）, 一旦撞死会打坏电机/线束, 因此这里做四件事:
- *   ① 目标角限位: θ* 夹到 [−23°, +18°]（两侧各留 2° 余量）。
+ * 机械行程 **±30°**（中心 0）, 一旦撞死会打坏电机/线束, 因此这里做四件事:
+ *   ① 目标角限位: θ* 夹到 [−28°, +28°]（两侧各留 2° 余量）。
  *      这一步天然使"越界后位置误差指向内侧", 即内环只会朝回中方向施力。
  *   ② 速度限速: 距**任一侧**硬限位 10° 以内（即 θ < −15° 或 θ > +10°）后, 允许 |ω*|
  *      随剩余角度线性下降, 贴到限位时只剩 0.2 rad/s; 越过软限位后禁止"向外"的目标速度。
  *   ③ 前馈约束: 越过软限位后, 朝外方向的前馈力矩清零 ——
  *      "超过软限位时禁止继续向外施力, 只允许回中方向力矩"（正侧朝外 = 正力矩, 负侧朝外 = 负力矩）。
- *   ④ 硬限位: θ ≤ −25° 或 θ ≥ +20° 时整帧力矩作废, 只允许零力矩/回中力矩
+ *   ④ 硬限位: θ ≤ YAW_SMALL_MIN_RAD 或 θ ≥ YAW_SMALL_MAX_RAD 时整帧力矩作废,
+ *      只允许零力矩/回中力矩
  *      （YAW_SMALL_HARD_CENTER_TORQUE_NM, 默认 0 = 零力矩）。
  *
  * 注意: 安全层优先于一切控制模式 —— 无论 mode 0/1、无论上位机下发什么,
@@ -1012,7 +1014,7 @@ void small_yaw_guard(float angle, float target_angle, float target_velocity,
         return;
     }
 
-    /* ① 目标角限位到 [-23°, +18°]（两侧各自夹, 非对称） */
+    /* ① 目标角限位到 [-28°, +28°]（两侧各自夹, 不假设对称） */
     if (target_angle > YAW_SMALL_TARGET_MAX_RAD) {
         target_angle = YAW_SMALL_TARGET_MAX_RAD;
     } else if (target_angle < YAW_SMALL_TARGET_MIN_RAD) {
@@ -1020,8 +1022,8 @@ void small_yaw_guard(float angle, float target_angle, float target_velocity,
     }
 
     /* ② 允许速度: 按**到最近一侧硬限位**的剩余角度线性插值（两侧独立, 不用 fabsf 对称写法） */
-    dist_to_max = YAW_SMALL_MAX_RAD - angle;      /* 到 +20° 侧还有多少 */
-    dist_to_min = angle - YAW_SMALL_MIN_RAD;      /* 到 −25° 侧还有多少 */
+    dist_to_max = YAW_SMALL_MAX_RAD - angle;      /* 到正侧硬限位还有多少 */
+    dist_to_min = angle - YAW_SMALL_MIN_RAD;      /* 到负侧硬限位还有多少 */
     remaining = (dist_to_max < dist_to_min) ? dist_to_max : dist_to_min;
     if (remaining <= 0.0f) {
         allowed = YAW_SMALL_RATE_AT_HARD_LIMIT_RAD_S;                 /* 已贴死限位 */
@@ -1381,10 +1383,10 @@ void dual_yaw_control_step(uint32_t now_ms)
 /* ============================================================================
  * 11. 安全层自检（可选编译, 默认关闭 —— 定义 YAW_SMALL_LIMIT_SELFTEST=1 打开）
  *
- * 目的: 行程改成**非对称 −25° ~ +20°** 之后, 最容易犯的错误就是"某一处还在用对称写法"
+ * 目的: 行程与电控限位改过之后, 最容易犯的错误就是"某一处还在用对称写法"
  *       （`±LIMIT` / `fabsf(angle) > LIMIT`）。本节把安全层的**两侧**逐条钉死:
  *         · 宏关系（目标夹取落在硬限位内、减速区起点 = 距限位 10°、两侧独立）
- *         · 目标角夹取两侧各自的数值（−23° / +18°）
+ *         · 目标角夹取两侧各自的数值（−28° / +28°）
  *         · 减速区两侧各自的距离→允许速度映射（到限位距离相同 ⇒ 允许速度相同）
  *         · 越软限位只禁止"向外"方向（两侧独立）、越硬限位只允许回中方向
  *         · 末级力矩约束（small_yaw_apply_limit_torque）与安全层一致
@@ -1432,32 +1434,32 @@ int yaw_small_limit_selftest(yaw_selftest_report_fn report)
     } while (0)
 
     /* ── 1) 宏关系（运行期核对: _Static_assert 不允许浮点常量表达式） ── */
-    YAW_SELFTEST_CHK(yaw_selftest_deg(YAW_SMALL_MIN_RAD, -25.0f),
-                     "[宏] 硬限位负侧 = −25°");
-    YAW_SELFTEST_CHK(yaw_selftest_deg(YAW_SMALL_MAX_RAD, 20.0f),
-                     "[宏] 硬限位正侧 = +20°");
+    YAW_SELFTEST_CHK(yaw_selftest_deg(YAW_SMALL_MIN_RAD, -30.0f),
+                     "[宏] 硬限位负侧 = −30°");
+    YAW_SELFTEST_CHK(yaw_selftest_deg(YAW_SMALL_MAX_RAD, 30.0f),
+                     "[宏] 硬限位正侧 = +30°");
     YAW_SELFTEST_CHK((YAW_SMALL_MIN_RAD < 0.0f) && (YAW_SMALL_MAX_RAD > 0.0f),
-                     "[宏] 行程跨过 0（−25° < 0 < +20°）");
+                     "[宏] 行程跨过 0（−30° < 0 < +30°）");
     YAW_SELFTEST_CHK(yaw_selftest_deg(YAW_SMALL_TARGET_MIN_RAD, -23.0f),
-                     "[宏] 目标角下限 = −23°（硬限位 + 2° 余量）");
+                     "[宏] 目标角下限 = −28°（硬限位 + 2° 余量）");
     YAW_SELFTEST_CHK(yaw_selftest_deg(YAW_SMALL_TARGET_MAX_RAD, 18.0f),
-                     "[宏] 目标角上限 = +18°（硬限位 − 2° 余量）");
+                     "[宏] 目标角上限 = +28°（硬限位 − 2° 余量）");
     YAW_SELFTEST_CHK((YAW_SMALL_TARGET_MIN_RAD > YAW_SMALL_MIN_RAD) &&
                      (YAW_SMALL_TARGET_MAX_RAD < YAW_SMALL_MAX_RAD),
                      "[宏] 目标夹取区间严格落在硬限位内");
-    YAW_SELFTEST_CHK(yaw_selftest_deg(YAW_SMALL_DECEL_START_MIN_RAD, -15.0f),
-                     "[宏] 负侧减速区起点 = −15°（距 −25° 正好 10°）");
+    YAW_SELFTEST_CHK(yaw_selftest_deg(YAW_SMALL_DECEL_START_MIN_RAD, -20.0f),
+                     "[宏] 负侧减速区起点 = −20°（距 −30° 正好 10°）");
     YAW_SELFTEST_CHK(yaw_selftest_deg(YAW_SMALL_DECEL_START_MAX_RAD, 10.0f),
-                     "[宏] 正侧减速区起点 = +10°（距 +20° 正好 10°）");
+                     "[宏] 正侧减速区起点 = +20°（距 +30° 正好 10°）");
     YAW_SELFTEST_CHK(yaw_selftest_near(YAW_SMALL_DECEL_ZONE_LEN_RAD,
                                        (float)(10.0 * YAW_DEG2RAD)),
                      "[宏] 减速区长度 = 10°");
 
-    /* ── 2) 目标角夹取: 两侧各自夹到 [−23°, +18°] ── */
+    /* ── 2) 目标角夹取: 两侧各自夹到 [−28°, +28°] ── */
     small_yaw_guard(0.0f, (float)(30.0 * YAW_DEG2RAD), 0.0f, 0.0f, &g);
-    YAW_SELFTEST_CHK(yaw_selftest_deg(g.target_angle, 18.0f), "[夹取] θ*=+30° → +18°");
+    YAW_SELFTEST_CHK(yaw_selftest_deg(g.target_angle, 28.0f), "[夹取] θ*=+35° → +28°");
     small_yaw_guard(0.0f, (float)(-30.0 * YAW_DEG2RAD), 0.0f, 0.0f, &g);
-    YAW_SELFTEST_CHK(yaw_selftest_deg(g.target_angle, -23.0f), "[夹取] θ*=−30° → −23°");
+    YAW_SELFTEST_CHK(yaw_selftest_deg(g.target_angle, -28.0f), "[夹取] θ*=−35° → −28°");
     small_yaw_guard(0.0f, (float)(5.0 * YAW_DEG2RAD), 0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_deg(g.target_angle, 5.0f), "[夹取] 行程内目标角不被改");
 
@@ -1467,104 +1469,104 @@ int yaw_small_limit_selftest(yaw_selftest_report_fn report)
                      "[限速] θ=0° → 允许 |ω|=6.0");
     small_yaw_guard(YAW_SMALL_DECEL_START_MAX_RAD, 0.0f, 0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.allowed_rate, YAW_SMALL_RATE_MAX_RAD_S),
-                     "[限速] θ=+10°（正侧减速区起点）→ 6.0");
+                     "[限速] θ=+20°（正侧减速区起点）→ 6.0");
     small_yaw_guard(YAW_SMALL_DECEL_START_MIN_RAD, 0.0f, 0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.allowed_rate, YAW_SMALL_RATE_MAX_RAD_S),
-                     "[限速] θ=−15°（负侧减速区起点）→ 6.0");
-    /* +15° 距 +20° 还有 5°（半程） ⇒ 0.2 + (6.0−0.2)*0.5 = 3.1 */
-    small_yaw_guard((float)(15.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g);
-    YAW_SELFTEST_CHK(yaw_selftest_near(g.allowed_rate, 3.1f), "[限速] θ=+15° → 3.1（半程）");
-    /* −20° 距 −25° 还有 5°（半程） ⇒ 同样是 3.1 —— **按各自到硬限位的距离算, 不看 |θ|** */
-    small_yaw_guard((float)(-20.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g2);
-    YAW_SELFTEST_CHK(yaw_selftest_near(g2.allowed_rate, 3.1f), "[限速] θ=−20° → 3.1（半程）");
+                     "[限速] θ=−20°（负侧减速区起点）→ 6.0");
+    /* +25° 距 +30° 还有 5°（半程） ⇒ 0.2 + (6.0−0.2)*0.5 = 3.1 */
+    small_yaw_guard((float)(25.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g);
+    YAW_SELFTEST_CHK(yaw_selftest_near(g.allowed_rate, 3.1f), "[限速] θ=+25° → 3.1（半程）");
+    /* −25° 距 −30° 还有 5°（半程） ⇒ 同样是 3.1 —— **按各自到硬限位的距离算, 不看 |θ|** */
+    small_yaw_guard((float)(-25.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g2);
+    YAW_SELFTEST_CHK(yaw_selftest_near(g2.allowed_rate, 3.1f), "[限速] θ=−25° → 3.1（半程）");
     YAW_SELFTEST_CHK(yaw_selftest_near(g2.allowed_rate, g.allowed_rate),
                      "[限速] 距各自硬限位同为 5° ⇒ 两侧允许速度相同（对称写法在此会不等）");
     small_yaw_guard(YAW_SMALL_MAX_RAD, 0.0f, 0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.allowed_rate, YAW_SMALL_RATE_AT_HARD_LIMIT_RAD_S),
-                     "[限速] θ=+20°（贴正侧硬限位）→ 0.2");
+                     "[限速] θ=+30°（贴正侧硬限位）→ 0.2");
     small_yaw_guard(YAW_SMALL_MIN_RAD, 0.0f, 0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.allowed_rate, YAW_SMALL_RATE_AT_HARD_LIMIT_RAD_S),
-                     "[限速] θ=−25°（贴负侧硬限位）→ 0.2");
-    small_yaw_guard((float)(-26.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g);
+                     "[限速] θ=−30°（贴负侧硬限位）→ 0.2");
+    small_yaw_guard((float)(-31.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.allowed_rate, YAW_SMALL_RATE_AT_HARD_LIMIT_RAD_S),
-                     "[限速] θ=−26°（越限）→ 仍只允许 0.2");
+                     "[限速] θ=−31°（越限）→ 仍只允许 0.2");
 
     /* ── 4) 软限位标志: 两侧独立 ── */
-    small_yaw_guard((float)(19.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g);
+    small_yaw_guard((float)(24.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK((g.soft_max == 1u) && (g.soft_min == 0u) && (g.hard_max == 0u),
-                     "[软限位] θ=+19° → 只有 soft_max, 未越硬限位");
-    small_yaw_guard((float)(-24.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g);
+                     "[软限位] θ=+25°（越软限位 +20°）→ 只有 soft_max, 未越硬限位");
+    small_yaw_guard((float)(-29.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK((g.soft_min == 1u) && (g.soft_max == 0u) && (g.hard_min == 0u),
-                     "[软限位] θ=−24° → 只有 soft_min, 未越硬限位");
+                     "[软限位] θ=−29° → 只有 soft_min, 未越硬限位");
     small_yaw_guard((float)(5.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK((g.soft_min == 0u) && (g.soft_max == 0u) && (g.hard_limit == 0u) &&
                      (g.soft_limit == 0u),
                      "[软限位] θ=+5°（行程中部）→ 四个标志全 0");
-    /* 负侧 12° 处（−12°）在负侧软限位（−23°）内 ⇒ 不应报警; 而正侧 +12° 已越软限位 +18°? 否 */
+    /* ±12° 都在软限位区（±20°）之内 ⇒ 不应报警 */
     small_yaw_guard((float)(-12.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(g.soft_limit == 0u, "[软限位] θ=−12° → 未越软限位");
     small_yaw_guard((float)(12.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(g.soft_limit == 0u, "[软限位] θ=+12° → 未越软限位");
 
     /* ── 5) 越软限位: 只禁止"向外"的前馈力矩, 反向（回中）保留 ── */
-    small_yaw_guard((float)(19.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.5f, &g);
+    small_yaw_guard((float)(25.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.5f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.torque, 0.0f),
-                     "[力矩] θ=+19° 且 τ=+0.5（向外）→ 清零");
-    small_yaw_guard((float)(19.0 * YAW_DEG2RAD), 0.0f, 0.0f, -0.5f, &g);
+                     "[力矩] θ=+25° 且 τ=+0.5（向外）→ 清零");
+    small_yaw_guard((float)(25.0 * YAW_DEG2RAD), 0.0f, 0.0f, -0.5f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.torque, -0.5f),
-                     "[力矩] θ=+19° 且 τ=−0.5（回中）→ 保留");
-    small_yaw_guard((float)(-24.0 * YAW_DEG2RAD), 0.0f, 0.0f, -0.5f, &g);
+                     "[力矩] θ=+25° 且 τ=−0.5（回中）→ 保留");
+    small_yaw_guard((float)(-29.0 * YAW_DEG2RAD), 0.0f, 0.0f, -0.5f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.torque, 0.0f),
-                     "[力矩] θ=−24° 且 τ=−0.5（向外）→ 清零");
-    small_yaw_guard((float)(-24.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.5f, &g);
+                     "[力矩] θ=−29° 且 τ=−0.5（向外）→ 清零");
+    small_yaw_guard((float)(-29.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.5f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.torque, 0.5f),
-                     "[力矩] θ=−24° 且 τ=+0.5（回中）→ 保留");
+                     "[力矩] θ=−29° 且 τ=+0.5（回中）→ 保留");
     small_yaw_guard((float)(-12.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.5f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.torque, 0.5f),
                      "[力矩] 未越软限位时前馈力矩原样通过");
 
     /* ── 6) 越硬限位: 只允许零力矩/回中力矩（CENTER 默认 0） ── */
-    small_yaw_guard((float)(20.5 * YAW_DEG2RAD), 0.0f, 0.0f, -0.5f, &g);
+    small_yaw_guard((float)(30.5 * YAW_DEG2RAD), 0.0f, 0.0f, -0.5f, &g);
     YAW_SELFTEST_CHK((g.hard_max == 1u) && (g.hard_limit == 1u) &&
                      yaw_selftest_near(g.torque, -YAW_SMALL_HARD_CENTER_TORQUE_NM),
-                     "[硬限位] θ=+20.5° → hard_max, 只留回中力矩");
-    small_yaw_guard((float)(-25.5 * YAW_DEG2RAD), 0.0f, 0.0f, 0.5f, &g);
+                     "[硬限位] θ=+30.5° → hard_max, 只留回中力矩");
+    small_yaw_guard((float)(-30.5 * YAW_DEG2RAD), 0.0f, 0.0f, 0.5f, &g);
     YAW_SELFTEST_CHK((g.hard_min == 1u) && (g.hard_limit == 1u) &&
                      yaw_selftest_near(g.torque, YAW_SMALL_HARD_CENTER_TORQUE_NM),
-                     "[硬限位] θ=−25.5° → hard_min, 只留回中力矩");
+                     "[硬限位] θ=−30.5° → hard_min, 只留回中力矩");
     /* 边界: 恰好等于硬限位也算越限（宁可误触发不可漏触发） */
     small_yaw_guard(YAW_SMALL_MAX_RAD, 0.0f, 0.0f, 0.0f, &g);
-    YAW_SELFTEST_CHK(g.hard_max == 1u, "[硬限位] θ 恰为 +20° → 记为越限（保守）");
+    YAW_SELFTEST_CHK(g.hard_max == 1u, "[硬限位] θ 恰为 +30° → 记为越限（保守）");
     small_yaw_guard(YAW_SMALL_MIN_RAD, 0.0f, 0.0f, 0.0f, &g);
-    YAW_SELFTEST_CHK(g.hard_min == 1u, "[硬限位] θ 恰为 −25° → 记为越限（保守）");
+    YAW_SELFTEST_CHK(g.hard_min == 1u, "[硬限位] θ 恰为 −30° → 记为越限（保守）");
 
     /* ── 7) 越软限位禁止"向外"的目标速度（两侧独立） ── */
-    small_yaw_guard((float)(19.0 * YAW_DEG2RAD), 0.0f, 5.0f, 0.0f, &g);
+    small_yaw_guard((float)(25.0 * YAW_DEG2RAD), 0.0f, 5.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.target_velocity, 0.0f),
-                     "[限速] θ=+19° 且 ω*=+5（向外）→ 目标速度归零");
-    small_yaw_guard((float)(19.0 * YAW_DEG2RAD), 0.0f, -5.0f, 0.0f, &g);
+                     "[限速] θ=+25° 且 ω*=+5（向外）→ 目标速度归零");
+    small_yaw_guard((float)(25.0 * YAW_DEG2RAD), 0.0f, -5.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(g.target_velocity < 0.0f,
-                     "[限速] θ=+19° 且 ω*=−5（回中）→ 保留（仅被限速夹到 allowed）");
-    small_yaw_guard((float)(-24.0 * YAW_DEG2RAD), 0.0f, -5.0f, 0.0f, &g);
+                     "[限速] θ=+25° 且 ω*=−5（回中）→ 保留（仅被限速夹到 allowed）");
+    small_yaw_guard((float)(-29.0 * YAW_DEG2RAD), 0.0f, -5.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_near(g.target_velocity, 0.0f),
-                     "[限速] θ=−24° 且 ω*=−5（向外）→ 目标速度归零");
-    small_yaw_guard((float)(-24.0 * YAW_DEG2RAD), 0.0f, 5.0f, 0.0f, &g);
+                     "[限速] θ=−29° 且 ω*=−5（向外）→ 目标速度归零");
+    small_yaw_guard((float)(-29.0 * YAW_DEG2RAD), 0.0f, 5.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(g.target_velocity > 0.0f,
-                     "[限速] θ=−24° 且 ω*=+5（回中）→ 保留（仅被限速夹到 allowed）");
+                     "[限速] θ=−29° 且 ω*=+5（回中）→ 保留（仅被限速夹到 allowed）");
 
     /* ── 8) 末级力矩约束（内环算完之后再过一遍）与安全层一致 ── */
-    small_yaw_guard((float)(19.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g2);
+    small_yaw_guard((float)(25.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g2);
     YAW_SELFTEST_CHK(yaw_selftest_near(small_yaw_apply_limit_torque(1.0f, &g2), 0.0f),
-                     "[末级] θ=+19°: 内环输出 +1.0（向外）→ 清零");
+                     "[末级] θ=+25°: 内环输出 +1.0（向外）→ 清零");
     YAW_SELFTEST_CHK(yaw_selftest_near(small_yaw_apply_limit_torque(-1.0f, &g2), -1.0f),
                      "[末级] θ=+19°: 内环输出 −1.0（回中）→ 保留");
-    small_yaw_guard((float)(-24.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g2);
+    small_yaw_guard((float)(-29.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g2);
     YAW_SELFTEST_CHK(yaw_selftest_near(small_yaw_apply_limit_torque(-1.0f, &g2), 0.0f),
-                     "[末级] θ=−24°: 内环输出 −1.0（向外）→ 清零");
-    small_yaw_guard((float)(20.5 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g2);
+                     "[末级] θ=−29°: 内环输出 −1.0（向外）→ 清零");
+    small_yaw_guard((float)(30.5 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g2);
     YAW_SELFTEST_CHK(yaw_selftest_near(small_yaw_apply_limit_torque(-1.0f, &g2),
                                        -YAW_SMALL_HARD_CENTER_TORQUE_NM),
-                     "[末级] θ=+20.5°（越硬限位）→ 只留回中力矩");
+                     "[末级] θ=+30.5°（越硬限位）→ 只留回中力矩");
     small_yaw_guard((float)(5.0 * YAW_DEG2RAD), 0.0f, 0.0f, 0.0f, &g2);
     YAW_SELFTEST_CHK(yaw_selftest_near(small_yaw_apply_limit_torque(0.7f, &g2), 0.7f),
                      "[末级] 行程中部: 内环输出原样通过");
@@ -1574,10 +1576,10 @@ int yaw_small_limit_selftest(yaw_selftest_report_fn report)
     YAW_SELFTEST_CHK((g.hard_limit == 1u) && yaw_selftest_near(g.torque, 0.0f) &&
                      yaw_selftest_near(g.allowed_rate, 0.0f),
                      "[异常] θ=NaN → 两侧都算越限 + 零力矩");
-    small_yaw_guard((float)(-26.0 * YAW_DEG2RAD), (float)(-30.0 * YAW_DEG2RAD),
+    small_yaw_guard((float)(-31.0 * YAW_DEG2RAD), (float)(-30.0 * YAW_DEG2RAD),
                     0.0f, 0.0f, &g);
     YAW_SELFTEST_CHK(yaw_selftest_deg(g.target_angle, -23.0f),
-                     "[异常] θ=−26°（越限）时目标角仍被夹到 −23°（误差天然指向内侧）");
+                     "[异常] θ=−31°（越限）时目标角仍被夹到 −28°（误差天然指向内侧）");
     small_yaw_guard(0.0f, 0.0f, 0.0f, 0.0f, NULL);   /* 必须不崩 */
     YAW_SELFTEST_CHK(1, "[异常] out = NULL 不崩溃");
 

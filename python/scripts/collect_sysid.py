@@ -153,21 +153,21 @@
 （全 0 ⇒ 下游等价于原来的"水平假设"）。
 
 ================================================================================
-七、小 yaw 行程三档（**非对称** −25° … +20°）
+七、小 yaw 行程三档（**对称 ±30°**）
 ================================================================================
 
-实测机械行程是 **min = −25°、max = +20°**（不是 ±45°，也不是 ±40°）。三档含义:
+实测机械行程是 **min = −30°、max = +30°**。三档含义:
 
 | 档 | 区间 | 用途 |
 |---|---|---|
-| ① 硬限位（机械行程） | **[−25°, +20°]** | 电控侧也按它限位；`SMALL_TRAVEL_MIN/MAX` |
+| ① 硬限位（机械行程） | **[−30°, +30°]** | 电控侧也按它限位；`SMALL_TRAVEL_MIN/MAX` |
 | ② 中止阈值（上位机） | 同上（触及即中止本段、数据不保存、PID 回中心） | 对应旧版的 ±45° 中止 |
-| ③ 参考包络 | **[−17°, +12°]**（两侧各留 8° 跟踪超调余量） | 激励参考、到位目标、held 保持目标都用它 |
+| ③ 参考包络 | **[−22°, +22°]**（两侧各留 8° 跟踪超调余量） | 激励参考、到位目标、held 保持目标都用它 |
 
-**中心是 −2.5°，不是 0**（`SMALL_CENTER_RAD = (min+max)/2`）: 行程不对称时 0 偏向 +20° 一侧，
-停在中心才能让到两端的余量相等（各 22.5°）。回中心/段尾保持/初始条件都用它。
+**中心 = 0°**（`SMALL_CENTER_RAD = (min+max)/2`，当前行程对称）。回中心/段尾保持/初始条件都用它；
+式子不假设对称 ⇒ 以后改成非对称行程（例如 [−25°,+20°] ⇒ −2.5°）会自动跟着走。
 
-**非对称 ⇒ 所有"±band"的对称写法全部改成区间运算**:
+**所有取值都写成区间运算（不假设对称，对称/非对称行程都能用）**:
   · 参考中心: 从**可行中心区间** `[env_min + 半幅, env_max − 半幅]` 里随机取
     （`random_center_for()`；而不是 `±(band − 半幅)`）；
   · 越界 guard: **整体等比缩放 + 平移到包络内**（`fit_into_interval()`；而不是绕 0 缩放）；
@@ -249,31 +249,40 @@ AUTO_AIM_ENABLE = 1                # 自瞄总开关（与电控手动开关相�
 PITCH_TARGET_ANGLE = 0.0           # pitch 固定 0（不进动力学）
 
 # ── 上位机 PID（与旧采集脚本一致，两批数据可直接对比/合并）──
-PID_KP, PID_KI, PID_KD = 2.0, 0.1, 0.2
+# ★ PID 增益（可用 --kp/--ki/--kd 覆盖）。
+#   原仓库是 2.0 / 0.1 / 0.2。实测反馈: **P 偏小（到位慢/有静差）+ 有震荡** ——
+#   震荡的来源基本是 kd 那项: 它用的是**未滤波的中心差分** ė，100 Hz 下角度量化
+#   (2π/8192 ≈ 7.7e-4 rad) 就会让 ė 抖 ±0.08 rad/s，×kd 直接变成力矩抖动。
+#   因此: kp 2.0→4.0（P 加大, 减少静差/加快到位）、kd 0.2→0.05（削弱差分噪声放大）、
+#   ki 保持 0.1（有抗饱和，不动）。这两项要按实车手感再调时用 CLI。
+PID_KP, PID_KI, PID_KD = 4.0, 0.1, 0.05
 PID_OUT_MIN, PID_OUT_MAX = -1.0, 1.0
 MAX_TORQUE_DELTA = 0.1             # 相邻两步力矩变化限幅 N·m（保护减速器）
 MAX_TX_FAIL = 50                   # 连续 50 帧发不出去 ⇒ 判定链路断开，报错退出（0.5 s）
 
-# ── 小 yaw 行程限位（**非对称**: −25° … +20°，用户实测机械行程）──
+# ── 小 yaw 行程限位（**对称 ±30°**，机械行程）──
 #   三档含义（详见文件头 "七、小 yaw 行程三档" 与 docs/sysid_data.md §5）:
-#     ① 硬限位（机械行程, 电控侧也按它限位）: [SMALL_TRAVEL_MIN, SMALL_TRAVEL_MAX] = [−25°, +20°]
+#     ① 硬限位（机械行程, 电控侧也按它限位）: [SMALL_TRAVEL_MIN, SMALL_TRAVEL_MAX] = [−30°, +30°]
 #     ② 中止阈值（上位机）: 与硬限位同值 —— 一旦触碰立刻中止本段、数据不保存、PID 回中心
-#     ③ 参考包络（激励/到位/保持都用它）: [SMALL_ENV_MIN, SMALL_ENV_MAX] = [−17°, +12°]
+#     ③ 参考包络（激励/到位/保持都用它）: [SMALL_ENV_MIN, SMALL_ENV_MAX] = [−22°, +22°]
 #        = 硬限位两侧各留 SMALL_TRACK_MARGIN(8°) 的跟踪超调余量
-#   ★ 行程非对称 ⇒ **任何地方都不能再用 ±band 的对称写法**: 一律改成基于 [min, max] 的
-#     区间运算（中心 = (min+max)/2 = −2.5°，而**不是 0**）。
-SMALL_TRAVEL_MIN = math.radians(-25.0)   # 硬限位下界（机械行程）
-SMALL_TRAVEL_MAX = math.radians(20.0)    # 硬限位上界
-SMALL_CENTER_RAD = 0.5 * (SMALL_TRAVEL_MIN + SMALL_TRAVEL_MAX)   # −2.5°（行程几何中心）
-#   ↑ 回中/段尾保持/初始条件都用**行程中心**而不是 0: 行程不对称时 0 偏向 +20° 一侧，
-#     停在中心才能让到两端的余量相等（−2.5° 到 −25° 有 22.5°，到 +20° 有 22.5°）。
+#   ★ 改行程要**三处一起改**: 这里、C++ 的 defaultMpcConfig().small.min/max_angle、
+#     电控侧 mcu_code_demo 的 YAW_SMALL_MIN_RAD/MAX_RAD。
+#   ★ 下面的取值全部写成基于 [min, max] 的**区间运算**（不假设对称），所以对称/非对称行程
+#     都能直接用；行程若是非对称（例如 [−25°,+20°]，中心 −2.5°），中心/包络会自动跟着走。
+SMALL_TRAVEL_MIN = math.radians(-30.0)   # 硬限位下界（机械行程）
+SMALL_TRAVEL_MAX = math.radians(30.0)    # 硬限位上界
+SMALL_CENTER_RAD = 0.5 * (SMALL_TRAVEL_MIN + SMALL_TRAVEL_MAX)   # 0°（当前行程对称）
+#   ↑ 回中/段尾保持/初始条件都用**行程中心**而不是硬编码 0: 当前行程对称 ⇒ 中心就是 0，
+#     但一旦行程改成非对称（例如 [−25°,+20°] 的中心是 −2.5°），这个式子会自动跟着变，
+#     保证到两端的余量相等。
 SMALL_ABORT_MIN = SMALL_TRAVEL_MIN       # 中止阈值（规格: 触及硬界限即中止本段）
 SMALL_ABORT_MAX = SMALL_TRAVEL_MAX
 SMALL_WARN_MARGIN = math.radians(3.0)    # 距硬限位 < 3° 只**告警**（不中止）
 SMALL_TRACK_MARGIN = math.radians(8.0)   # 参考包络相对硬限位留的跟踪超调余量（原为 8°）
-SMALL_ENV_MIN = SMALL_TRAVEL_MIN + SMALL_TRACK_MARGIN   # −17°
-SMALL_ENV_MAX = SMALL_TRAVEL_MAX - SMALL_TRACK_MARGIN   # +12°
-SMALL_ENV_HALF = 0.5 * (SMALL_ENV_MAX - SMALL_ENV_MIN)  # 包络半宽 = 14.5°
+SMALL_ENV_MIN = SMALL_TRAVEL_MIN + SMALL_TRACK_MARGIN   # −22°
+SMALL_ENV_MAX = SMALL_TRAVEL_MAX - SMALL_TRACK_MARGIN   # +22°
+SMALL_ENV_HALF = 0.5 * (SMALL_ENV_MAX - SMALL_ENV_MIN)  # 包络半宽 = 22°
 SMALL_REF_AMP = SMALL_ENV_HALF           # driven 参考的半幅上限（= 包络半宽）
 #   ↑ PID 跟带尖角（换向）的参考时实际角度会超出参考峰值（仿真实测 2°~14°）:
 #     参考只用到 ±(硬限位 − 8°) 的包络内，实际峰值才有余量不触碰中止阈值。
@@ -285,8 +294,8 @@ HELD_SMALL_MAX = 0.7 * SMALL_ENV_HALF    # held 小 yaw 随机目标半宽（保
 BIG_REF_AMP = math.radians(60.0)      # driven 大 yaw 参考半幅上限（大 yaw 多圈自由，仅防大摆）
 BIG_CENTER_JITTER = math.radians(30.0)  # driven 大 yaw 参考中心相对当前方位角的随机抖动
 HELD_BIG_OFFSET = math.pi             # held 大 yaw 目标: 现有角度 ±π 内随机（多圈连续）
-BIG_HOME_TOL = 0.05                   # 到位判据（rad）
-SMALL_HOME_TOL = 0.02
+# （到位判据已删: 与原仓库一样"PID 跑固定 2 s 就算到位"，不做收敛判定/多轮重试 ——
+#   判据不满足时的处理反而更麻烦，且原仓库就是这么做的，两批数据口径一致。）
 
 # ── 参考幅值: 既要"每段都有有效激励"，又不能超过该轴的安全半幅 ──
 #   下限**按轴给**: 小 yaw 行程只有 45° 宽（包络半宽才 14.5°），下限不能沿用大 yaw 的 14°。
@@ -308,8 +317,7 @@ BIG_PLANNER = dict(max_velocity=8.0, max_acceleration=30.0, max_jerk=800.0)
 SMALL_PLANNER = dict(max_velocity=3.0, max_acceleration=15.0, max_jerk=400.0)
 
 # ── 时序 ──
-SETTLE_SEC = 2.0                      # 采样前的到位+稳定时间（规格 1.5~2 s）
-SETTLE_MAX_ROUNDS = 3                 # 未收敛时最多再等几轮（每轮 SETTLE_SEC）
+SETTLE_SEC = 2.0                      # 采样前的到位+稳定时间（= 原仓库 pid_to_target(target, 2.0)）
 ZERO_FRAMES_AT_EXIT = 20              # 退出前必发的零力矩帧数（规格: 连发几帧）
 MAX_COOL_WAIT_S = 600.0               # 过热等待上限（超过则退出）
 COOL_HYSTERESIS_C = 5.0               # 降温到 max_temp − 5 ℃ 才恢复
@@ -1345,37 +1353,29 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
             f"两侧各留 {_deg(SMALL_TRACK_MARGIN):.0f}° 跟踪余量; 中心 {_deg(SMALL_CENTER_RAD):+.1f}°）")
         log(f"  held   大 yaw: 目标={plan.held_target:+.3f} rad（现有方位角 ±π 内随机）")
 
-    # ── 到位: 两个关节都像 driven 轴一样 PID 到位并稳定（规格 1.5~2 s）──
-    #    参考由轨迹规划器整形（不是阶跃），避免饱和过冲、也避免把小 yaw 顶到 45° 保护
+    # ── 到位: PID 跑固定 `--settle-sec`（默认 2.0 s）就算到位 —— 与原仓库
+    #    `pid_to_target(target, 2.0)` 完全同口径: 单次、不判收敛、不重试。
+    #    参考仍由轨迹规划器整形（不是阶跃），否则 PID 会饱和过冲把小 yaw 顶到限位。
     settle_n = max(1, int(round(args.settle_sec * RATE)))
     pids[0].reset()
     pids[1].reset()
-    settled = False
-    for round_i in range(SETTLE_MAX_ROUNDS):
-        st = link.read()
-        ref_big_home = homing_sequence(st.platform_azimuth, float(plan.ref_big[0]),
-                                       settle_n, planners["big"])
-        ref_small_home = homing_sequence(st.small_joint_angle, float(plan.ref_small[0]),
-                                         settle_n, planners["small"])
-        reason, _ = drive_steps(link, ref_big_home, ref_small_home, pids, limiters,
-                                args.max_temp)
-        if reason == "small_limit":
-            recenter(link, pids, limiters, args.max_temp)
+    st = link.read()
+    ref_big_home = homing_sequence(st.platform_azimuth, float(plan.ref_big[0]),
+                                   settle_n, planners["big"])
+    ref_small_home = homing_sequence(st.small_joint_angle, float(plan.ref_small[0]),
+                                     settle_n, planners["small"])
+    reason, _ = drive_steps(link, ref_big_home, ref_small_home, pids, limiters,
+                            args.max_temp)
+    if reason == "small_limit":
+        recenter(link, pids, limiters, args.max_temp)
+        return "abort"
+    if reason == "overheat":
+        if not cooldown(link, limiters, args.max_temp, "到位阶段温度过高"):
             return "abort"
-        if reason == "overheat":
-            if not cooldown(link, limiters, args.max_temp, "到位阶段温度过高"):
-                return "abort"
-            return "retry"
-        st = link.read()
-        e_big = wrap_pi(plan.ref_big[0] - st.platform_azimuth)
-        e_small = wrap_pi(plan.ref_small[0] - st.small_joint_angle)
-        log(f"  到位 {round_i + 1}/{SETTLE_MAX_ROUNDS}: "
-            f"err_big={_deg(e_big):+.2f}° err_small={_deg(e_small):+.2f}°")
-        if abs(e_big) < BIG_HOME_TOL and abs(e_small) < SMALL_HOME_TOL:
-            settled = True
-            break
-    if not settled:
-        log("  [WARN] 到位判据未满足（继续采样；起始段可能有残余瞬态）")
+        return "retry"
+    st = link.read()
+    log(f"  到位(PID {args.settle_sec:g}s): err_big={_deg(wrap_pi(plan.ref_big[0] - st.platform_azimuth)):+.2f}°"
+        f" err_small={_deg(wrap_pi(plan.ref_small[0] - st.small_joint_angle)):+.2f}°")
 
     # ── 采样: 300 点 @100 Hz ──
     log(f"  采样 {samples} 点 ({samples * DT:.2f} s @100Hz)…")
@@ -1464,6 +1464,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--tag", default=None, help="文件名 tag（默认按 axis 自动取 big/small）")
     p.add_argument("--seed", type=int, default=42, help="随机数种子（增强可复现）")
     p.add_argument("--max-temp", type=float, default=55.0, help="电机过温阈值 ℃")
+    p.add_argument("--kp", type=float, default=PID_KP, help=f"PID 比例增益（默认 {PID_KP}）")
+    p.add_argument("--ki", type=float, default=PID_KI, help=f"PID 积分增益（默认 {PID_KI}）")
+    p.add_argument("--kd", type=float, default=PID_KD,
+                   help=f"PID 微分增益（默认 {PID_KD}；注意用的是未滤波差分, 给大会抖）")
     p.add_argument("--settle-sec", type=float, default=SETTLE_SEC,
                    help="采样前到位+稳定时间 s（规格 1.5~2 s）")
     p.add_argument("--tilted", action="store_true",
@@ -1505,15 +1509,15 @@ def main(argv=None) -> int:
     targets = load_all_targets()
     planners = make_planners()
     rng = np.random.default_rng(args.seed)
-    pids = [PidController(PID_KP, PID_KI, PID_KD, PID_OUT_MIN, PID_OUT_MAX, "big"),
-            PidController(PID_KP, PID_KI, PID_KD, PID_OUT_MIN, PID_OUT_MAX, "small")]
+    pids = [PidController(args.kp, args.ki, args.kd, PID_OUT_MIN, PID_OUT_MAX, "big"),
+            PidController(args.kp, args.ki, args.kd, PID_OUT_MIN, PID_OUT_MAX, "small")]
     limiters = [TorqueRateLimiter(), TorqueRateLimiter()]
 
     log("=" * 78)
     log("双级 yaw 系统辨识数据采集 — 分轴激励（录制序列 + 增强 + 上位机 PID）")
     log(f"  段数={args.segments}  每段={samples} 点 ({samples * DT:.2f}s @{RATE:g}Hz)  "
         f"到位={args.settle_sec:g}s  种子={args.seed}")
-    log(f"  PID: kp={PID_KP} ki={PID_KI} kd={PID_KD} 输出限幅 ±{PID_OUT_MAX:g} N·m  "
+    log(f"  PID: kp={args.kp} ki={args.ki} kd={args.kd} 输出限幅 ±{PID_OUT_MAX:g} N·m  "
         f"力矩变化限幅 {MAX_TORQUE_DELTA:g} N·m/步")
     log(f"  仅力矩模式(mode=0)  pitch=0  小 yaw 行程="
         f"[{_deg(SMALL_TRAVEL_MIN):+.0f}°, {_deg(SMALL_TRAVEL_MAX):+.0f}°]（非对称）"

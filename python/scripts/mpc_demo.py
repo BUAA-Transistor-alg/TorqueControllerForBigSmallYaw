@@ -30,7 +30,7 @@ IMU 安装位置（可选开关）:
         ψ_big   = 大 yaw 平台 x 轴的世界方位角（IMU 直测）
         ψ_small = 小 yaw 输出 x 轴的世界方位角 = ψ_big + θ_small
     ψ_small 与 ψ_big 之差就是小 yaw 关节角指令 θ_small（本脚本幅值默认 0.12 rad ≈ 6.9°，
-    C++ 侧小 yaw 机械行程为 −25° ~ +20°（非对称，中心 −2.5°），且从两侧各向内 11.25° 起
+    C++ 侧小 yaw 机械行程为 ±30°（中心 0），且从两侧各向内 15° 起
     就加软限位代价（默认 ratio=0.75 ⇒ 软限位区 [−13.75°, +8.75°]）——所以默认幅值取在
     软限位区之内；要更大摆幅用 --amplitude 时请注意正侧只剩约 8.75° 的自由行程）。
   * 小 yaw 编码器（θ_small）是**可信实时量**；大 yaw 编码器有链路延迟，由估计器用
@@ -346,7 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="运行时长 s（<=0 表示一直跑到 Ctrl-C）")
     p.add_argument("--period", type=float, default=3.0, help="小 yaw 方位角正弦周期 s")
     p.add_argument("--amplitude", type=float, default=0.12,
-                   help="正弦幅值 rad（默认 0.12≈6.9°: 小 yaw 行程 −25°~+20°、正侧软限位 +8.75°; 实车先小幅度试）")
+                   help="正弦幅值 rad（默认 0.12≈6.9°: 小 yaw 行程 ±30°、软限位 ±15°; 实车先小幅度试）")
     p.add_argument("--rate", type=float, default=100.0, help="set() 调用频率 Hz")
     p.add_argument("--pitch", type=float, default=None,
                    help="pitch 目标角 rad（默认: 保持当前估计值）")

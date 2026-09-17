@@ -140,8 +140,8 @@ class SimConfig:
     # ── ★ 小 yaw 实际机械行程（用户实测确认，非对称）──
     #   硬界限 −25° ~ +20°（中心 −2.5°）：仿真里**从不触发**，触发即 bug（collect_sim 会硬报错）
     #   参考包络两侧各留 ~8° 跟踪余量 ⇒ −17° ~ +12°
-    small_travel_min_deg: float = -25.0
-    small_travel_max_deg: float = 20.0
+    small_travel_min_deg: float = -30.0
+    small_travel_max_deg: float = 30.0
     small_env_margin_deg: float = 8.0
     # 旧包络（本仓库早期假设，保留用于"新旧包络对比"）: 对称 ±40°，硬界限 ±45°
     small_legacy_env_deg: float = 40.0
@@ -1127,7 +1127,7 @@ def main(argv=None) -> int:
                 out = collect_sim(cfg, truth_plant, specs, rng)
                 print(f"[sim] 用时 {time.time()-t0:.1f}s")
                 tilted = any(abs(t) > 1e-9 for t in tilt)
-                env_txt = "新包络(−25°~+20°)" if env_mode == "asym" else "旧包络(±40°)"
+                env_txt = "新包络(±30°)" if env_mode == "asym" else "旧包络(±40°)"
                 tmax = max(abs(np.asarray(tilt)))
                 name = f"{env_txt} × {'水平' if not tilted else f'倾斜 ±{tmax:g}°'}"
                 pfix = (args.pfix == "all") or (args.pfix == "level" and not tilted)
@@ -1424,7 +1424,7 @@ def run_one_dataset(ds, truth_params, args, rng):
 # Markdown 报告
 # ============================================================================
 def _ds_short(rep) -> str:
-    env = {"asym": "新包络(−25°~+20°)", "legacy": "旧包络(±40°)"}.get(rep.get("env_mode"), "—")
+    env = {"asym": "新包络(±30°)", "legacy": "旧包络(±40°)"}.get(rep.get("env_mode"), "—")
     tilt = "水平" if not rep.get("tilted") else (
         "倾斜 ±" + "/".join(f"{abs(float(t)):g}" for t in sorted(set(abs(float(t)) for t in rep["tilt"]))) + "°")
     return f"{env} × {tilt}"

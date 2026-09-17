@@ -334,7 +334,7 @@ dual_yaw::DualYawMpcConfig toCpp(const TcbsDualYawMpcConfig_C& c) {
     // 小 yaw 回中目标角（C++ 侧 DualYawMpcConfig::small_center_angle）:
     // **C ABI 结构体布局已冻结**（TcbsDualYawMpcConfig_C 不新增字段、不升版本号），
     // 因此这里按行程中心派生 —— 与本仓库 defaultMpcConfig() 的默认值
-    // （0.5·(min_angle + max_angle)，[−25°,+20°] ⇒ −2.5°）语义一致。
+    // （0.5·(min_angle + max_angle)，对称行程 ±30° ⇒ 0）语义一致。
     // C++ 侧若要单独指定中心，请直接用 DualYawMpc::setConfig()。
     d.small_center_angle = 0.5 * (c.small.min_angle + c.small.max_angle);
     d.ref_delay_steps = c.ref_delay_steps;

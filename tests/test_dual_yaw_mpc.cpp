@@ -7,7 +7,7 @@
 //   - **MPC/辨识模型用合理 λ**（λ = 10，受数值可积性上限约束）。
 //   ⇒ 这本身构成"摩擦模型失配"，正好检验闭环鲁棒性与积分补偿的作用。
 //
-// ★ 小 yaw 的机械行程是**非对称的 −25° ~ +20°**（中心 −2.5°，不是 0）:
+// ★ 小 yaw 的机械行程是 ±30°（中心 0，见 defaultMpcConfig()）:
 //   - 所有限位断言都从 defaultMpcConfig() 的 cfg.small.min_angle/max_angle 取，
 //     **不写死** 0.7854/45° 之类的数字；
 //   - 场景 [6][7][8] 专门覆盖非对称行程: 两侧行程是否都被正确使用、是否不越限、
@@ -310,10 +310,11 @@ int main() {
               (double)(on.over_min + on.over_max), 0.0);
     }
 
-    printf("\n[6] 非对称行程 (a): 两侧行程都被用满且不越限（软限位区缩到 4.50°, 逼小 yaw 走满行程）\n");
+    printf("\n[6] 两侧行程都被用满且不越限（软限位区缩到 6.00°, 逼小 yaw 走满行程）\n");
     {
-        // 软限位区缩到 10%·总行程 = 4.5° ⇒ 允许关节贴到 −20.5° / +15.5°（旧实现的
-        // 对称公式会把负侧卡在 −15°）。大 yaw 强保持（权重 100）⇒ 只能小 yaw 出力。
+        // 软限位区缩到 10%·总行程 = 6.0°（行程 ±30°）⇒ 允许关节贴到 −24° / +24°。
+        // 两侧独立推导（不假设对称）⇒ 换非对称行程也不用改这里。
+        // 大 yaw 强保持（权重 100）⇒ 只能小 yaw 出力。
         DualYawMpcConfig cdeep = cfg;
         cdeep.small_limit_soft_ratio = 0.9;
         cdeep.w_big_azimuth = 100.0;
@@ -321,35 +322,35 @@ int main() {
         printf("   该场景软限位区 [%.2f°, %.2f°]\n", sd.lo / kDeg, sd.hi / kDeg);
 
         auto big_ref = constantRef(n, 0.0);
-        // 负侧: 要求 −0.55 rad (−31.5°), 远超 −25° 硬限位
-        auto neg_ref = smoothStepRef(n, dt, 0.0, -0.55, 4.0);
+        // 负侧: 要求 −0.70 rad (−40.1°), 远超 −30° 硬限位
+        auto neg_ref = smoothStepRef(n, dt, 0.0, -0.70, 4.0);
         auto mn = runClosedLoop(ctrl_model, plant_model, cdeep, T, 0.0, big_ref, neg_ref, false, 0.0, nullptr);
         printf("   负侧: θs 最小 %.4f rad (%.2f°), 越下侧计数 %d\n",
                mn.min_small_joint, mn.min_small_joint / kDeg, mn.over_min);
-        check(mn.min_small_joint >= smin - 1e-6, "负侧未越 −25° 硬限位", -mn.min_small_joint, -smin);
-        check(mn.min_small_joint <= -(19.0 * kDeg), "负侧行程被用满（≥19°）", -mn.min_small_joint, 19.0 * kDeg);
+        check(mn.min_small_joint >= smin - 1e-6, "负侧未越 −30° 硬限位", -mn.min_small_joint, -smin);
+        check(mn.min_small_joint <= -(24.0 * kDeg), "负侧行程被用满（≥24°）", -mn.min_small_joint, 24.0 * kDeg);
         check(mn.min_small_joint >= sd.lo - 5.0 * kDeg, "负侧未深入软限位区（≤5° 越界余量）",
               sd.lo - mn.min_small_joint, 5.0 * kDeg);
 
-        // 正侧: 要求 +0.45 rad (+25.8°), 超过 +20° 硬限位
-        auto pos_ref = smoothStepRef(n, dt, 0.0, 0.45, 4.0);
+        // 正侧: 要求 +0.70 rad (+40.1°), 超过 +30° 硬限位
+        auto pos_ref = smoothStepRef(n, dt, 0.0, 0.70, 4.0);
         auto mp = runClosedLoop(ctrl_model, plant_model, cdeep, T, 0.0, big_ref, pos_ref, false, 0.0, nullptr);
         printf("   正侧: θs 最大 %.4f rad (%.2f°), 越上侧计数 %d\n",
                mp.max_small_joint, mp.max_small_joint / kDeg, mp.over_max);
-        check(mp.max_small_joint <= smax + 1e-6, "正侧未越 +20° 硬限位", mp.max_small_joint, smax);
-        check(mp.max_small_joint >= +(14.0 * kDeg), "正侧行程被用满（≥14°）", mp.max_small_joint, 14.0 * kDeg);
+        check(mp.max_small_joint <= smax + 1e-6, "正侧未越 +30° 硬限位", mp.max_small_joint, smax);
+        check(mp.max_small_joint >= +(24.0 * kDeg), "正侧行程被用满（≥24°）", mp.max_small_joint, 24.0 * kDeg);
         check(mp.max_small_joint <= sd.hi + 5.0 * kDeg, "正侧未深入软限位区（≤5° 越界余量）",
               mp.max_small_joint - sd.hi, 5.0 * kDeg);
 
         // 软限位几何（两侧独立）: MPC 报的 small_ref_over_limit 必须与实测软限位一致
         printf("   软限位判定: soft=[%.4f, %.4f] rad\n", sd.lo, sd.hi);
         check(!refOverLimit(ctrl_model, cfg, 0.0), "参考在行程内 → 不报越软限位", 0.0, 0.0);
-        check(!refOverLimit(ctrl_model, cfg, 0.14), "参考 +8.0° (< 8.75°) → 不报越软限位", 0.14, soft.hi);
-        check(refOverLimit(ctrl_model, cfg, 0.20), "参考 +11.5° (> 8.75°) → 报越软限位", 0.20, soft.hi);
-        check(!refOverLimit(ctrl_model, cfg, -0.22), "参考 −12.6° (> −13.75°) → 不报越软限位",
+        check(!refOverLimit(ctrl_model, cfg, 0.14), "参考 +8.0° (< 15°) → 不报越软限位", 0.14, soft.hi);
+        check(refOverLimit(ctrl_model, cfg, 0.30), "参考 +17.2° (> 15°) → 报越软限位", 0.30, soft.hi);
+        check(!refOverLimit(ctrl_model, cfg, -0.22), "参考 −12.6° (> −15°) → 不报越软限位",
               -0.22, -soft.lo);
-        check(refOverLimit(ctrl_model, cfg, -0.26), "参考 −14.9° (< −13.75°) → 报越软限位",
-              -0.26, -soft.lo);
+        check(refOverLimit(ctrl_model, cfg, -0.30), "参考 −17.2° (< −15°) → 报越软限位",
+              -0.30, -soft.lo);
     }
 
     printf("\n[7] 非对称行程 (b): 回中代价把冗余自由度拉向**行程中心 −2.5°**（而不是 0）\n");
