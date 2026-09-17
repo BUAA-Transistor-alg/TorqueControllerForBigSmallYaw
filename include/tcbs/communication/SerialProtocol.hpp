@@ -83,6 +83,19 @@ public:
     void stopWorker();
     bool sendData(SendPacketT& packet);
 
+    // ── 链路自检用的只读状态（tools/test_serial.cpp 需要知道"到底选中/打开了哪个口"）──
+    //   isOpen()  : 串口是否已成功打开
+    //   portName(): 实际选中的 /dev/ttyACM*（未选中则为空串）
+    bool        isOpen()   const { return port_open_.load(); }
+    std::string portName() const { return port_; }
+
+    // ── 端口枚举（只读工具 / 现场排查"为什么找不到串口"用）──
+    //   getSerialProductInfo : 由 udev 读 USB 设备的 iProduct（与 PortSelector 的入参同一来源）
+    //   findAvailableSerialPorts : 当前可打开的 /dev/ttyACM* 列表
+    //   两者都不依赖实例状态，故为 static，可脱离实例单独调用。
+    static std::string              getSerialProductInfo(const std::string& port);
+    static std::vector<std::string> findAvailableSerialPorts();
+
 private:
     static constexpr size_t BUFFER_SIZE     = 1024;
     static constexpr size_t MAX_FRAME_LENGTH = 256;
@@ -102,8 +115,10 @@ private:
     std::chrono::steady_clock::time_point last_reconnect_time;
     std::chrono::steady_clock::time_point last_received_time;
 
-    std::string getSerialProductInfo(const std::string& port);
-    std::vector<std::string> findAvailableSerialPorts();
+    // ── 只读状态（声明在最后：构造函数初始化列表顺序必须与声明顺序一致，见下 -Wreorder 注释）──
+    std::string             port_;              // initializeSerial() 选中的端口，未选中为空
+    std::atomic<bool>       port_open_{false};  // 是否已成功 open
+
     void initializeSerial();
     void processFrame(const uint8_t* data, size_t frame_length);
     void processBuffer();
@@ -181,7 +196,7 @@ bool SerialProtocol<S, R, C, P, L>::sendData(S& packet) {
 }
 
 template <typename S, typename R, auto C, auto P, size_t L>
-std::string SerialProtocol<S, R, C, P, L>::getSerialProductInfo(const std::string& port) {
+std::string SerialProtocol<S, R, C, P, L>::getSerialProductInfo(const std::string& port) {  // static
     struct udev *udev;
     struct udev_device *dev;
     std::string result = "";
@@ -200,7 +215,7 @@ std::string SerialProtocol<S, R, C, P, L>::getSerialProductInfo(const std::strin
 }
 
 template <typename S, typename R, auto C, auto P, size_t L>
-std::vector<std::string> SerialProtocol<S, R, C, P, L>::findAvailableSerialPorts() {
+std::vector<std::string> SerialProtocol<S, R, C, P, L>::findAvailableSerialPorts() {  // static
     struct dirent *entry;
     DIR *dp = opendir("/dev/");
     if (dp == nullptr) { printf("Failed to open /dev/ directory\n"); return {}; }
@@ -217,6 +232,7 @@ std::vector<std::string> SerialProtocol<S, R, C, P, L>::findAvailableSerialPorts
 }
 template <typename S, typename R, auto C, auto P, size_t L>
 void SerialProtocol<S, R, C, P, L>::initializeSerial() {
+    port_open_ = false;          // 每次（含重连）都从"未打开"重新判定
     auto ports = findAvailableSerialPorts();
     if (ports.empty()) { printf("No available serial port found!\n"); return; }
     std::string port;
@@ -226,6 +242,7 @@ void SerialProtocol<S, R, C, P, L>::initializeSerial() {
         } catch (...) {}
     }
     if (port.empty()) { printf("Target serial port not found!\n"); return; }
+    port_ = port;                // ★ 供 isOpen()/portName() 只读查询（tools/test_serial.cpp）
     fd_ = open(port.c_str(), O_RDWR | O_NOCTTY | O_NDELAY);
     if (fd_ < 0) { printf("Failed to open port %s: %s\n", port.c_str(), strerror(errno)); return; }
     struct termios tty; memset(&tty, 0, sizeof(tty));
@@ -240,6 +257,7 @@ void SerialProtocol<S, R, C, P, L>::initializeSerial() {
     tty.c_cc[VMIN] = 0; tty.c_cc[VTIME] = 1;
     if (tcsetattr(fd_, TCSANOW, &tty) != 0) { printf("tcsetattr failed\n"); close(fd_); fd_ = -1; return; }
     tcflush(fd_, TCIOFLUSH);
+    port_open_ = true;
     printf("Serial initialized: %s\n", port.c_str());
 }
 template <typename S, typename R, auto C, auto P, size_t L>

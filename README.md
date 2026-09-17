@@ -20,6 +20,19 @@
 > `docs/calibration.md`（§2 参数总表、§3 运动学、§4 参数辨识、§5 力矩常数、§6 顺序）；
 > 本节是"一张纸的清单"，含**必须自己手工测量**的量。
 
+### 0. 先决条件: 串口链路自检（不是标定，但不过这一步后面全是白做）
+
+```bash
+./build/tcbs_test_serial --list      # 两个口选对了吗？（iProduct 是否互不相同）
+./build/tcbs_test_serial --selftest  # 包布局/字段偏移/CRC8/安全不变量（纯软件）
+./build/tcbs_test_serial             # 实车: 100 Hz 发零力矩帧 + 逐帧打印协议字段
+```
+
+`--list` 里 MCU / IMU 两列都必须有 `YES`；逐帧打印必须出现 `[MCU #n]`（说明 CRC8 与
+字段偏移都对得上）；1 Hz 统计行里 **`MCU2 新样本 n/s`** 就是 §3.1 要标的
+`transport_delay_s` 所依赖的那条低速链路的真实刷新率。安全约定与常见坑见
+`docs/calibration.md` §3.0（含 `--wait=0` 跳过预检、`--no-send` 纯监听）。
+
 ### A. 手工测量（不进辨识，但缺一不可）
 
 | 量 | 怎么测 | 精度 | 填到哪 |
@@ -103,7 +116,12 @@ cd build && ctest --output-on-failure
 ./tcbs_test_yaw_state_estimator     # 用真实时钟跑约 4s
 ./tcbs_test_dual_yaw_mpc            # 闭环仿真（λ=100 被控对象 vs λ=10 MPC 模型）
 
-# 实车
+# 实车 —— ★ 第一步永远是串口链路自检（移植自原仓库 test_serial）
+./tcbs_test_serial --list                    # 枚举串口 + 打印 MCU/IMU 会选中哪个口（无需硬件）
+./tcbs_test_serial --selftest                # 纯软件自检（包布局/字段偏移/CRC8/安全不变量）
+./tcbs_test_serial --no-send                 # 实车最安全: 只监听不发，逐帧打印收到的数据
+./tcbs_test_serial --dur=10 --imu --raw      # 发零力矩帧 + 打印 MCU/IMU 每帧 + 十六进制原文
+
 ./tcbs_control_demo --dur=10                 # 正弦方位角跟踪
 
 # 参数辨识: 采集（Python，无硬件可 --dry-run）+ 拟合（C++ 线性最小二乘 / torch 可导仿真）
@@ -122,7 +140,7 @@ python3 python/scripts/compare_ident_methods.py --sim-only          # 三种方�
 ```
 
 产物（`build/`）: `libtcbs_robot_comm_c.so`（C++/C/Python 动态库）、`libtcbs_communication.a`（静态库）、
-`tcbs_control_demo`、`tcbs_identify_params`、`tcbs_mpc_param_eval`、`tcbs_pitch_calibration`、三个测试程序。
+`tcbs_control_demo`、`tcbs_identify_params`、`tcbs_mpc_param_eval`、`tcbs_pitch_calibration`、`tcbs_test_serial`（实车链路自检，**不注册 ctest**）、三个 ctest 测试程序。
 
 > **作为子模组嵌入父工程**（模块标识 `tcbs`）: 本仓库的全部对外名字都带 `tcbs_` 前缀，
 > C++ 代码整体在 `namespace tcbs` 内，头文件一律走 `#include "tcbs/..."`，
@@ -488,6 +506,7 @@ include/tcbs/                  # ★ 所有头文件都在 include/tcbs/ 下（�
   c_api/RobotCommunicationC.h  # C ABI（供 python/外部程序）
 src/                           # 对应实现
 tools/
+  test_serial.cpp              # ★ 串口链路自检（原仓库 test_serial 的移植；--list/--selftest/--no-send）
   identify_params.cpp          # 线性最小二乘辨识（SNR 加权 / held 模式 / 帧对齐搜索 / SVD 截断）
   pitch_calibration.cpp        # ★ pitch 映射标定（两段线性拟合；--sim/--selftest；★需 IMU 在头上）
   mpc_param_eval.cpp           # MPC 参数评估（用辨识参数跑闭环）
@@ -500,7 +519,7 @@ python/
   scripts/collect_sysid.py     # ★ 辨识数据采集（录制目标序列+增强+PID，分轴，100Hz）
   scripts/identify_params_torch.py    # torch 可导仿真输出误差法拟合
   scripts/compare_ident_methods.py    # 三种辨识方法仿真对比
-  scripts/calibrate_small_zero.py     # ★ 小 yaw 零位标定（离心平衡法，无需外部基准）
+  scripts/calibrate_small_zero.py     # ★ 小 yaw 零位标定（手动零点为主，离心/重力法作实验交叉）
   scripts/mpc_demo.py          # 控制台示例（小 yaw 正弦跟踪；可切 IMU 构型/临时改 8 参）
   scripts/c_api_selftest.py    # C API / 绑定自检（无硬件可跑）
   torque_controller/           # ctypes 绑定（对应 C API v4: 平面 8 参模型）
@@ -577,6 +596,7 @@ docs/
 | 求解器 | Ceres + 参数箱式边界（线搜索） | Ceres + LM 信任域（约束内移，求值次数降 ~6×） |
 | 参数 | J/τ_c/b 四个标量 | **8 个可辨识参数**（4 摩擦 + `Jbig_eff` + `Js` + `P` 两分量）+ 线性最小二乘/torch 辨识工具链 |
 | 协议 | 单 yaw 通道 | 双 yaw 通道 + 模式位 + 时戳 |
+| 链路工具 | `tcs_test_serial`（打印收到的每帧） | `tcbs_test_serial`（同用途，另加 `--list` 端口/选择器诊断、`--selftest` 包布局与安全不变量自检、`--no-send` 纯监听、1 Hz 链路统计；安全上 `auto_aim_enable` 默认 0、pitch 目标默认 0 而不是硬编码 `10.0f`） |
 
 ---
 

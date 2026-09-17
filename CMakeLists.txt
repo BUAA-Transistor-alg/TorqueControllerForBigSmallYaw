@@ -148,6 +148,18 @@ target_link_libraries(tcbs_pitch_calibration PRIVATE tcbs::communication)
 #       add_dependencies(<父工程 target> tcbs_pitch_calibration)
 #   （对外名字仍带 tcbs_ 前缀；可执行文件从不进 target_link_libraries。）
 
+# 串口链路自检（移植自原仓库 src/test_serial.cpp → tcs_test_serial）:
+#   ./build/tcbs_test_serial --list       # 枚举串口 + 打印 MCU/IMU 选择结果（无需硬件）
+#   ./build/tcbs_test_serial --selftest   # 纯软件自检（包布局/CRC/安全不变量）
+#   ./build/tcbs_test_serial              # 实车: 发零力矩帧 + 打印收到的每帧
+# ⚠ 名字里带 test 但**不是 ctest 用例**（不 add_test）: 它是实车链路工具，
+#   不依赖 gtest / 断言框架，靠自身退出码表达成败（0/1/2/130）。
+#   与 tcbs_test_* 三个 ctest 程序的命名区分见 docs/calibration.md §3.0。
+add_executable(tcbs_test_serial tools/test_serial.cpp)
+set_target_properties(tcbs_test_serial PROPERTIES OUTPUT_NAME tcbs_test_serial)
+target_compile_features(tcbs_test_serial PRIVATE cxx_std_17)
+target_link_libraries(tcbs_test_serial PRIVATE tcbs::communication)
+
 # MPC 参数评估工具: 用辨识出来的参数跑闭环，比较不同 (模型 λ, 积分子步) 的表现
 add_executable(tcbs_mpc_param_eval tools/mpc_param_eval.cpp ${TCBS_MPC_SOURCES})
 set_target_properties(tcbs_mpc_param_eval PROPERTIES OUTPUT_NAME tcbs_mpc_param_eval)

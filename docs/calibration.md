@@ -121,6 +121,42 @@
 
 ## 3. 运动学标定（必须先做）
 
+### 3.0 前置: 串口链路自检 `tcbs_test_serial`（★ 上实车第一个跑的程序）
+
+后面**所有**标定都建立在"串口通、协议对、字段没错位"之上，所以第一步永远是它。
+工具源码 `tools/test_serial.cpp`（移植自原仓库 `TorqueController/src/test_serial.cpp`，
+用途不变: 打印收到的每一帧协议字段 + 按固定节拍发无害帧）。
+
+```bash
+./build/tcbs_test_serial --list       # ① 枚举串口 + 打印 MCU/IMU 会选中哪个口（无需硬件）
+./build/tcbs_test_serial --selftest   # ② 纯软件自检: 包布局/字段偏移/CRC8/安全不变量
+./build/tcbs_test_serial              # ③ 实车: 100 Hz 发零力矩帧 + 逐帧打印收到的数据
+./build/tcbs_test_serial --no-send    # ③' 实车最安全模式: 一个字节都不发，只监听
+./build/tcbs_test_serial --dur=10 --imu --raw   # 跑 10 s，IMU 也逐帧打印 + 十六进制原文
+```
+
+它回答四个问题:
+
+| # | 问题 | 看哪里 |
+|---|---|---|
+| ① | 串口在不在、选中的是哪个口 | `--list` 的表；重点看 MCU/IMU 两列是不是 `YES`，以及两个 USB 设备的 `iProduct` 是否**互不相同**（选择器靠 `iProduct == "AutoAim_IMU_Com"` 区分，两个口 iProduct 相同就会分错） |
+| ② | 我们发的帧电控收不收 | 逐帧打印里的 `TX ok/fail`；`fail` 一直涨 ⇒ 口没打开（权限/占用/未插） |
+| ③ | 电控/IMU 的帧我们解不解得出来 | 有 `[MCU #n]` / `[IMU #n]` 打印即 CRC 通过；一直"无数据"但 `--list` 有 YES ⇒ 波特率或前导不对 |
+| ④ | 链路质量 | 1 Hz 统计行: MCU/IMU 帧率、`MCU2 新样本 n/s`（= `mcu2_seq` 递增率，也就是 §0 那条 MCU1↔MCU2 低速链路的真实刷新率，标 `transport_delay_s` 时要用）、静默告警 |
+
+**安全**（与其它工具同一套约定）: 两个 yaw 关节恒为「`YAW_MODE_TORQUE_ONLY` + 0 N·m」，
+`fire` 恒 0，`auto_aim_enable` **默认 0**（原仓库写 1）——本工具不发任何运动指令；
+任何退出路径（正常 / 报错 / Ctrl+C）都先连发 20 帧零力矩。要动 pitch 必须显式 `--pitch=<rad>`
+且 `|pitch| > 0.5 rad` 直接拒绝（原仓库硬编码的 `10.0f` 在本构型恒等映射下 = 573°，见 §3.3.1）。
+
+> 命名提醒: `tcbs_test_serial` 名字里带 `test`，但**不是 ctest 用例**（CMake 里不 `add_test`）——
+> 它是实车链路工具，靠退出码表达成败（0 正常 / 1 预检失败或无硬件 / 2 参数错误 / 130 Ctrl+C）。
+> ctest 里的三个才是自动化测试: `tcbs_test_planar_yaw_model`、`tcbs_test_yaw_state_estimator`、
+> `tcbs_test_dual_yaw_mpc`（对应 `tests/` 下的源文件）。
+
+> 常见坑: 电控比上位机晚开机时，预检会失败退出。用 `--wait=0` **跳过预检**直接进主循环
+> （此时靠统计行里的静默告警提示收不到数据），上位机就能先跑起来等电控上电。
+
 ### 3.1 大 yaw 通道的映射、偏差与年龄（用 IMU，无需外部仪器）
 
 **注意语义变化**: 大 yaw（以及底盘 IMU）的值经 MCU1↔MCU2 链路传来（约 10Hz、间隔不规则、
@@ -632,26 +668,31 @@ python3 python/scripts/compare_ident_methods.py --sim-only --segments=6
 
 ## 6. 标定顺序（照这个顺序做，避免返工）
 
-1. **机械/装配核对**: 两 yaw 轴是否平行（倾角必须 < 0.2°，否则 §2 的反解与"方位角之和"
+1. **串口链路自检（§3.0）**: `./build/tcbs_test_serial --list` 确认两个口选对了，
+   再 `./build/tcbs_test_serial` 确认收发与字段解码都正常。**这一步不过，后面全是白做**；
+2. **机械/装配核对**: 两 yaw 轴是否平行（倾角必须 < 0.2°，否则 §2 的反解与"方位角之和"
    语义都不成立）、限位实际角度、编码器零位方向；
-2. `McuDataPreprocessor` 的 pitch 映射（**临时把 IMU 装到头上**后跑 `./build/tcbs_pitch_calibration`，见 §3.3.1；
+3. `McuDataPreprocessor` 的 pitch 映射（**临时把 IMU 装到头上**后跑 `./build/tcbs_pitch_calibration`，见 §3.3.1；
    无硬件先 `--sim`/`--selftest` 自检）；
-3. IMU 安装旋转（`R_A_IMU` 或 `R_H_IMU`，取决于 `imu_location`）的倾斜部分 +
+4. IMU 安装旋转（`R_A_IMU` 或 `R_H_IMU`，取决于 `imu_location`）的倾斜部分 +
    重力方向校核（§3.2）；
-4. 临时装上 head IMU → 标定小 yaw/pitch 编码器映射与安装旋转全量（§3.3），
+5. 临时装上 head IMU → 标定小 yaw/pitch 编码器映射与安装旋转全量（§3.3），
    并用随机轨迹做整体校核（<0.5°）；
-5. 大 yaw 编码器 scale/offset 与链路延迟（§3.1），用 `big_enc_innovation`、`big_enc_age` 在线复核；
-6. 视轴 `bore` 与 pitch 轴方向（§3.4）；
-7. **实测几何 `d`**（两轴平面偏置，卡尺/三坐标）——它不进辨识，但按比例影响 `P` 的物理含义；
-8. 力矩常数校核（§5）；
-9. **小 yaw 零位标定（§3.5 离心平衡法，不需要外部基准）**: `python3 python/scripts/calibrate_small_zero.py`
-   （先 `--sim` 估粘滞带 → 再实机双向多次平均）→ 把 `Δoffset` 写进 `recv_small_yaw_offset`；
-10. **动力学辨识（§4）**: 分轴采集（录制目标序列+增强+PID，100Hz，pitch≡0，另一轴 PID 保持
-   到随机位置）→ LS（`--held=ideal` / `--held=measured`）+ torch 三种方法对比 → 取一致结果；
-11. 用辨识结果替换 `planar_yaw_params.h`（或运行时 `setModelParams`），跑
-    `tcbs_test_planar_yaw_model`(回归一致性) 与 `tcbs_test_dual_yaw_mpc`(闭环)，再上车低幅验证，
-    最后用 `tcbs_control_demo` 交互验证；
-12. 记录本次标定的时间、温度（摩擦随温度变化）、电池/电压条件。
+6. 大 yaw 编码器 scale/offset 与链路延迟（§3.1），用 `big_enc_innovation`、`big_enc_age` 在线复核；
+7. 视轴 `bore` 与 pitch 轴方向（§3.4）；
+8. **实测几何 `d`**（两轴平面偏置，卡尺/三坐标）——它不进辨识，但按比例影响 `P` 的物理含义
+   （`d` 错 k 倍 ⇒ 辨识出的 `|P|` 错 1/k 倍；当前默认 0.10 m，见 `planar_yaw_params.h`）；
+9. 力矩常数校核（§5）；
+10. **小 yaw 零位标定（§3.5，手动零点优先，不需要外部基准）**: `python3 python/scripts/calibrate_small_zero.py`
+   （先 `--sim` 确认流程 → 再实机 `--method=manual` 多次平均）→ 把 `Δoffset` 写进
+   `recv_small_yaw_offset`；**写回后必须复核限位**（小 yaw 的 −25°/+20° 是按新零点解释的）；
+11. **动力学辨识（§4）**: 分轴采集（录制目标序列+增强+PID，100Hz，pitch≡0，另一轴 PID 保持
+   到随机位置；**必须含一组固定 ~10° 倾角数据**，否则 `P` 不可辨识）→ LS（`--held=ideal` /
+   `--held=measured`）+ torch 三种方法对比 → 取一致结果；
+12. 用辨识结果替换 `planar_yaw_params.h`（或运行时 `setModelParams`），跑
+   `tcbs_test_planar_yaw_model`(回归一致性) 与 `tcbs_test_dual_yaw_mpc`(闭环)，再上车低幅验证，
+   最后用 `tcbs_control_demo` 交互验证；
+13. 记录本次标定的时间、温度（摩擦随温度变化）、电池/电压条件。
 
 ---
 
