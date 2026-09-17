@@ -18,8 +18,12 @@ namespace dual_yaw {
 inline ModelParams defaultModelParams() {
     ModelParams p;
     // ── 实测几何（★ 请按实际机械填写）──
-    p.dx = 0.030;         // 小 yaw 轴相对大 yaw 轴的平面偏置
-    p.dy = 0.0;
+    // d = 小 yaw 轴相对大 yaw 轴的平面偏置（大 yaw 系下，m）。它只以「耦合项」形式进入模型:
+    //   M12 = Js + d·Q(θs)、M11 = Jbig_eff + Js + 2·d·Q、μ = ∂M11/∂θs = 2(dy·Qx − dx·Qy)
+    //   ⇒ d 错 k 倍, 同数据辨识出的 |P| 就会错 1/k 倍（**必须实测, 不要用占位值**）。
+    // 默认 0.10 = 本构型实测轴间距（≈0.1 m，见 docs/sysid_ls_vs_torch.md §1、data/cars/README.md）。
+    p.dx = 0.10;          // ★ 实测轴间距（大 yaw 轴 → 小 yaw 轴，沿大 yaw 系 x = 右）
+    p.dy = 0.0;           // 若两轴前后也有偏置，在这里填（否则保持 0）
     p.gravity = 9.81;
     p.m_u_known = 0.0;    // 不称重 ⇒ 保持 0（仅倾斜时 m_u·d·g⊥ 项受影响）
 

@@ -173,7 +173,9 @@ class PlanarParams:
     """平面 8 参模型参数 + 实测几何（几何量不参与辨识）。"""
 
     # ── 实测几何 / 固定量 ──
-    dx: float = 0.030
+    # ★ 默认 = 本构型实测轴间距 0.10 m（与 C++ defaultModelParams()/ModelParams 一致）。
+    #   d 只以耦合项进入模型 ⇒ d 错 k 倍, 辨识出的 |P| 就错 1/k 倍, 换机械务必改这里或 --dx。
+    dx: float = 0.10
     dy: float = 0.0
     gravity: float = 9.81
     m_u_known: float = 0.0
@@ -1834,7 +1836,7 @@ def _build_argparser():
                     help="逗号分隔的 8 个初值（默认用 CAD 占位值 defaultModelParams()）")
     ap.add_argument("--truth-params", type=str, default=None,
                     help="逗号分隔的 8 个真值/参考值（收敛曲线上的虚线；默认画初值 φ0）")
-    ap.add_argument("--dx", type=float, default=0.030, help="实测几何 dx (m)")
+    ap.add_argument("--dx", type=float, default=0.10, help="实测几何 dx (m)，默认 = 实测轴间距 0.10")
     ap.add_argument("--dy", type=float, default=0.0, help="实测几何 dy (m)")
     ap.add_argument("--model-lambda", type=float, default=FRICTION_LAMBDA,
                     help="★ 辨识模型的摩擦软符号陡度 λ；默认 10 = 本仓库约定（与前向仿真/"

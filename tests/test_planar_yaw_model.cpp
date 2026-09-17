@@ -325,9 +325,16 @@ void testRegressor() {
             pp[j] += h; pm[j] -= h;
             ModelParams pa, pb;
             vectorToParams(pp, pa); vectorToParams(pm, pb);
-            pa.frictionLambda = pb.frictionLambda = p.frictionLambda;
-            pa.tau_offset_big = pb.tau_offset_big = p.tau_offset_big;
-            pa.tau_offset_small = pb.tau_offset_small = p.tau_offset_small;
+            // ★ vectorToParams 只写 8 个**待辨识**参数 ⇒ 必须把非辨识量（几何 d、重力、
+            //   m_u、λ、τ_offset）从 p 拷回来, 否则有限差分用的是结构体默认几何、
+            //   而解析 regressor 用的是 p 的几何 ⇒ 二者不可比（曾因两处默认值恰好相同而掩盖）。
+            for (ModelParams* q : {&pa, &pb}) {
+                q->dx = p.dx; q->dy = p.dy;
+                q->gravity = p.gravity; q->m_u_known = p.m_u_known;
+                q->frictionLambda = p.frictionLambda;
+                q->tau_offset_big = p.tau_offset_big;
+                q->tau_offset_small = p.tau_offset_small;
+            }
             double ta[2], tb[2];
             inverseDynamics(q, qd, qdd, pa, e, ta);
             inverseDynamics(q, qd, qdd, pb, e, tb);

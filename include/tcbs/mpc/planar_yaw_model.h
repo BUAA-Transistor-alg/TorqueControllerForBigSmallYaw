@@ -64,8 +64,10 @@ namespace dual_yaw {
 constexpr int kNumParams = 8;
 
 struct ModelParams {
-    // ── 实测几何 ──
-    double dx = 0.03, dy = 0.0;      // 小 yaw 轴相对大 yaw 轴的平面偏置 (m)
+    // ── 实测几何（★ 必须与 dual_yaw::defaultModelParams() 保持一致，实际使用请改那里）──
+    //   注意: d 只以「耦合项」进入模型（M12 = Js + d·Q、M11 = Jbig_eff + Js + 2·d·Q、
+    //   μ = 2(dy·Qx − dx·Qy)）⇒ d 错 k 倍, 同数据辨识出的 |P| 就错 1/k 倍。
+    double dx = 0.10, dy = 0.0;      // 小 yaw 轴相对大 yaw 轴的平面偏置 (m)，默认=实测轴间距 0.10
     double gravity = 9.81;           // 重力加速度 (m/s²)
     // 可选: 上装质量（**仅**用于倾斜时 m_u·d·g⊥ 那一项；不称重时保持 0 即可）
     double m_u_known = 0.0;
