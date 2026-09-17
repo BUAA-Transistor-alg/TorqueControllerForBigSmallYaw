@@ -132,6 +132,22 @@ set_target_properties(tcbs_identify_params PROPERTIES OUTPUT_NAME tcbs_identify_
 target_compile_features(tcbs_identify_params PRIVATE cxx_std_17)
 target_link_libraries(tcbs_identify_params PRIVATE tcbs::robot_comm_c)
 
+# pitch 轴映射标定（两段线性拟合，需临时把 IMU 装到头上 = ON_HEAD 构型）:
+#   ./build/tcbs_pitch_calibration --sim        # 无硬件自检（虚拟台架 + 断言）
+#   ./build/tcbs_pitch_calibration --selftest   # 纯数学自检
+#   实车用法与安全约定见 tools/pitch_calibration.cpp 文件头与 docs/calibration.md §3.3
+add_executable(tcbs_pitch_calibration tools/pitch_calibration.cpp)
+set_target_properties(tcbs_pitch_calibration PROPERTIES OUTPUT_NAME tcbs_pitch_calibration)
+target_compile_features(tcbs_pitch_calibration PRIVATE cxx_std_17)
+target_link_libraries(tcbs_pitch_calibration PRIVATE tcbs::communication)
+# ⚠ 关于 `add_library(tcbs::pitch_calibration ALIAS ...)`: CMake **不支持**给 add_executable
+#   目标建 ALIAS —— `add_library(<name> ALIAS <target>)` 要求 <target> 必须是库，
+#   对可执行文件实测报错 "add_library cannot create ALIAS target ... because target
+#   ... is not a library"（CMake 3.22，且没有版本提供该能力）。
+#   本工具是**可执行文件**，父工程不需要"链接"它、只需"确保它被构建"，故约定用
+#       add_dependencies(<父工程 target> tcbs_pitch_calibration)
+#   （对外名字仍带 tcbs_ 前缀；可执行文件从不进 target_link_libraries。）
+
 # MPC 参数评估工具: 用辨识出来的参数跑闭环，比较不同 (模型 λ, 积分子步) 的表现
 add_executable(tcbs_mpc_param_eval tools/mpc_param_eval.cpp ${TCBS_MPC_SOURCES})
 set_target_properties(tcbs_mpc_param_eval PROPERTIES OUTPUT_NAME tcbs_mpc_param_eval)

@@ -25,7 +25,7 @@
 
 | 类别 | 规则 | 本仓库（`tcbs`）示例 |
 |---|---|---|
-| CMake target | `<pfx>_<原名>` + `add_library(<pfx>::<原名> ALIAS ...)` | `tcbs_robot_comm_c` / alias `tcbs::robot_comm_c` |
+| CMake target | `<pfx>_<原名>` + `add_library(<pfx>::<原名> ALIAS ...)`（**可执行目标无法建 ALIAS**: `add_library(<x> ALIAS <t>)` 要求 `<t>` 是库；工具类可执行文件只做 `<pfx>_` 前缀，父工程用 `add_dependencies()` 依赖它） | `tcbs_robot_comm_c` / alias `tcbs::robot_comm_c`；工具 `tcbs_pitch_calibration`（无 alias） |
 | 产物文件名 | `set_target_properties(<tgt> PROPERTIES OUTPUT_NAME <pfx>_<原名>)` | `libtcbs_robot_comm_c.so` |
 | ctest 名 | `add_test(NAME <pfx>_<原名> ...)` | `tcbs_mpc_closed_loop` |
 | C 函数名 | `<pfx>_` 前缀 | `tcbs_robot_comm_create` |

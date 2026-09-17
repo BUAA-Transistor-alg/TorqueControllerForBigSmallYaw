@@ -34,7 +34,7 @@
 
 | 项 | 标定方法 | 目标精度 |
 |---|---|---|
-| `recv_pitch_*` / `send_pitch_*` | 旧仓库 `pitch_calibration` 思路（本项目不重做 pitch 动力学） | 0.2° |
+| `recv_pitch_*` / `send_pitch_*` | ★ `./build/tcbs_pitch_calibration --points=20 --min=<原始单位下限> --max=<原始单位上限>`（两段线性拟合：`recv_*`: 电控原始值→关节角，`send_*`: 关节角→下发值；无硬件先跑 `--sim`/`--selftest`）。**前提: IMU 临时装到头上**（`ImuLocation::ON_HEAD`）—— 否则 `imu.euler_pitch` 不是 pitch 关节角、结果无效（§3.3） | 0.2° |
 | `recv_small_yaw_scale` | **临时 head IMU 法**（`docs/calibration.md` §3.3）——大 yaw 静止、小 yaw 慢速三角波 | 0.05° |
 | `recv_small_yaw_offset`（**零位**） | ★ **手动零点捕获**：`python3 python/scripts/calibrate_small_zero.py --method=manual --repeats=3 --note="<用的工装/基准>"`（力矩 0、人工摆到正确零点、读编码器求 `Δoffset`；重复性就是精度上限）。离心/重力平衡法（`--method=centrifugal/gravity`）只作实验性交叉校核 | 0.2~1°（取决于人工重复性） |
 | `recv_big_yaw_scale/offset` | **IMU 法**（§3.1）：底盘静止时 `Δ(IMU 方位角) == Δ(关节角)` | 0.05° |
@@ -112,10 +112,17 @@ python3 python/scripts/collect_sysid.py --tag=small --segments=6    # 小 yaw �
 ./tcbs_identify_params data/sysid/sysid_big_*.csv --held=measured
 python3 python/scripts/identify_params_torch.py --data='data/sysid/sysid_*.npz'
 python3 python/scripts/compare_ident_methods.py --sim-only          # 三种方法仿真对比
+
+# pitch 映射标定（两段线性拟合）: ★ 需把 IMU 临时装到头上（ON_HEAD）
+./tcbs_pitch_calibration --sim                # 无硬件自检（虚拟台架 + 断言，秒级）
+./tcbs_pitch_calibration --selftest           # 纯数学自检（拟合核心）
+./tcbs_pitch_calibration --help               # 选项与构型警告
+./tcbs_pitch_calibration --points=20 --min=<原始单位下限> --max=<原始单位上限>   # 实车
+# ↑ 实车默认范围是 -0.30/+0.30 **弧度**，跨度 > 1.2 rad 会拒绝开跑（确认单位/行程后加 --force-range）
 ```
 
 产物（`build/`）: `libtcbs_robot_comm_c.so`（C++/C/Python 动态库）、`libtcbs_communication.a`（静态库）、
-`tcbs_control_demo`、`tcbs_identify_params`、`tcbs_mpc_param_eval`、三个测试程序。
+`tcbs_control_demo`、`tcbs_identify_params`、`tcbs_mpc_param_eval`、`tcbs_pitch_calibration`、三个测试程序。
 
 > **作为子模组嵌入父工程**（模块标识 `tcbs`）: 本仓库的全部对外名字都带 `tcbs_` 前缀，
 > C++ 代码整体在 `namespace tcbs` 内，头文件一律走 `#include "tcbs/..."`，
@@ -482,6 +489,8 @@ include/tcbs/                  # ★ 所有头文件都在 include/tcbs/ 下（�
 src/                           # 对应实现
 tools/
   identify_params.cpp          # 线性最小二乘辨识（SNR 加权 / held 模式 / 帧对齐搜索 / SVD 截断）
+  pitch_calibration.cpp        # ★ pitch 映射标定（两段线性拟合；--sim/--selftest；★需 IMU 在头上）
+  mpc_param_eval.cpp           # MPC 参数评估（用辨识参数跑闭环）
 tests/
   test_planar_yaw_model.cpp    # 模型验证（独立实现比对/解析特例/回归矩阵/能量一致性）
   test_yaw_state_estimator.cpp # 状态估计验证（延迟补偿/反解/来源）
@@ -512,7 +521,11 @@ docs/
 1. 用大 yaw 上的 IMU 标定大 yaw 编码器的比例/零位**与链路延迟**（底盘静止时
    Δ(IMU 方位角) 必须等于 Δ(关节角)）；
 2. 用**临时装回云台终端的 IMU** 标定小 yaw/pitch 编码器映射与 IMU 安装旋转，
-   并校核反解精度（< 0.5°）；
+   并校核反解精度（< 0.5°）；其中 **pitch 映射用本仓库工具**
+   `./build/tcbs_pitch_calibration --points=20 --min=<原始单位下限> --max=<原始单位上限>`
+   （两段线性拟合，直接打印可粘贴的 `recv_pitch_*`/`send_pitch_*` 四行；
+   **前提是 IMU 临时装在头上**，见 `docs/calibration.md` §3.3）；
+   无硬件时先跑 `./build/tcbs_pitch_calibration --sim`（虚拟台架 + 断言）与 `--selftest`；
 3. **小 yaw 零位（必须先做，后面所有小 yaw 角度语义都依赖它）**:
    首选 `python/scripts/calibrate_small_zero.py --method=manual` ——
    **小 yaw 力矩置 0、人工把它摆到"准确的零点"位置，此刻读出编码器角度**，

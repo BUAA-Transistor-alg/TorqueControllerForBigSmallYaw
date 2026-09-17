@@ -236,7 +236,7 @@ fric_k = fc_k·tanh(λ·θ̇_k) + fv_k·θ̇_k                      （λ 固定
 | 小 yaw 输出方位角 | `平台方位角 + θ_s`（编码器） | **头 IMU 直测**（pitch 不影响 x 轴方位角） |
 | 大 yaw 关节角速度 | `gyro·a_imu − ω_chassis` | `gyro·a_imu(θ_p) − ω_chassis − θ̇_s`（**多减一项小 yaw 编码器角速度**） |
 | 重力 `g_A` | `R_mount·g_imu`（不需 θ_b） | `Rz(θ_s)Rx(θ_p)·R_head_mount·g_imu`（不需 θ_b） |
-| pitch 标定 | 本项目不做（用原仓库方法） | 同左（此时头上有 IMU，可用原仓库的 pitch 标定流程） |
+| pitch 标定 | 用 `tcbs_pitch_calibration`（需 IMU 在头上） | 同左（此时头上有 IMU，`imu.euler_pitch` 就是 pitch 关节角） |
 
 **两构型实测对比**（`tests/test_yaw_state_estimator.cpp`，同一真值轨迹与同一 MCU 链路，
 `[4]/[5]/[6]` 三个场景；数字为最大误差）:

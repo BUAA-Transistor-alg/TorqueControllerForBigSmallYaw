@@ -58,8 +58,8 @@
 
 | 参数 | 含义 | 默认 | 标定方式 | 精度要求 |
 |---|---|---|---|---|
-| `send_pitch_scale/offset` | pitch 目标角 → 电控值 | 旧标定值 | 沿用 `pitch_calibration` 思路: 给一组 pitch 目标，测量实际 pitch 角，线性拟合 | 0.2° |
-| `recv_pitch_scale/offset` | 电控原始 pitch → 实际关节角 | 旧标定值 | 同上（用临时 head IMU 或角度尺） | 0.2° |
+| `send_pitch_scale/offset` | pitch 关节角 → 电控下发原始值 | 1 / 0（占位恒等） | ★ **`tcbs_pitch_calibration`**（§3.3.1）: 扫描一组 pitch 目标、采样 head IMU 与电控原始值，两段线性拟合的 **Fit2**；**前提 IMU 在头上** | 0.2° |
+| `recv_pitch_scale/offset` | 电控原始 pitch → 关节角 | 1 / 0（占位恒等） | 同一个工具（§3.3.1）的 **Fit1**（`mcu.pitch_angle → imu.euler_pitch`）；**不要照抄旧构型数值** | 0.2° |
 | `recv_big_yaw_scale/offset` | 大 yaw 编码器 → 关节角 | 1 / 0（电控已给弧度） | **§3.1 用 IMU 标定**（若发现比例不对，把修正写到这里） | 0.05° |
 | `recv_small_yaw_scale/offset` | 小 yaw 编码器 → 关节角 | 1 / 0 | **零位: §3.5 离心平衡法（不需要外部基准）；比例: §3.3 用临时 head IMU** | 0.05° |
 | `send_*_torque_scale` | N·m → 电控力矩单位 | 1 | 一般保持 1（力矩常数写在电控侧）；如需在上位机统一单位则在此换算 | — |
@@ -198,11 +198,67 @@
 2. 由 `R_head = R_imu_big·R_A_IMUᵀ·Rz(θ_s)·Rx(p)` 可知，此时 head 的 yaw 变化量
    ≈ θ_s 的变化量 ⇒ 对"编码器值 ↔ IMU 推出的 θ_s"做线性拟合得到
    `recv_small_yaw_scale/offset`；
-3. 换成 pitch 做同样的动作，得到 `recv_pitch_scale/offset`；
+3. **pitch 映射用本仓库工具**（不要手算、也不要照抄旧构型数值），见下一小节；
 4. **整体校核**: 让两关节同时运动（随机轨迹），逐点比较反解姿态与 head IMU 姿态的
    欧拉角差；合格判据: 三个欧拉角误差 < 0.5°、LOS 方位角误差 < 0.5°。
    这一步同时验证了 `R_A_IMU`、小 yaw/pitch 映射与两轴平行假设。
 5. 标定完成后拆掉临时 IMU；此后小 yaw/pitch 编码器即作为"实时可信量"使用。
+
+#### 3.3.1 pitch 映射标定: `tcbs_pitch_calibration`（★ 前提: IMU 在头上）
+
+工具: `./build/tcbs_pitch_calibration`（源码 `tools/pitch_calibration.cpp`，算法与原仓库
+`TorqueController/src/pitch_calibration.cpp` 逐段一致）。
+
+**前提（不满足则结果完全无效）**: IMU 必须**临时装在头上**
+（`YawStateEstimator::Config::ImuLocation::ON_HEAD`，与 head 固连、位于 pitch 之后）。
+只有这时 `imu.euler_pitch` **才是 pitch 关节角**。若 IMU 仍固定在大 yaw 转子上
+（本工程默认构型 `ON_BIG_YAW`），`imu.euler_pitch` 是"大 yaw + 小 yaw + pitch"的合成倾角，
+标出的 4 个数毫无意义（照抄进 `McuDataPreprocessor` 会把 pitch 目标角映射到错误值，
+有顶到机械限位的风险）。程序启动时会醒目打印这条警告。
+
+**方法与物理解释（两段线性拟合）**:
+
+| 段 | 自变量 → 因变量 | 得到的参数 | 物理含义（对应 `LinearParams` 的定义） |
+|---|---|---|---|
+| Fit1 | `mcu.pitch_angle`（电控上报的**原始值**）→ `imu.euler_pitch`（物理关节角真值） | `recv_pitch_scale/offset` | 接收映射: **关节角 = scale·原始值 + offset** |
+| Fit2 | `imu.euler_pitch`（物理关节角真值）→ `pitch_target_angle`（下发的**原始值**） | `send_pitch_scale/offset` | 发送映射: **下发原始值 = scale·关节角 + offset** |
+
+两段**必须分别拟合**：电控内环本身有增益/偏置误差，"该下发多少"与"编码器读到多少"
+并不互逆（原仓库实测 `recv≈1.12`、`send≈20.5`，比值就是这种非互逆性的极端例子）。
+流程: 先测扫描范围两端 → 二分找出 `mcu_pitch_angle` 的 0.1/0.9 分位对应的目标角 →
+只在 `[target_0.1, target_0.9]` 内**从两端向中间交替**采样（默认 20 点）→ 两段拟合 + R²。
+**两端各 10% 行程的端点样本不参与拟合**（避开机械限位/力矩饱和/边缘非线性），
+工具会打印参与/未参与拟合的样本数与拟合区间。
+
+**安全**: 两个 yaw 关节一律"仅力矩模式 + 零力矩"（本工具不驱动 yaw），pitch 只发目标角；
+任何退出路径（正常/报错/Ctrl+C）都先连发零力矩帧再关串口。
+
+```bash
+./build/tcbs_pitch_calibration --sim         # 无硬件自检: 虚拟台架 + 4 参数断言
+./build/tcbs_pitch_calibration --selftest    # 纯数学自检（拟合核心）
+./build/tcbs_pitch_calibration --help        # 选项 + "IMU 必须在头上"的警告
+# 实车（★ 范围/单位必须按本车确认，见下）
+./build/tcbs_pitch_calibration --points=20 --min=<原始单位下限> --max=<原始单位上限> \
+        --dwell=1.0 --out=data/cars/<车名>/pitch_calib.txt
+```
+
+⚠ **不要照抄旧构型数值**: 旧仓库 `LinearParams` 的 pitch 四项（`send≈20.52/0.475`、
+`recv≈1.12/−0.17`）对应的是**旧构型**（IMU 在云台终端、且那台车的电控原始单位不同）的语义；
+二者互不为逆（复合比例 ≈ 23）。本构型下照抄会把 pitch 目标角放大 20 倍以上（危险）。
+每台新车都要用本工具重标，并且 `--min/--max` 要按本车**电控原始单位**与
+**pitch 实际机械行程**确认。
+
+**扫描范围默认值与保护**（★ 与旧仓库不同）:
+
+- 默认范围 = `--min=−0.30 --max=+0.30`，单位是**弧度**。理由: 本构型的 pitch 映射默认为
+  **恒等占位**（`McuDataPreprocessor` 的 pitch 四项 = 1/0），`pitch_target_angle` 直接被电控
+  当成弧度用；旧仓库的 `−10 / 30` 是**旧电控原始单位**下的经验值，照抄会被当成 −573°/+1719°
+  下发，可能顶到机械限位。
+- **跨度保护**: 若 `max−min > 1.20 rad`（≈69°）且未显式加 `--force-range`，工具**拒绝开跑**
+  （`参数错误: pitch 扫描跨度 ... 超过安全上限`，退出码 1，不碰串口）。确认本车单位与行程
+  确实这么大之后再 `--force-range`；不确定时先用 `--min=-0.1 --max=0.1 --points=5` 小范围试探，
+  从回读的 `mcu.pitch_angle` 判断单位（几弧度 = 弧度；几十/几百 = 度或计数）。
+- `--sim` / `--selftest` 不受此保护约束（无硬件）。
 
 ### 3.4 视轴（bore）方向与 pitch 轴方向
 
@@ -214,6 +270,11 @@
   若实际 pitch 轴与该 x 轴有夹角，把它并入 `head_mount_*` / 小 yaw 映射里一并标定，
   或在反解里补一个小的安装旋转（反解与 `gravity_a`/关节轴投影两处**必须一致**）。
   注: 平面 8 参模型**不含 pitch 动力学**，pitch 角只出现在反解与重力投影里。
+- **pitch 关节角本身怎么来**: 由 §3.3.1 的 `tcbs_pitch_calibration` 标定
+  （`recv_pitch_*` 把电控原始值换成关节角、`send_pitch_*` 把关节角换回下发值）。
+  该工具**必须在"IMU 临时装在头上"的构型下使用**——因为它的真值就是 `imu.euler_pitch`；
+  若 IMU 在大 yaw 转子上，得到的不是 pitch 关节角。pitch 轴方向与 pitch 映射要一起看:
+  反解里 `Rx(p)` 的 p 就是这里的关节角，两者都不允许照抄旧构型的数值（见 §3.3.1）。
 
 ---
 
@@ -472,7 +533,7 @@ pitch 链的一切（平面化简后已并入 `Js/P`）。
 | 平滑 | `TrajectoryPlanner(30/50/2000)` + `StepRefinementWrapper`（与原仓库一致） |
 | 激励方式 | **上位机 PID**（`kp=2, ki=0.1, kd=0.2`，输出 ±1.0 带抗积分饱和，力矩变化率限 0.1 N·m/步）+ **仅力矩模式**下发给电控 ⇒ 记录值即实际施加值，无隐藏内环 |
 | 分轴 | 每段**只激励一个关节**；另一关节由 PID **保持在一个固定位置**（大 yaw: 随机位置；小 yaw: 在 `[−17°, +12°]` 内随机，实际还会再收一点余量以顶住耦合扰动）；两轴都要先 PID 到位再采样 |
-| pitch | **固定为 0**，不参与采集（pitch 标定用原仓库方法，见 §3.3） |
+| pitch | **固定为 0**，不参与采集（pitch 映射用 `tcbs_pitch_calibration` 单独标定，见 §3.3.1） |
 | 采样率 | **固定 100 Hz**（与原仓库一致），每段 300 点 |
 | 记录 | 两轴的**力矩 + 角 + 角速度**（必须两轴都记！见 §4.2），外加底盘数据与 `mcu2_seq`（入档但拟合不用） |
 | 底盘 | 静止、水平（可能小范围晃动，忽略；拟合时 `gravity_a = 0`、`ω_c = α_c = 0`） |
@@ -562,7 +623,8 @@ python3 python/scripts/compare_ident_methods.py --sim-only --segments=6
 
 1. **机械/装配核对**: 两 yaw 轴是否平行（倾角必须 < 0.2°，否则 §2 的反解与"方位角之和"
    语义都不成立）、限位实际角度、编码器零位方向；
-2. `McuDataPreprocessor` 的 pitch 映射（沿用旧标定值，或重新做）；
+2. `McuDataPreprocessor` 的 pitch 映射（**临时把 IMU 装到头上**后跑 `./build/tcbs_pitch_calibration`，见 §3.3.1；
+   无硬件先 `--sim`/`--selftest` 自检）；
 3. IMU 安装旋转（`R_A_IMU` 或 `R_H_IMU`，取决于 `imu_location`）的倾斜部分 +
    重力方向校核（§3.2）；
 4. 临时装上 head IMU → 标定小 yaw/pitch 编码器映射与安装旋转全量（§3.3），
@@ -609,7 +671,8 @@ rc.setMpcConfig(mpc_cfg);                            // 权重/限位/N/积分�
    若需要更激进的前馈，可由 `ω_c` 微分估计后填入（噪声需权衡）。
 4. **pitch 动力学被有意简化掉**: 平面 8 参模型不含 pitch，`pitch_acc` 只用于上报
    （`pitch_acc_lpf_alpha` 仅影响该上报量），pitch 的惯量/质心影响已并入 `Js` 与 `P`；
-   pitch 自身的标定沿用旧仓库的方法（本项目不采集、不辨识 pitch）。
+   pitch 自身的标定由 `tcbs_pitch_calibration` 单独做（见 §3.3.1，需 IMU 在头上；
+   本项目不采集、不辨识 pitch 动力学）。
 5. **时变因素**: 摩擦随温度、润滑、线缆拖拽变化；惯量随负载（相机/弹丸）变化。
    建议把"辨识参数 + 少量积分补偿"作为组合方案，而不是追求一次性精确模型。
 6. **底盘角速度保持时长是当前最大的不确定性来源**: 它经 MCU1↔MCU2 链路传来且值被保持
