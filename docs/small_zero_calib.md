@@ -469,8 +469,10 @@ P = |P| · R(−θ*_meas) · d̂          （θ*_meas 用**当前/新坐标系**
 
 原仓库 `TorqueController/data/cars/*/params/Identified_parameters.txt`（单 yaw 整体辨识）:
 `J = 0.016541 / 0.024986 kg·m²`、`tau_c = 0.097297 / 0.122514 N·m`、`b = 0.032100 / 0.025648`。
-用户说明: **大小 yaw 参数取同量级，大 yaw 因承载小 yaw ≈ 翻倍**；**轴间距 ≈ 0.1 m**；
+用户说明: **大小 yaw 参数取同量级，大 yaw 因承载小 yaw ≈ 翻倍**；
 **小 yaw 上装 ≈0.1 kg、质心位移 ≈0.1 m ⇒ |P| ≈ 0.01 kg·m**。
+（当时对轴间距的估计是"≈0.1 m"，**后来实测为 `(dx, dy) = (0, 0.07)` m** —— 见
+`planar_yaw_params.h` 与 `data/archive/20260916_geom_0_007/README.md`。）
 
 仿真/`--dry-run` 现在默认用这套（`calibrate_small_zero.py` 的 `REAL` 与 `collect_sysid.py`
 的 `PlanarYawPlant` 默认值，**并且 CLI 参数已真正驱动 `--sim` 的 plant**）:
@@ -553,7 +555,7 @@ F2 配重 |P|×11 离心@π       stick  0.0  3.14   2   2    2    2     1.981  
 
 ### 10.5 `collect_sysid.py --dry-run` 同步改了 plant 参数
 
-`PlanarYawPlant` 默认值已换成同一套真实参数（`dx=0.1`、`P=(0.00866,0.005)`、
+`PlanarYawPlant` 默认值已换成同一套真实参数（**`(dx, dy)=(0, 0.07)`（实测）**、`P=(0.00866,0.005)`、
 `Jbig_eff=0.050`、`Js=0.020`、`fcBig=0.22`、`fvBig=0.055`、`fcSmall=0.0973`、`fvSmall=0.028`）。
 `--dry-run --segments=2` 复测: 仍然跑通，2/2 段保存；
 **大 yaw 力矩饱和样本从 66/300 变为 55/300**（`fc_big` 变大、`fv_big` 也变大，

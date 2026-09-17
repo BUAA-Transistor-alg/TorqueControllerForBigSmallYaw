@@ -391,7 +391,9 @@ def drag_shift_deg(omega, c, truth) -> float:
 #    Identified_parameters.txt: J=0.016541/0.024986, tau_c=0.097297/0.122514,
 #    b=0.0321/0.025648；大小 yaw 同量级、大 yaw 因承载小 yaw ≈翻倍；
 #    轴间距 ≈0.1 m；小 yaw 上装 m_u≈0.1 kg、质心位移 ρ≈0.1 m ⇒ |P|≈0.01 kg·m）──
-REAL = dict(dx=0.1, dy=0.0, p_moment=0.01, p_angle_deg=30.0,   # P 与 d 偏 30°（避免 θ*=0）
+# ★ 实测几何 (dx, dy) = (0, 0.07): 两轴横向无偏置、小 yaw 轴在大 yaw 轴前方 0.07 m
+#   ⇒ d 沿 +y（90°）; P 取 30° ⇒ 两者夹角 60° = θ*（非 0，避免退化；见 theta_star）。
+REAL = dict(dx=0.0, dy=0.07, p_moment=0.01, p_angle_deg=30.0,
             Js=0.020, Jbig_eff=0.050, fcSmall=0.0973, fvSmall=0.028,
             fcBig=0.22, fvBig=0.055, frictionLambda=100.0,
             zero_offset=0.05, gravity=9.81)
@@ -402,11 +404,12 @@ def sim_truth_from_args(args) -> dict:
 
     默认值就是上面的真实量级参数（用户给的处方）。
     """
-    d = args.d_offset if args.d_offset else REAL["dx"]
+    # --d-offset 是**标量轴间距**（|d|）；本构型 d 纯在 y 方向 ⇒ 放到 dy，dx 保持 0
+    d = args.d_offset if args.d_offset else REAL["dy"]
     pm = args.p_moment if args.p_moment else REAL["p_moment"]
     ang = math.radians(args.p_angle_deg)
     fc = args.fc_small if args.fc_small else REAL["fcSmall"]
-    return dict(dx=float(d), dy=0.0, Px=float(pm) * math.cos(ang), Py=float(pm) * math.sin(ang),
+    return dict(dx=REAL["dx"], dy=float(d), Px=float(pm) * math.cos(ang), Py=float(pm) * math.sin(ang),
                 Js=float(args.js), Jbig_eff=float(args.jbig), fcSmall=float(fc),
                 fvSmall=float(args.fv_small), fcBig=float(args.fc_big),
                 fvBig=float(args.fv_big), frictionLambda=100.0,

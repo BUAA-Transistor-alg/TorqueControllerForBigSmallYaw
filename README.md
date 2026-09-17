@@ -37,7 +37,7 @@
 
 | 量 | 怎么测 | 精度 | 填到哪 |
 |---|---|---|---|
-| **两 yaw 轴平面偏置 `d = (dx, dy)`** | 卡尺/三坐标量两轴中心距与方向（A 系 x-y 平面内） | ±0.5 mm | `ModelParams::dx/dy`（`planar_yaw_params.h`） |
+| **两 yaw 轴平面偏置 `d = (dx, dy)`** | 卡尺/三坐标量两轴中心距与方向（A 系 x-y 平面内）。**本构型已实测 = `(0, 0.07)` m**（横向无偏置、小 yaw 轴在大 yaw 轴**前方** 0.07 m） | ±0.5 mm | `ModelParams::dx/dy`（`planar_yaw_params.h`，**已按实测填好**） |
 | **小 yaw 实际行程两端角度** | 手动（力矩 0）转到两侧机械限位，读编码器；确认 `[−25°, +20°]` | ±0.2° | `defaultMpcConfig().small.min_angle/max_angle` + 电控宏 `YAW_SMALL_MIN/MAX_RAD` |
 | **两关节力矩能力**（峰值力矩 × 减速比 × 效率） | 电机手册 + **实测堵转/斜坡**（不要只信手册） | — | `big/small.max_torque`、`max_torque_rate`（**直接决定控制权限与安全**） |
 | （可选）上装质量 `m_u` | 电子秤 | ±10 g | `ModelParams::m_u_known`（不称重填 0，代价见 §8-8） |
@@ -78,10 +78,12 @@
 python3 python/scripts/collect_sysid.py --tag=big   --segments=6 --tilted --held-big-stratified
 python3 python/scripts/collect_sysid.py --tag=small --segments=6 --tilted
 # ② 拟合（torch 输出误差法为主，LS 交叉校核；λ 固定 100，不改）
-python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' --dx=<实测dx> \
+# ★ 几何已按实测填好（(dx, dy) = (0, 0.07)），实机数据**不需要**再给 --dx/--dy；
+#   只有换机械或跑旧归档数据（用 (0.10, 0) 生成的那批）时才显式覆盖
+python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' \
         --truth-params=<若有真值> --epochs=1000
-./build/tcbs_identify_params data/sysid/*.csv --held=measured --dx=<实测dx> --lambda=100
-./build/tcbs_identify_params data/sysid/*.csv --held=ideal    --dx=<实测dx> --lambda=100
+./build/tcbs_identify_params data/sysid/*.csv --held=measured --lambda=100
+./build/tcbs_identify_params data/sysid/*.csv --held=ideal    --lambda=100
 # ③ 结果填进 include/tcbs/mpc/planar_yaw_params.h 的 defaultModelParams()（或运行时 setModelParams）
 ```
 

@@ -873,7 +873,7 @@ class PlanarYawPlant:
         #   大 yaw 因承载小 yaw ≈翻倍; 轴间距 ≈0.1 m; 小 yaw 上装 m_u≈0.1 kg、ρ≈0.1 m
         #   ⇒ |P|≈0.01 kg·m, 方向与 d 偏 30°）
         p = dict(
-            dx=0.1, dy=0.0, gravity=9.81, m_u_known=0.0,
+            dx=0.0, dy=0.07, gravity=9.81, m_u_known=0.0,
             Jbig_eff=0.050, Js=0.020, Px=0.00866, Py=0.005,
             fcBig=0.22, fvBig=0.055, fcSmall=0.0973, fvSmall=0.028,
             frictionLambda=SIM_FRICTION_LAMBDA,     # ★ 大 λ = 更接近真实库仑摩擦
