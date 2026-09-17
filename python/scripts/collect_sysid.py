@@ -255,7 +255,7 @@ PITCH_TARGET_ANGLE = 0.0           # pitch 固定 0（不进动力学）
 #   (2π/8192 ≈ 7.7e-4 rad) 就会让 ė 抖 ±0.08 rad/s，×kd 直接变成力矩抖动。
 #   因此: kp 2.0→4.0（P 加大, 减少静差/加快到位）、kd 0.2→0.05（削弱差分噪声放大）、
 #   ki 保持 0.1（有抗饱和，不动）。这两项要按实车手感再调时用 CLI。
-PID_KP, PID_KI, PID_KD = 4.0, 0.1, 0.05
+PID_KP, PID_KI, PID_KD = 2.0, 0.01, 0.1
 PID_OUT_MIN, PID_OUT_MAX = -1.0, 1.0
 MAX_TORQUE_DELTA = 0.1             # 相邻两步力矩变化限幅 N·m（保护减速器）
 MAX_TX_FAIL = 50                   # 连续 50 帧发不出去 ⇒ 判定链路断开，报错退出（0.5 s）

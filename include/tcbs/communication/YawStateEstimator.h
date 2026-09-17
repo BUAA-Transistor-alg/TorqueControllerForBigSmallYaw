@@ -97,7 +97,7 @@ public:
         // 链路传输时延（s）: 从"值被 MCU1 打包"到上位机收到的时延（串口+转发+调度）。
         // 注意: MCU 侧不提供时钟，因此这里只标**传输**时延（很小，十几 ms 量级）；
         // 值的**年龄**由上位机计时（从首次看到该新样本序号起算）后上报。
-        double transport_delay_s = 0.015;
+        double transport_delay_s = 0.0;
         // 单次测量可修正的最大幅度（rad）: 抗编码器跳变/坏帧
         double big_enc_max_jump = 0.30;
         // 大于该采样年龄视为"过旧"（在 Provenance.stale 中反映；估计仍继续用 IMU 速率积分）
@@ -106,7 +106,7 @@ public:
         // 且底盘角速度本身变化缓慢），因此其"可用"超时取得比 stale_age_s 宽松得多
         double chassis_imu_timeout_s = 1.0;
         // 可信量（小 yaw / pitch 编码器）外推上限（s）: 防 MCU 停流时发散
-        double max_extrap_s = 0.05;
+        double max_extrap_s = 0.30;
         // 角速度低通系数（编码器差分/陀螺投影）
         double rate_lpf_alpha = 0.35;
         double pitch_rate_lpf_alpha = 0.25;
