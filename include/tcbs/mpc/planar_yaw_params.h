@@ -81,15 +81,19 @@ inline DualYawMpcConfig defaultMpcConfig() {
 
     c.small.max_torque = 0.5;        // N·m（★ 占位：小 yaw 电机力矩能力）
     c.small.max_torque_rate = 80.0;  // N·m/s
-    // ── 小 yaw 机械行程（**非对称**: −25° ~ +20°）──
+    // ── 小 yaw 机械行程（**对称** ±30°）──
     // 大 yaw 可多圈自由转（min/max = ∓1e9 = 不限位）; 小 yaw 只能在这个区间内转动。
-    c.small.min_angle = -25.0 * M_PI / 180.0;  // −25°
-    c.small.max_angle =  20.0 * M_PI / 180.0;  // +20°
+    //   ★ 该值必须与电控侧硬限位宏（mcu_code_demo 的 YAW_SMALL_MIN_RAD/MAX_RAD）
+    //     以及采集脚本的 SMALL_TRAVEL_MIN/MAX 保持一致；改行程要三处一起改。
+    //   ★ 软限位区: 两侧各自从硬限位向行程内缩 (1−small_limit_soft_ratio)·总行程
+    //     = 0.25·60° = 15° ⇒ 软限位区 [−15°, +15°]（见 dual_yaw_mpc.cpp 的 smallSoftLimits）。
+    c.small.min_angle = -30.0 * M_PI / 180.0;  // −30°
+    c.small.max_angle =  30.0 * M_PI / 180.0;  // +30°
     // 回中（冗余自由度分配）目标角 = 行程中心。**显式给出**, 而不是让 MPC 内部按
     // 0.5·(min+max) 隐式推算 —— 换机械后必须在这里改（0 = 回中到关节零位）。
-    // 例: [−25°, +20°] ⇒ −2.5°（注意 0 并不是行程中心, 回中到 0 会把冗余自由度
-    // 分配偏向正侧、白白吃掉负侧行程）。
-    c.small_center_angle = 0.5 * (c.small.min_angle + c.small.max_angle);  // −2.5°
+    // 当前行程对称 ⇒ 中心 = 0。**若哪天行程又变成非对称**（例如 [−25°,+20°] ⇒ −2.5°），
+    // 0 就不再是行程中心，回中到 0 会把冗余自由度分配偏向一侧、白白吃掉另一侧行程。
+    c.small_center_angle = 0.5 * (c.small.min_angle + c.small.max_angle);  // 0.0
     return c;
 }
 

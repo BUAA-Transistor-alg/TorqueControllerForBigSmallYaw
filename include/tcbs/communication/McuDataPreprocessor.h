@@ -33,21 +33,36 @@ public:
         double recv_pitch_scale  =   1.0;        // 电控原始 pitch 值 → 关节角
         double recv_pitch_offset =   0.0;
 
-        // ── 大 yaw（接收：电控已给弧度；发送：默认恒等）──
-        double recv_big_yaw_scale      = 1.0;
-        double recv_big_yaw_offset     = 0.0;
-        double recv_big_omega_scale    = 1.0;
-        double send_big_yaw_scale      = 1.0;
-        double send_big_yaw_offset     = 0.0;
-        double send_big_velocity_scale = 1.0;
-        double send_big_torque_scale   = 1.0;
+        // ── 大 yaw（★ 电控侧该轴的正方向与本工程约定**相反** ⇒ 位置/速度/力矩
+        //    收发两个方向都取负号；**温度、模式位**不参与映射，不受影响）──
+        //   本工程约定: yaw 绕 +z、从上方看逆时针为正（x→y，见 docs/model.md §2.1）。
+        //   `mapped = scale·raw + offset`、`raw_cmd = scale·θ + offset`，
+        //   这里 scale = −1、offset = 0 ⇒ 收发互为逆映射，等价于"整体镜像"。
+        //   平衡校验（与用户给的判据一致: 下发值 == 编码器回读值 ⇒ 不动）:
+        //     发 raw_cmd = −θ，回读 raw_fb = −θ ⇒ 二者相等 ⇒ 不动 ✔
+        double recv_big_yaw_scale      = -1.0;
+        double recv_big_yaw_offset     =  0.0;
+        double recv_big_omega_scale    = -1.0;
+        double send_big_yaw_scale      = -1.0;
+        double send_big_yaw_offset     =  0.0;
+        double send_big_velocity_scale = -1.0;
+        double send_big_torque_scale   = -1.0;
 
         // ── 小 yaw ──
+        // ★ 小 yaw 零位（已标定）: 物理零点处电控上报 **+1.025466 rad**
+        //   ⇒ 按 `mapped = raw·scale + offset` 反推: offset = −1.025466
+        //   （与 calibrate_small_zero.py 的约定一致: Δoffset = −mapped_zero，见该脚本 §"零位建议"）。
+        //   校验: raw = +1.025466 ⇒ mapped = 1.0·1.025466 − 1.025466 = 0 ✔
+        //   ⇒ **全系统（MPC 限位 ±30°、回中中心 0、电控夹取）都以这个零点解释角度**。
         double recv_small_yaw_scale      = 1.0;
-        double recv_small_yaw_offset     = 0.0;
+        double recv_small_yaw_offset     = -1.025466;   // = −(零点处的电控原始读数)
         double recv_small_omega_scale    = 1.0;
+        // ★ 下发侧必须**反向**补同一个偏移: 电控内环的判据是"**下发值 == 编码器值 ⇒ 不动**"，
+        //   即下发与上报共用同一个原始坐标系 ⇒ 要停在关节角 θ，必须发 `raw = θ + 1.025466`。
+        //   平衡校验: 发 raw_cmd = θ+1.025466，回读 raw_fb = θ+1.025466 ⇒ 二者相等 ⇒ 不动 ✔
+        //   （若只改 recv 不改 send，则发 0 会被电控理解成 −58.75° 的位置，往错误方向跑满行程。）
         double send_small_yaw_scale      = 1.0;
-        double send_small_yaw_offset     = 0.0;
+        double send_small_yaw_offset     = +1.025466;   // = +(零点处的电控原始读数)
         double send_small_velocity_scale = 1.0;
         double send_small_torque_scale   = 1.0;
     };

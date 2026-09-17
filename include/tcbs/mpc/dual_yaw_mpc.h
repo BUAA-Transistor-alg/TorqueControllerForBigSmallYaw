@@ -66,7 +66,7 @@ struct DualYawMpcConfig {
     double w_small_azimuth = 1.0;   // 小 yaw 世界方位角跟踪
     double w_small_center = 0.05;   // 小 yaw 回中（冗余自由度分配）
     // 回中目标角（rad）: 代价项 = w_c·(θ_small − small_center_angle)²。
-    // ★ 非对称行程下 **0 不是行程中心**（[−25°,+20°] 的中心是 −2.5°），因此这里
+    // ★ 行程**非对称**时 0 就不是行程中心（例如 [−25°,+20°] 的中心是 −2.5°），因此这里
     //   必须显式配置（`defaultMpcConfig()` 取 0.5·(min_angle+max_angle) = −2.5°），
     //   不能依赖"回中到 0"或内部的隐式平均；设 0 = 回中到关节零位。
     double small_center_angle = 0.0;

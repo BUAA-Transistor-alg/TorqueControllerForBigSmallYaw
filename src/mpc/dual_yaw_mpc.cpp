@@ -43,17 +43,17 @@ inline T limitPenaltyOneSide(const T& s) {
     return s * s * s * s;
 }
 
-// 小 yaw 的**非对称**软限位（两侧各自从硬限位向行程内缩 (1−ratio)·总行程）:
+// 小 yaw 的软限位（两侧各自从硬限位向行程内缩 (1−ratio)·总行程）:
 //     inset    = (1 − ratio)·(max − min)
-//     soft_min = min + inset          （负侧软限位，距离 −25° 侧 inset）
-//     soft_max = max − inset          （正侧软限位，距离 +20° 侧 inset）
-// 默认 ratio=0.75、行程 [−25°, +20°] ⇒ inset = 11.25°，
-//     soft_min = −13.75°, soft_max = +8.75°。
-// ★ 旧实现是 `soft = ratio·max_angle` + `|θ|` 比较（隐含"行程对称 ±max_angle"）:
-//   在 [−25°, +20°] 下负侧会被当成软限位 −0.75·20° = −15°、障碍宽度 hard−soft = 5°
-//   （真实施工余量是 11.25°），于是 θ 还没到 −20° 就已经吃到 (20−15)/5 = 1 倍的惩罚，
-//   到 −25° 时惩罚是 (25−15)/5 = 2 ⇒ 2⁴ = 16 倍 —— 负侧行程基本用不满（且量纲随行程变化）。
-//   这里改成两侧各自独立推导。
+//     soft_min = min + inset          （负侧软限位，距离 min 侧 inset）
+//     soft_max = max − inset          （正侧软限位，距离 max 侧 inset）
+// 当前行程对称 ±30°、默认 ratio=0.75 ⇒ inset = 15°，
+//     soft_min = −15°, soft_max = +15°。
+// ★ 两侧**各自独立推导**（不假设行程对称）。旧实现是 `soft = ratio·max_angle` + `|θ|`
+//   比较，隐含"行程对称 ±max_angle": 在非对称的 [−25°, +20°] 下负侧会被当成软限位
+//   −0.75·20° = −15°、障碍宽度 hard−soft = 5°（真实余量是 11.25°），于是 θ 还没到 −20°
+//   就已经吃到 1 倍惩罚、到 −25° 是 16 倍 —— 负侧行程基本用不满（且量纲随行程变化）。
+//   现在的写法对对称/非对称行程都成立。
 struct SmallSoftLimits {
     double lo = -1e9;      // 负侧软限位（≤ hard_lo）
     double hi = 1e9;       // 正侧软限位（≥ hard_hi 侧向内）

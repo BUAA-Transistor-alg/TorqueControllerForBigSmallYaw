@@ -116,6 +116,24 @@ target_compile_features(tcbs_test_dual_yaw_mpc PRIVATE cxx_std_17)
 target_link_libraries(tcbs_test_dual_yaw_mpc PRIVATE tcbs::communication ${CERES_LIBRARIES})
 add_test(NAME tcbs_mpc_closed_loop COMMAND tcbs_test_dual_yaw_mpc)
 
+# 参数传递检查: 用逐项非默认的 RobotController::Config 构造，再从各子系统 getter 读回比对。
+# 目的: ① 证明"全部标定参数都能在构造时传入"；② 防止将来往 Config 加字段却忘了传下去。
+add_executable(tcbs_test_config_propagation tests/test_config_propagation.cpp
+    src/RobotController.cpp
+    ${TCBS_MPC_SOURCES}
+    src/common/FrameRateCounter.cpp
+)
+set_target_properties(tcbs_test_config_propagation PROPERTIES
+    OUTPUT_NAME tcbs_test_config_propagation)
+target_include_directories(tcbs_test_config_propagation PRIVATE
+    ${TCBS_INCLUDE_DIR}
+    ${CERES_INCLUDE_DIRS}
+)
+target_compile_features(tcbs_test_config_propagation PRIVATE cxx_std_17)
+target_link_libraries(tcbs_test_config_propagation PRIVATE
+    tcbs::communication ${CERES_LIBRARIES})
+add_test(NAME tcbs_config_propagation COMMAND tcbs_test_config_propagation)
+
 # ============================================================================
 # 示例 / 工具
 # ============================================================================

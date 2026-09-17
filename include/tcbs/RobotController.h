@@ -163,7 +163,7 @@ public:
 
     // 便捷接口: 以**关节系**角度设置（内部按当前底盘方位角估计换算为世界方位角）
     //   big_joint_angle : 大 yaw 关节角（相对底盘，多圈）
-    //   small_joint_angle: 小 yaw 关节角（相对大 yaw，行程 −25° ~ +20°，非对称）
+    //   small_joint_angle: 小 yaw 关节角（相对大 yaw，行程 ±30°，见 defaultMpcConfig()）
     void setJointAngles(bool auto_aim_enable, bool big_torque_only, bool small_torque_only,
                         double big_joint_angle, double small_joint_angle,
                         double pitch_target_angle, bool fire, bool integral_enable = false);
