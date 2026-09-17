@@ -138,7 +138,7 @@ python3 python/scripts/compare_ident_methods.py --sim-only          # 三种方�
 ./tcbs_pitch_calibration --selftest           # 纯数学自检（拟合核心）
 ./tcbs_pitch_calibration --help               # 选项与构型警告
 ./tcbs_pitch_calibration --points=20 --min=<原始单位下限> --max=<原始单位上限>   # 实车
-# ↑ 实车默认范围是 -0.30/+0.30 **弧度**，跨度 > 1.2 rad 会拒绝开跑（确认单位/行程后加 --force-range）
+# ↑ 默认范围 -10/+30，单位 = **电控 pitch 原始值**（与原仓库相同；跨度 > 100 会拒绝开跑）
 ```
 
 产物（`build/`）: `libtcbs_robot_comm_c.so`（C++/C/Python 动态库）、`libtcbs_communication.a`（静态库）、

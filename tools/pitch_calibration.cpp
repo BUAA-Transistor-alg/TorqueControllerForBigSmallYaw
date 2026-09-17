@@ -46,13 +46,13 @@
 //   ./build/tcbs_pitch_calibration --sim                # 无硬件自检（虚拟 pitch 台架）
 //   ./build/tcbs_pitch_calibration --selftest           # 纯数学自检（拟合核心）
 //   ./build/tcbs_pitch_calibration --help
-//   ./build/tcbs_pitch_calibration --points=20 --min=-0.30 --max=0.30 --dwell=1.0 --out=x.txt
+//   ./build/tcbs_pitch_calibration --points=20 --min=-10 --max=30 --dwell=1.0 --out=x.txt
 //
 // 扫描范围（★ 与原仓库默认不同）:
-//   默认 --min=-0.30 / --max=+0.30，单位**弧度**；跨度 > 1.20 rad（≈69°）且未加
-//   --force-range 时**拒绝开跑**（参数错误，退出码 1，不碰串口）。原仓库默认 -10/30 是
-//   旧电控原始单位下的经验值；本构型 pitch 映射为恒等占位（raw 即弧度），照抄会去要
-//   -573°/+1719°，可能顶到机械限位。--sim / --selftest 不受此限。
+//   默认 --min=-10 / --max=+30，单位 = **电控 pitch 原始值**（与原仓库相同）。
+//   跨度 > 100（原始单位）且未加 --force-range 时**拒绝开跑**（参数错误，退出码 1，
+//   不碰串口）—— 纯粹防手滑打错数字，不做单位/行程合理性判断。
+//   --sim / --selftest 不受此限。
 //
 // 与原仓库的差异（只列适配点，算法/流程不变）:
 //   1) `namespace tcbs` / `#include "tcbs/..."`；串口用本仓库的 tcbs::McuCommunication、
@@ -67,7 +67,7 @@
 //   6) 新增打印 R² 之外的残差 RMS、参与/未参与拟合的样本数（原仓库只给 R²）；
 //   7) 稳定等待期间以 100 Hz 重发同一目标（原仓库"发一帧 → sleep 1000 ms"，
 //      在带看门狗的电控上会中途清零目标）—— 只改发送节拍，不改采样流程与判据；
-//   8) 实车默认扫描范围改为弧度（-0.30/+0.30）并新增跨度保护（> 1.20 rad 需 --force-range）。
+//   8) 保留原仓库默认扫描范围（-10/+30，电控原始单位）；跨度 > 100 需 --force-range（防打错）。
 // ============================================================================
 #include "tcbs/communication/Communications.hpp"
 #include "tcbs/communication/Protocol.hpp"
@@ -98,16 +98,15 @@ namespace {
 // ============================================================================
 constexpr double kPi = 3.14159265358979323846;
 
-// 与原仓库一致的默认参数（硬编码改为 CLI，默认值不变）
-// ★ 实车默认扫描范围（**本构型的单位是弧度**）:
-//   原仓库那两个数（−10 / 30）是**旧仓库原始单位**下的经验值；本仓库协议里 pitch 目标默认
-//   恒等映射 ⇒ raw 即弧度，沿用 −10/30 会去要 −573°/+1719°，属于危险操作。
-//   这里给一个保守的弧度默认（−0.30 ~ +0.30 rad ≈ ∓17°）；上实车前请按本车 pitch 实际行程
-//   与电控单位显式给 --min/--max。跨度明显离谱时工具会**拒绝开跑**（见 kMaxSpanRad）。
-constexpr double kDefaultTargetMin = -0.30;
-constexpr double kDefaultTargetMax =  0.30;
-// 扫描跨度上限（rad）: 超过它且未显式 --force-range ⇒ 拒绝开跑（防单位搞错 / 防超程）
-constexpr double kMaxSpanRad = 1.20;   // ≈ 69°
+// 与原仓库一致的默认参数（硬编码改为 CLI，**默认值与原仓库相同**）
+// ★ 实车默认扫描范围 = 原仓库的 **−10 / +30**（单位: 电控 pitch 原始值）。
+//   `--min/--max` 是"电控原始单位"，不是弧度 —— 电控怎么定义就用它的数
+//   （本仓库 pitch 映射可配 scale/offset，标定结果直接写回 McuDataPreprocessor）。
+constexpr double kDefaultTargetMin = -10.0;
+constexpr double kDefaultTargetMax =  30.0;
+// 跨度上限（**原始单位**）: 仅用于防"手滑多打几个 0"这类粗错，不做单位检查
+// （原始单位未知，无法判断绝对值是否合理）。超过它且未显式 --force-range ⇒ 拒绝开跑。
+constexpr double kMaxSpanRaw = 100.0;
 constexpr int    kDefaultFitPoints = 20;    // 拟合采样点数（Step 4）
 constexpr double kDefaultDwellS    = 1.0;   // 每个目标点的稳定等待（原仓库 1000 ms）
 constexpr double kGapS             = 0.5;   // 采样后间隔（原仓库 500 ms）
@@ -842,10 +841,10 @@ void usage(const char* prog) {
         "  --selftest            纯数学自检: 只验拟合核心（精确直线/噪声/退化输入），不扫描\n"
         "  --points=<n>          拟合采样点数（默认 " << kDefaultFitPoints << "，与原仓库一致）\n"
         "  --min=<raw> --max=<raw>  pitch 原始目标的扫描范围（默认 " << kDefaultTargetMin
-        << " / " << kDefaultTargetMax << "，单位=**弧度**）\n"
+        << " / " << kDefaultTargetMax << "，单位=**电控 pitch 原始值**，与原仓库相同）\n"
         "                            注: 原仓库的 -10/30 是**旧单位**经验值；本构型默认恒等映射，\n"
         "                            请按本车实际单位与行程显式给出\n"
-        "  --force-range            跳过「跨度 > 1.2 rad」的安全检查（确认单位/行程无误后使用）\n"
+        "  --force-range            跳过「跨度 > 100」的粗错检查（确认确实要这么大范围时使用）\n"
         "                        ★ 单位是**电控原始单位**（本构型默认映射为恒等 ⇒ raw 即弧度）；\n"
         "                          请先确认单位与 pitch 机械行程余量再上实车\n"
         "  --dwell=<s>           每个目标点的稳定等待（默认 " << kDefaultDwellS
@@ -904,15 +903,14 @@ bool parseArgs(int argc, char** argv, Options& o, std::string& err) {
         }
     }
     if (o.max_raw <= o.min_raw) { err = "--max 必须大于 --min"; return false; }
-    // ★ 扫描跨度安全检查（实车）: 超过上限且未显式 --force-range ⇒ 拒绝开跑。
-    //   动机: 原仓库默认 -10/30 是**旧单位**经验值；本构型 pitch 目标默认恒等映射（raw 即弧度），
-    //   沿用会把目标角放大成 −573°/+1719°，可能把 pitch 顶到机械限位。--sim 不受此限。
+    // 扫描跨度粗错检查（实车）: 超过上限且未显式 --force-range ⇒ 拒绝开跑。
+    //   原始单位未知 ⇒ 这里**不判断**绝对值是否合理（不做单位检查），只拦"手滑多打 0"。
     if (!o.sim) {
         const double span = o.max_raw - o.min_raw;
-        if (span > kMaxSpanRad && !o.force_range) {
-            err = "pitch 扫描跨度 " + std::to_string(span) + " 超过安全上限 "
-                  + std::to_string(kMaxSpanRad) + "（≈69°）: 请确认本车 pitch 的单位（本构型恒等映射 ⇒ 弧度）"
-                  "与机械行程，确认后加 --force-range；或先小范围试探 --min=-0.1 --max=0.1 --points=5";
+        if (span > kMaxSpanRaw && !o.force_range) {
+            err = "pitch 扫描跨度 " + std::to_string(span) + " 超过上限 "
+                  + std::to_string(kMaxSpanRaw) + "（原始单位）: 大概是数字打错了"
+                  "（默认范围是 -10 / +30）。确认无误请加 --force-range";
             return false;
         }
     }
@@ -949,13 +947,13 @@ void printBanner(const Options& o, const char* mode) {
     const bool hardware = (std::strcmp(mode, "实车（真实串口）") == 0);
     if (hardware || o.range_given) {
         std::cout <<
-            "\n注意（扫描范围）: 默认 --min=" << kDefaultTargetMin << " / --max="
-                  << kDefaultTargetMax
-                  << " 沿用的是**旧仓库原始单位**下的经验值。\n"
-            "  本工具按「电控原始单位」发送 pitch 目标（本构型默认映射为恒等 ⇒ raw 即弧度），请确认:\n"
-            "    · 电控上报/接收的 pitch 原始值单位与量程（弧度 / 度 / 计数 …）；\n"
-            "    · pitch 机械行程两端余量（本工具不做限位，超程由电控硬限位保护）；\n"
-            "    · 单位不确定时，先用小范围试探: --min=-0.1 --max=0.1 --points=5，看反馈是否合理。\n";
+            "\n注意（扫描范围）: --min=" << o.min_raw << " / --max=" << o.max_raw
+                  << "，单位 = **电控 pitch 原始值**（默认 " << kDefaultTargetMin << " / "
+                  << kDefaultTargetMax << "，沿用原仓库）。\n"
+            "  请确认:\n"
+            "    · 这两个数与电控的 pitch 单位一致（本工具原样发出，不做任何换算）；\n"
+            "    · pitch 机械行程两端有余量（本工具不做限位，超程由电控硬限位保护）；\n"
+            "    · 单位不确定时，先用小范围试探: --min=-0.1 --max=0.1 --points=5，看回读是否合理。\n";
     }
     std::cout <<
         "\n安全: yaw 两个关节 = 仅力矩模式 + 零力矩（本工具不驱动 yaw）；pitch 只发目标角；\n"
