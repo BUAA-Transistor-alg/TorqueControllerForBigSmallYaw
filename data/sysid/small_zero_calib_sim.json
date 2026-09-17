@@ -1,0 +1,102 @@
+{
+  "timestamp": "2026-09-17 20:18:49",
+  "mode_desc": "manual（人工摆位捕获零点）",
+  "method": "manual",
+  "report_only": false,
+  "repeats": 5,
+  "window_sec": 1.0,
+  "manual_tol_deg": 0.2,
+  "manual_tries": 5,
+  "manual_hold_big": "hold",
+  "note": "",
+  "mapped0_deg": 5.000349180052309,
+  "runs": [
+    {
+      "index": 0,
+      "ok": true,
+      "mapped_mean": 0.08826357915188093,
+      "mapped_std": 0.0006420177537121306,
+      "mapped_p2p": 0.0030242521218779572,
+      "rate_max": 0.0,
+      "temp_big": 30,
+      "temp_small": 30,
+      "gravity_norm": 0.0,
+      "note": ""
+    },
+    {
+      "index": 1,
+      "ok": true,
+      "mapped_mean": 0.08960919737009915,
+      "mapped_std": 0.000591590798011559,
+      "mapped_p2p": 0.0024577856078028953,
+      "rate_max": 0.0,
+      "temp_big": 30,
+      "temp_small": 30,
+      "gravity_norm": 0.0,
+      "note": ""
+    },
+    {
+      "index": 2,
+      "ok": true,
+      "mapped_mean": 0.08590002955358216,
+      "mapped_std": 0.0007061152677933864,
+      "mapped_p2p": 0.003476884341544126,
+      "rate_max": 0.0,
+      "temp_big": 30,
+      "temp_small": 30,
+      "gravity_norm": 0.0,
+      "note": ""
+    },
+    {
+      "index": 3,
+      "ok": true,
+      "mapped_mean": 0.08722151806272382,
+      "mapped_std": 0.0007858110038874915,
+      "mapped_p2p": 0.0030070908654270256,
+      "rate_max": 0.0,
+      "temp_big": 30,
+      "temp_small": 30,
+      "gravity_norm": 0.0,
+      "note": ""
+    },
+    {
+      "index": 4,
+      "ok": true,
+      "mapped_mean": 0.08597198930966087,
+      "mapped_std": 0.0008525002306662911,
+      "mapped_p2p": 0.0034578341090799047,
+      "rate_max": 0.0,
+      "temp_big": 30,
+      "temp_small": 30,
+      "gravity_norm": 0.0,
+      "note": ""
+    }
+  ],
+  "summary": {
+    "n_ok": 5,
+    "mapped_zero_rad": 0.08739326268958938,
+    "mapped_zero_deg": 5.0072651099915975,
+    "repeatability_std_deg": 0.0903525408020278,
+    "repeatability_range_deg": 0.21251966139217857
+  },
+  "level_check": {
+    "gravity_norm": 0.0,
+    "tol": 0.5,
+    "ok": true
+  },
+  "P_direction_note": "manual 零点与 P 方向无关; 要得到 P 方向须另做离心/重力实验测 θ*_meas, 再 P=|P|·R(−θ*_meas)·d̂; 手动零点下角度未知 ⇒ 辨识时不要假设 Py=0",
+  "zero_offset": {
+    "offset_old_rad": 0.0,
+    "mapped_zero_rad": 0.08739326268958938,
+    "delta_offset_rad": -0.08739326268958938,
+    "delta_offset_deg": -5.0072651099915975,
+    "offset_new_rad": -0.08739326268958938
+  },
+  "sim_truth": {
+    "true_mapped_zero_deg": 5.0,
+    "est_mapped_zero_deg": 5.0072651099915975,
+    "capture_error_deg": 0.0072651099915973325,
+    "injected_placement_sd_deg": 0.15,
+    "injected_tremor_p2p_deg": 0.05
+  }
+}
