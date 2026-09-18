@@ -57,8 +57,8 @@
 
 | 参数 | 含义 | 默认 | 标定方式 | 精度要求 |
 |---|---|---|---|---|
-| `send_pitch_scale/offset` | pitch 关节角 → 电控下发原始值 | 1 / 0（占位恒等） | ★ **`tcbs_pitch_calibration`**（§3.3.1）: 扫描一组 pitch 目标、采样 head IMU 与电控原始值，两段线性拟合的 **Fit2**；**前提 IMU 在头上** | 0.2° |
-| `recv_pitch_scale/offset` | 电控原始 pitch → 关节角 | 1 / 0（占位恒等） | 同一个工具（§3.3.1）的 **Fit1**（`mcu.pitch_angle → imu.euler_pitch`）；**不要照抄旧构型数值** | 0.2° |
+| `send_pitch_scale/offset` | pitch 关节角 → 电控下发原始值 | **21.337421 / −6.708668（已标定）** | ★ **`tcbs_pitch_calibration`**（§3.3.1）: 扫描一组 pitch 目标、采样 head IMU 与电控原始值，两段线性拟合的 **Fit2**；**前提 IMU 在头上** | 0.2° |
+| `recv_pitch_scale/offset` | 电控原始 pitch → 关节角 | **0.006060 / −198.645875（已标定）** | 同一个工具（§3.3.1）的 **Fit1**（`mcu.pitch_angle → imu.euler_pitch`）；**不要照抄旧构型数值** | 0.2° |
 | `recv_big_yaw_scale/offset` | 大 yaw 编码器 → 关节角 | 1 / 0（电控已给弧度） | **§3.1 用 IMU 标定**（若发现比例不对，把修正写到这里） | 0.05° |
 | `recv_small_yaw_scale/offset` | 小 yaw 编码器 → 关节角 | 1 / 0 | **零位: §3.5 离心平衡法（不需要外部基准）；比例: §3.3 用临时 head IMU** | 0.05° |
 | `send_*_torque_scale` | N·m → 电控力矩单位 | 1 | 一般保持 1（力矩常数写在电控侧）；如需在上位机统一单位则在此换算 | — |
@@ -488,7 +488,7 @@ python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' --epoc
    再 `./build/tcbs_test_serial` 确认收发与字段解码都正常。**这一步不过，后面全是白做**；
 2. **机械/装配核对**: 两 yaw 轴是否平行（倾角必须 < 0.2°，否则 §2 的反解与"方位角之和"
    语义都不成立）、限位实际角度、编码器零位方向；
-3. `McuDataPreprocessor` 的 pitch 映射（**临时把 IMU 装到头上**后跑 `./build/tcbs_pitch_calibration`，见 §3.3.1；
+3. `McuDataPreprocessor` 的 pitch 映射（**本工程默认构型就是 IMU 在头上** ⇒ 直接跑 `./build/tcbs_pitch_calibration`，见 §3.3.1；
    无硬件先 `--sim`/`--selftest` 自检）；
 4. IMU 安装旋转（`R_A_IMU` 或 `R_H_IMU`，取决于 `imu_location`）的倾斜部分 +
    重力方向校核（§3.2）；

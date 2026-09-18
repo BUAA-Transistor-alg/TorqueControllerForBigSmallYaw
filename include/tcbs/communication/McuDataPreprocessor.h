@@ -23,15 +23,19 @@ namespace tcbs {
 class McuDataPreprocessor {
 public:
     struct LinearParams {
-        // ── pitch（占位恒等值；**必须按 docs/calibration.md §3.3 重新标定**）──
-        // 注意: 旧版这四个数对应旧构型的 "imu_euler_pitch ↔ mcu_pitch_angle" 语义
-        // （IMU 装在云台终端），二者互不为逆（复合比例 ≈23）。本构型 IMU 移到大 yaw 上，
-        // pitch 只表示"关节角 ↔ 电控原始值"的映射，因此收敛为恒等占位；
-        // 若照抄旧值会导致 pitch 目标角被放大 20 倍以上（危险）。
-        double send_pitch_scale  =   1.0;        // 关节角 → 电控 pitch 目标值
-        double send_pitch_offset =   0.0;
-        double recv_pitch_scale  =   1.0;        // 电控原始 pitch 值 → 关节角
-        double recv_pitch_offset =   0.0;
+        // ── pitch（★ **已标定**；由 `./build/tcbs_pitch_calibration` 两段拟合得到）──
+        // 标定前提: IMU 必须在头上（构型 ON_HEAD，**本工程默认**），此时 `imu.euler_pitch`
+        // 就是 pitch 关节角；若切成 ON_BIG_YAW 则真值变成合成倾角、这四个数无效。
+        // ★ **两段互不为逆**（这是正常的，别"顺手改成互逆"）: 电控的目标角通道与反馈通道
+        // 用的是**不同的单位/零点** ——
+        //   recv: 关节角 = 0.006060·raw_fb − 198.645875   （raw_fb 是计数：关节角 0 ⇒ raw ≈ 32780 ≈ 2^15）
+        //   send: raw_cmd = 21.337421·关节角 − 6.708668    （关节角 0 ⇒ raw ≈ 0）
+        // 两个通道各自线性，但斜率与零点都不同 ⇒ 必须分别标定、分别使用。
+        // 改机械/换电控/动过 IMU 安装后都要重标（见 docs/calibration.md §3.3.1）。
+        double send_pitch_scale  =  21.337421;   // 关节角 → 电控 pitch 目标值
+        double send_pitch_offset =  -6.708668;
+        double recv_pitch_scale  =   0.006060;   // 电控原始 pitch 值 → 关节角
+        double recv_pitch_offset = -198.645875;
 
         // ── 大 yaw（★ 电控侧该轴的正方向与本工程约定**相反** ⇒ 位置/速度/力矩
         //    收发两个方向都取负号；**温度、模式位**不参与映射，不受影响）──
