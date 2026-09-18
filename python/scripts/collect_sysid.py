@@ -598,7 +598,7 @@ def fit_into_band(seq: np.ndarray, limit: float) -> np.ndarray:
 def fit_into_interval(seq: np.ndarray, lo: float, hi: float):
     """**整体等比缩放 + 平移**，把 ``seq`` 放进非对称区间 ``[lo, hi]``（保形状、绝不截断）。
 
-    为什么不是 ``fit_into_band`` 那种"绕 0 缩放": 小 yaw 行程是 **−25° … +20°** 的非对称区间，
+    为什么不是 ``fit_into_band`` 那种"绕 0 缩放": 小 yaw 行程可能是**非对称**区间（例如 −25° … +20°），
     绕 0 缩放会把轨迹推向一侧、白吃余量。这里:
       1) 先按区间**宽度**统一等比缩放（形状不变）: ``k = min(1, (hi−lo)/峰峰值)``；
       2) 再把缩放后序列的**中点平移到区间中点**（此时必定落在区间内，因为峰峰值 ≤ 宽度）；
@@ -748,7 +748,7 @@ def build_segment_plan(rng, targets, axis: int, st, planners: dict, n: int,
     · driven = 大 yaw: 参考中心取**现有平台方位角附近**（±BIG_CENTER_JITTER），
       半幅 ≤ BIG_REF_AMP(60°)；held = 小 yaw 目标在**参考包络内**随机
       （收进 0.7 倍 ⇒ SMALL_CENTER_RAD ± 10.15°，给大 yaw 摆动经 M12 传来的耦合偏移留余量）。
-    · driven = 小 yaw: 参考落在**非对称参考包络 [−17°, +12°]** 内（硬限位 [−25°, +20°]
+    · driven = 小 yaw: 参考落在**参考包络 [−22°, +22°]** 内（硬限位 ±30°
       两侧各留 8° 跟踪超调余量），中心在可行中心区间 [env_min+amp, env_max−amp] 内随机；
       超出包络时**整体等比缩放 + 平移到包络内**（保形状、不截断）；
       held = 大 yaw 目标取现有方位角 ±π 内随机（多圈连续，无需限幅）。
@@ -774,7 +774,7 @@ def build_segment_plan(rng, targets, axis: int, st, planners: dict, n: int,
             rng, targets, n, SMALL_REF_AMP, MIN_EXCITE_AMP_SMALL, planners["small"])
         amp = float(np.max(np.abs(ref_shape)))
         # 随机中心: 在"让整条轨迹落在参考包络内"的**可行中心区间**里随机取
-        # （非对称行程 ⇒ 不能用 ±(band−amp) 的对称写法）
+        # （行程可能非对称 ⇒ 不能用 ±(band−amp) 的对称写法）
         center = random_center_for(rng, amp, SMALL_ENV_MIN, SMALL_ENV_MAX)
         ref_small = ref_shape + center
         # 规格: 若仍超出包络（规划器过冲/浮点）→ **整体等比缩放 + 平移到包络内**（不截断）
@@ -1159,7 +1159,7 @@ def hold_until_stable(link, pids, limiters, max_temp, tgt_big: float, tgt_small:
         link.send(tau_big, tau_small, st.big_joint_angle + e_big, tgt_small)
 
         # ── 稳定判据: 四个量全满足才累加, 否则归零 ──
-        v_big = abs(float(st.platform_rate))
+        v_big = abs(float(st.big_joint_rate))       # ★ RobotSample 没有 platform_rate; 与记录口径一致
         v_small = abs(float(st.small_joint_rate))
         ok = (abs(e_big) <= err_tol and abs(e_small) <= err_tol
               and v_big < vel_tol and v_small < vel_tol)
@@ -1616,7 +1616,7 @@ def main(argv=None) -> int:
     log(f"  PID: kp={args.kp} ki={args.ki} kd={args.kd} 输出限幅 ±{PID_OUT_MAX:g} N·m  "
         f"力矩变化限幅 {MAX_TORQUE_DELTA:g} N·m/步")
     log(f"  仅力矩模式(mode=0)  pitch=0  小 yaw 行程="
-        f"[{_deg(SMALL_TRAVEL_MIN):+.0f}°, {_deg(SMALL_TRAVEL_MAX):+.0f}°]（非对称）"
+        f"[{_deg(SMALL_TRAVEL_MIN):+.0f}°, {_deg(SMALL_TRAVEL_MAX):+.0f}°]"
         f"  参考包络=[{_deg(SMALL_ENV_MIN):+.0f}°, {_deg(SMALL_ENV_MAX):+.0f}°]"
         f"  中止阈值=同硬限位  中心={_deg(SMALL_CENTER_RAD):+.1f}°  过温={args.max_temp:g}℃")
     if getattr(args, "held_big_stratified", False):
