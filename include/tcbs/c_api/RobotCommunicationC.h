@@ -154,7 +154,8 @@ typedef struct TcbsRobotProvenance_C {
     TcbsRobotSourceInfo_C small_enc;    // 小 yaw 编码器
     TcbsRobotSourceInfo_C pitch_enc;    // pitch 编码器
     TcbsRobotSourceInfo_C chassis_imu;  // 底盘 IMU（经 MCU，零阶保持）
-    uint8_t  big_rate_from_imu;     // 大 yaw 角速度是否来自 IMU（1 = 是）
+    uint8_t  big_rate_from_imu;     // 大 yaw 角速度的**高频**是否来自 IMU（1 = 是）
+    uint8_t  big_rate_from_encoder; // 其**低频/直流**是否来自 MCU 编码器值（互补滤波，1 = 是）
     uint8_t  reverse_from_trusted;  // 反解是否全由可信量完成（无延迟源参与）
     double   big_enc_delay_used;    // 本帧大 yaw 值的实测年龄（s，上位机计时）
     double   big_enc_innovation;    // 编码器观测 − 预测，rad（诊断用）

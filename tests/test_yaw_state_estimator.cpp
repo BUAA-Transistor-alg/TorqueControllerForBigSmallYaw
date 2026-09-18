@@ -655,8 +655,13 @@ int main() {
     check(m_head.max_big_rate_err > 5.0 * m_ok.max_big_rate_err,
           "ON_HEAD: 大 yaw 关节角速度误差远大于 ON_BIG_YAW（多一项 θ̇_s 低通滞后）",
           m_head.max_big_rate_err, 5.0 * m_ok.max_big_rate_err);
-    check(m_head.max_big_joint_err > 1.6 * m_ok.max_big_joint_err,
-          "ON_HEAD: 大 yaw 关节角误差明显大于 ON_BIG_YAW（预期行为，实测 2.5×）",
+    // ★ 阈值从 1.6× 放宽到 1.2×: 上面的 0.34 rad/s 低通滞后**在
+    //   `small_rate_lpf_alpha = 1.0`（默认值，即小 yaw 角速度直通 MCU 值、不滤波）下
+    //   基本消失 ⇒ ON_HEAD 的 θ̇_s 项残差从 0.497 降到 0.171 rad/s，
+    //   关节角误差比也从 2.5× 降到 ~1.4×。速率的 5× 关系仍然成立（那条断言继续留着），
+    //   这里只保留"ON_HEAD 仍略差于 ON_BIG_YAW"这个定性结论。
+    check(m_head.max_big_joint_err > 1.2 * m_ok.max_big_joint_err,
+          "ON_HEAD: 大 yaw 关节角误差大于 ON_BIG_YAW（预期行为，放宽到 1.2×）",
           m_head.max_big_joint_err, 1.6 * m_ok.max_big_joint_err);
     check(m_head.max_big_joint_err < 0.10,
           "ON_HEAD: 但仍在可用范围（< 0.10 rad；且世界方位角不受影响）",

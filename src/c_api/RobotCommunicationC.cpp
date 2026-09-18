@@ -176,6 +176,7 @@ void fillProvenance(const YawStateEstimator::Provenance& p, TcbsRobotProvenance_
     fillSourceInfo(p.pitch_enc, d.pitch_enc);
     fillSourceInfo(p.chassis_imu, d.chassis_imu);
     d.big_rate_from_imu = b2u(p.big_rate_from_imu);
+    d.big_rate_from_encoder = b2u(p.big_rate_from_encoder);
     d.reverse_from_trusted = b2u(p.reverse_from_trusted);
     d.big_enc_delay_used = p.big_enc_delay_used;      // 本帧大 yaw 值的实测年龄（上位机计时）
     d.big_enc_innovation = p.big_enc_innovation;

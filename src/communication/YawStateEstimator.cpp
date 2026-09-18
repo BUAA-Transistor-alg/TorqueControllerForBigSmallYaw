@@ -85,6 +85,8 @@ void YawStateEstimator::reset() {
 
     big_have_ = false;      big_meas_ = 0.0;   big_meas_t_ = -1.0;
     big_angle_ = 0.0;       big_rate_ = 0.0;   big_rate_lpf_ = 0.0;
+    big_rate_enc_lpf_ = 0.0; big_rate_enc_seen_ = false;
+    big_rate_bias_ = 0.0;    enc_t_last_ = -1.0;
     big_innovation_ = 0.0;
     big_anchor_t_ = -1.0; big_last_sample_t_ = -1.0; big_sample_interval_ = 0.0;
     mcu2_seq_ = 0; mcu2_seq_seen_ = false;
@@ -161,8 +163,30 @@ void YawStateEstimator::onImu(double euler_yaw, double euler_pitch, double euler
     } else {
         big_rate_lpf_ += cfg_.big_rate_lpf_alpha * (rate_target - big_rate_lpf_);
     }
-    big_rate_ = big_rate_lpf_;
+    // ── 用编码器值**慢速校正 IMU 支路的直流误差**（不把延迟的编码器值当 DC 用）──
+    //   ★ 为什么不是"互补滤波（低频取编码器 + 高频取 IMU）":
+    //     编码器值走 MCU1↔MCU2 低速链路（约 3~10 Hz）**且带传输延迟**，
+    //     它的直流分量本身就是"延迟后的真值"。而互补滤波只能补相位、补不了延迟
+    //     ⇒ 拿它当 DC 会给 0.3 Hz 量级的运动引入 (延迟 × θ̈) 的系统误差。
+    //     实测（tests/test_yaw_state_estimator）: 那种写法把 ON_BIG_YAW 的
+    //     大 yaw 角速度误差从 0.25 rad/s 放大到 ~1.07 rad/s，`base_omega` 也偏 0.21 rad/s。
+    //   ✅ 正确用法: 编码器角速度**无积分漂移**，所以只用它把 IMU 支路的**直流**慢慢拉回来
+    //     （陀螺偏置 / 底盘角速度残差 / ON_HEAD 的 θ̇_s 低通残差都是直流型的误差）。
+    //     高频路径完全不动 ⇒ 不引入链路延迟。
     prov_.big_rate_from_imu = imu_seen_;
+    if (cfg_.big_rate_use_encoder && big_rate_enc_seen_ && cfg_.big_rate_bias_tau_s > 1e-9) {
+        const double dc_err = big_rate_lpf_ - big_rate_enc_lpf_;   // IMU 低频 − 编码器低频
+        // 按 IMU 实际间隔给系数 ⇒ 与采样率无关（时间常数 = big_rate_bias_tau_s）
+        const double dt_imu = (imu_t_ > 0.0) ? (now - imu_t_) : 0.0;
+        const double a_bias = (dt_imu > 1e-9)
+                                  ? (1.0 - std::exp(-dt_imu / cfg_.big_rate_bias_tau_s)) : 0.0;
+        big_rate_bias_ += a_bias * (dc_err - big_rate_bias_);
+        big_rate_ = big_rate_lpf_ - big_rate_bias_;
+        prov_.big_rate_from_encoder = true;
+    } else {
+        big_rate_ = big_rate_lpf_;
+        prov_.big_rate_from_encoder = false;
+    }
 
     imu_seen_ = true;
     imu_t_ = now;
@@ -192,6 +216,7 @@ void YawStateEstimator::onMcu(double yaw_big_angle, double yaw_big_omega,
     const bool first_packet = !mcu2_seq_seen_;
     mcu2_seq_ = mcu2_seq;
     mcu2_seq_seen_ = true;
+
 
     // ── 底盘 IMU（经 MCU2: 更新率低、间隔不规则、值被保持；仅零阶保持）──
     //      序号变化 = 新样本；序号未变化 = 值被保持（此时不刷新锚点，年龄继续增长）
@@ -265,11 +290,35 @@ void YawStateEstimator::onMcu(double yaw_big_angle, double yaw_big_omega,
     // ── 大 yaw 反馈（**经 MCU2: 更新率低、间隔不规则、值被保持**）──
     {
         // 新样本判定: 首帧 / 序号变化 / 值变化
+        //   ★ 编码器角速度 `yaw_big_omega` 与角度**同源、同一次 MCU2 取数一起刷新**，
+        //     所以直接复用这一个判据即可（**不要**把"omega 变了"并进来 ——
+        //     那会把"值被保持"误判成新样本，破坏 value-hold 检测）。
         const bool new_sample = first_packet || mcu2_seq_changed ||
                                 !big_have_ || std::fabs(yaw_big_angle - big_meas_) > 1e-12;
 
         ++prov_.big_enc.count;
         prov_.big_enc.valid = true;
+
+        // ── 大 yaw 角速度的**编码器支路**（互补滤波的低频/直流部分）──
+        //   `yaw_big_omega` 是电控按编码器算出的关节角速度（已过映射，符号/比例一致）。
+        //   它走 MCU1↔MCU2 低速链路、值被保持 ⇒ 只在**新样本**时推动一次低通，
+        //   避免"值被保持"期间把同一个数反复灌进滤波器（那会伪造出额外的平滑）。
+        //   ⚠ 判据必须与上面**同一个**（含"角度值变化"那一项）：只按序号判断的话，
+        //     遇到序号不递增（或恒为 0）的实现会**永远不更新**，低频支路被冻结在首帧值。
+        if (cfg_.big_rate_use_encoder && new_sample) {
+            if (!big_rate_enc_seen_) {
+                big_rate_enc_lpf_ = yaw_big_omega;      // 首帧直接锚定，避免从 0 慢慢爬
+                big_rate_enc_seen_ = true;
+            } else {
+                // 按**实际间隔**给系数：链路率在 3~100 Hz 之间变化，固定 α 会让时间常数飘
+                const double d_enc = (enc_t_last_ > 0.0) ? (now - enc_t_last_) : 0.0;
+                const double a = (d_enc > 1e-9 && cfg_.big_rate_enc_tau_s > 1e-9)
+                                     ? (1.0 - std::exp(-d_enc / cfg_.big_rate_enc_tau_s))
+                                     : cfg_.big_rate_enc_alpha;
+                big_rate_enc_lpf_ += a * (yaw_big_omega - big_rate_enc_lpf_);
+            }
+            enc_t_last_ = now;
+        }
 
         if (new_sample) {
             if (big_anchor_t_ > 0.0) big_sample_interval_ = now - big_last_sample_t_;
@@ -291,7 +340,7 @@ void YawStateEstimator::onMcu(double yaw_big_angle, double yaw_big_omega,
                 big_angle_ = yaw_big_angle;
                 big_first_ = false;
                 big_innovation_ = 0.0;
-                if (!imu_seen_) big_rate_lpf_ = yaw_big_omega;
+                if (!imu_seen_) big_rate_lpf_ = yaw_big_omega;   // IMU 还没来时用编码器角速度兜底
             } else {
                 const double target = yaw_big_angle + big_rate_lpf_ * cfg_.transport_delay_s;
                 const double corr = std::clamp(target - big_angle_,

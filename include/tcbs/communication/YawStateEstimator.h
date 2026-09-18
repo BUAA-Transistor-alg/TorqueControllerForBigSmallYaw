@@ -117,7 +117,32 @@ public:
         // ★ 要"角速度完全取自 MCU、不滤波"就是 `small_rate_lpf_alpha = 1.0`
         //   （大 yaw 那个是陀螺投影，与本项无关）。
         double small_rate_lpf_alpha = 1.0;   // 小 yaw 关节角速度
-        double big_rate_lpf_alpha   = 0.35;   // 大 yaw 平台/关节角速度
+        double big_rate_lpf_alpha   = 0.35;   // 大 yaw 平台/关节角速度（IMU 支路的高频低通）
+        // ── 大 yaw 角速度: 用 MCU 编码器角速度 `yaw_big_omega` 校正 IMU 支路的直流 ──
+        //   IMU 陀螺投影高频准但**有直流误差**（陀螺偏置、底盘项残差、ON_HEAD 的 θ̇_s
+        //   低通残差都是直流型）；编码器角速度无积分漂移，正好补直流。
+        //   ★ 只用它**慢速"拉直流**，不做"低频取编码器"的互补滤波 —— 编码器值走
+        //     MCU1↔MCU2 低速链路（约 3~10 Hz）且带传输延迟，互补滤波补不了延迟，
+        //     实测会把 0.3 Hz 运动的速率误差放大到 ~1 rad/s（见 .cpp 里的实测数字）。
+        //   `big_rate_enc_tau_s`: 编码器支路低通时间常数（抹平"值被保持"的台阶）；
+        //   `big_rate_bias_tau_s`: **直流校正时间常数（默认 60 s）**。必须远大于被测运动
+        //     的周期，否则校正器会把运动本身当成"直流误差"吃掉 ——
+        //     实测（tests/test_yaw_state_estimator）: τ=5 s 时 0.3 Hz 运动会漏进校正量
+        //     约 0.18 rad/s（该频率下 τ 只有 5 s ⇒ 衰减不够），误差反而比不做校正更大。
+        //     60 s ⇒ 对 0.1~1 Hz 的运动泄漏 < 1%，只在**几分钟**尺度上把陀螺偏置磨掉。
+        //   ── ⚠ 默认 **false**（关闭）: 实测在当前 MCU1↔MCU2 链路上**净亏** ──
+        //     延迟造成的误差是 (transport_delay × θ̈_big): 0.3 Hz、1.7 rad/s 的运动
+        //     ⇒ θ̈≈6 rad/s²、20 ms 延迟 ⇒ **0.12 rad/s**，比它想修正的陀螺偏置
+        //     (0.01~0.05 rad/s) 还大。也就是说:
+        //       · 大 yaw 运动在 **0.05 Hz 以下**（或链路更快/延迟更小）⇒ 有用；
+        //       · 0.1~1 Hz（辨识采集就是这个band）⇒ **有害**。
+        //     实测 tests/test_yaw_state_estimator: 开启后 ON_BIG_YAW 的大 yaw 角速度
+        //     误差不降反升，`ON_HEAD 明显差于 ON_BIG_YAW` 那条预期关系被打破。
+        //     要用就显式置 true，并先把 `big_rate_bias_tau_s` 加大到远大于运动周期。
+        bool   big_rate_use_encoder = false;
+        double big_rate_enc_alpha   = 0.25;   // 无 dt 信息时的兜底系数
+        double big_rate_enc_tau_s   = 0.30;   // 编码器支路低通时间常数 (s)
+        double big_rate_bias_tau_s  = 60.0;   // 直流校正时间常数 (s)；≤0 等于关闭校正
         double pitch_rate_lpf_alpha = 0.25;
         // pitch 角加速度估计低通（0 = 不使用角加速度，置 0）
         double pitch_acc_lpf_alpha = 0.15;
@@ -158,7 +183,8 @@ public:
         SourceInfo pitch_enc;      // pitch 编码器
         SourceInfo chassis_imu;    // 底盘 IMU（经 MCU）
 
-        bool big_rate_from_imu = false;    // 大 yaw 角速度是否来自 IMU
+        bool big_rate_from_imu = false;    // 大 yaw 角速度的高频是否来自 IMU
+        bool big_rate_from_encoder = false;  // 其低频/直流是否来自 MCU 编码器值（互补滤波）
         bool reverse_from_trusted = false; // 反解是否全部由可信量完成（无延迟源参与）
         double big_enc_delay_used = 0.0;   // 本帧大 yaw 值的实测年龄（s）
         double big_enc_innovation = 0.0;   // 编码器观测 − 预测（rad），诊断用
@@ -303,8 +329,12 @@ private:
     double big_meas_ = 0.0;        // 最近一次大 yaw 测量
     double big_meas_t_ = -1.0;     // 到达时刻
     double big_angle_ = 0.0;       // 延迟补偿估计
-    double big_rate_ = 0.0;        // 关节角速度估计
-    double big_rate_lpf_ = 0.0;
+    double big_rate_ = 0.0;        // 关节角速度估计（互补滤波后）
+    double big_rate_lpf_ = 0.0;    // IMU 支路低通（提供高频分量）
+    double big_rate_enc_lpf_ = 0.0;  // 编码器支路低通（提供"无漂移的直流参考"）
+    bool   big_rate_enc_seen_ = false;
+    double big_rate_bias_ = 0.0;     // IMU 支路的直流校正量（由编码器支路慢速估计）
+    double enc_t_last_ = -1.0;       // 上次编码器新样本时刻（用于 dt 相关系数）
     double big_innovation_ = 0.0;
     uint8_t mcu2_seq_ = 0;
     bool   mcu2_seq_seen_ = false;        // 是否已收到过第一帧（首帧即视为一次更新）

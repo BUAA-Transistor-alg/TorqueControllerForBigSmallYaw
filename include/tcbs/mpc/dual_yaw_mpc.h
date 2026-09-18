@@ -94,7 +94,7 @@ public:
         // 状态（关节系）: q = {θ_big, θ_small}, qd = {θ̇_big, θ̇_small}
         double q[2] = {0.0, 0.0};
         double qd[2] = {0.0, 0.0};
-        ModelExo exo;                       // 含 pitch/pitch_rate/pitch_acc、底盘 ω/α、重力
+        ModelExo exo;                       // 只有 3 项: gravity_a[2] / base_omega / base_alpha（★ 不含 pitch）
 
         double platform_azimuth = 0.0;      // ψ_big（当前，解卷绕）
         double chassis_azimuth = 0.0;       // ψ_chassis = ψ_big − θ_big

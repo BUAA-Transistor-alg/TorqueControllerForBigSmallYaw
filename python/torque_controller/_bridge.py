@@ -233,6 +233,7 @@ class TcbsRobotProvenance(Structure):
         ("pitch_enc", TcbsRobotSourceInfo),
         ("chassis_imu", TcbsRobotSourceInfo),
         ("big_rate_from_imu", c_uint8),
+        ("big_rate_from_encoder", c_uint8),
         ("reverse_from_trusted", c_uint8),
         ("big_enc_delay_used", c_double),      # 本帧大 yaw 值的实测年龄 s（上位机计时）
         ("big_enc_innovation", c_double),
@@ -383,6 +384,8 @@ class TcbsEstimatorConfig(Structure):
         ("max_extrap_s", c_double),
         ("small_rate_lpf_alpha", c_double),   # α=1.0 ⇒ 小 yaw 角速度直通（取自 MCU）
         ("big_rate_lpf_alpha", c_double),     # α=1.0 ⇒ 大 yaw（IMU 陀螺投影）直通
+        ("big_rate_use_encoder", c_uint8),    # 1 = 大 yaw 角速度低频取 MCU 编码器值（互补滤波）
+        ("big_rate_enc_alpha", c_double),     # 编码器支路低通（按 MCU 新样本更新）
         ("pitch_rate_lpf_alpha", c_double),
         ("pitch_acc_lpf_alpha", c_double),
         ("bore", c_double * 3),
