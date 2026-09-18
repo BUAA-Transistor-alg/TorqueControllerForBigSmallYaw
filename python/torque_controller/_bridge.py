@@ -385,7 +385,8 @@ class TcbsEstimatorConfig(Structure):
         ("small_rate_lpf_alpha", c_double),   # α=1.0 ⇒ 小 yaw 角速度直通（取自 MCU）
         ("big_rate_lpf_alpha", c_double),     # α=1.0 ⇒ 大 yaw（IMU 陀螺投影）直通
         ("big_rate_use_encoder", c_uint8),    # 1 = 大 yaw 角速度低频取 MCU 编码器值（互补滤波）
-        ("big_rate_enc_alpha", c_double),     # 编码器支路低通（按 MCU 新样本更新）
+        ("big_rate_enc_alpha", c_double),     # 编码器支路低通（拿不到采样间隔时的兜底值）
+        ("big_rate_bias_tau_s", c_double),    # 直流校正时间常数 (s)，≤0 = 关闭校正
         ("pitch_rate_lpf_alpha", c_double),
         ("pitch_acc_lpf_alpha", c_double),
         ("bore", c_double * 3),

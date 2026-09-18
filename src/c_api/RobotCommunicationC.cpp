@@ -391,6 +391,9 @@ YawStateEstimator::Config toCpp(const TcbsEstimatorConfig_C& c) {
     d.max_extrap_s = c.max_extrap_s;
     d.small_rate_lpf_alpha = c.small_rate_lpf_alpha;
     d.big_rate_lpf_alpha = c.big_rate_lpf_alpha;
+    d.big_rate_use_encoder = u2b(c.big_rate_use_encoder);
+    d.big_rate_enc_alpha = c.big_rate_enc_alpha;
+    d.big_rate_bias_tau_s = c.big_rate_bias_tau_s;
     d.pitch_rate_lpf_alpha = c.pitch_rate_lpf_alpha;
     d.pitch_acc_lpf_alpha = c.pitch_acc_lpf_alpha;
     for (int i = 0; i < 3; ++i) d.bore[i] = c.bore[i];
@@ -416,6 +419,9 @@ void toC(const YawStateEstimator::Config& s, TcbsEstimatorConfig_C& c) {
     c.max_extrap_s = s.max_extrap_s;
     c.small_rate_lpf_alpha = s.small_rate_lpf_alpha;
     c.big_rate_lpf_alpha = s.big_rate_lpf_alpha;
+    c.big_rate_use_encoder = b2u(s.big_rate_use_encoder);
+    c.big_rate_enc_alpha = s.big_rate_enc_alpha;
+    c.big_rate_bias_tau_s = s.big_rate_bias_tau_s;
     c.pitch_rate_lpf_alpha = s.pitch_rate_lpf_alpha;
     c.pitch_acc_lpf_alpha = s.pitch_acc_lpf_alpha;
     for (int i = 0; i < 3; ++i) c.bore[i] = s.bore[i];
