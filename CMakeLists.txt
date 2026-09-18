@@ -142,13 +142,9 @@ set_target_properties(tcbs_control_demo PROPERTIES OUTPUT_NAME tcbs_control_demo
 target_compile_features(tcbs_control_demo PRIVATE cxx_std_17)
 target_link_libraries(tcbs_control_demo PRIVATE tcbs::robot_comm_c)
 
-# 采集工具改为 Python（复用录制目标序列 + 增强 + PID，与原仓库一致）:
-#   python/scripts/collect_sysid.py
-
-add_executable(tcbs_identify_params tools/identify_params.cpp)
-set_target_properties(tcbs_identify_params PROPERTIES OUTPUT_NAME tcbs_identify_params)
-target_compile_features(tcbs_identify_params PRIVATE cxx_std_17)
-target_link_libraries(tcbs_identify_params PRIVATE tcbs::robot_comm_c)
+# 采集与辨识全部在 Python 侧（唯一一条路径）:
+#   python/scripts/collect_sysid.py        # 采集（录制目标序列 + 增强 + PID，与原仓库一致）
+#   python/scripts/identify_params_torch.py # 辨识（torch 可导仿真输出误差法）
 
 # pitch 轴映射标定（两段线性拟合，需临时把 IMU 装到头上 = ON_HEAD 构型）:
 #   ./build/tcbs_pitch_calibration --sim        # 无硬件自检（虚拟台架 + 断言）

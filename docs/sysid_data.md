@@ -44,9 +44,10 @@
 ```
 
 - 选轴: **偶数段（段号 0、2、4…）驱动大 yaw（`axis=0`），奇数段（1、3、5…）驱动小 yaw（`axis=1`）**。
-- ★ **前置条件**: 小 yaw 的零点必须先用 `calibrate_small_zero.py --method=manual`
-  （人工把 yaw 摆到零点位置、读编码器）捕获并写回 `recv_small_yaw_offset`；
-  **标定之前不得用绝对角指挥小 yaw**（`[−25°,+20°]` 是以标定后的零点为基准的）。
+- ★ **前置条件**: 小 yaw 的零点必须先在 `tcbs_test_serial` 里读出并写回 `recv_small_yaw_offset`
+  （力矩恒 0、人工把 yaw 摆到机械零点、读它打印的 `yaw_small_angle`，取负即为 offset；
+  `send_small_yaw_offset` 取相反符号）；
+  **标定之前不得用绝对角指挥小 yaw**（`±30°` 这套限位是以标定后的零点为基准的）。
 - 采样时刻用 `time.perf_counter_ns()` **忙等绝对时间点**（抖动 ~µs 级）；`time.sleep()` 的毫秒抖动会让 dt 不准。
 
 ### 1.4 硬件侧约定
@@ -92,7 +93,7 @@ t,theta_big,theta_small,dtheta_big,dtheta_small,tau_big,tau_small,axis,held_targ
 ```
 
 前 10 列是采集的核心列；**末尾两列 `gravity_ax,gravity_ay` 是"静态倾斜段"新增的重力列**
-（追加在最后，保证 `tools/identify_params.cpp` 的按列名取列继续工作，见 §6.4）。
+（追加在最后，保证按列名取列的读取器继续工作，见 §6.4）。
 
 | # | 列名 | 单位 | 来源 | 说明 |
 |---|---|---|---|---|
@@ -282,7 +283,7 @@ g_A(t) = Rz(−θ_b(t)) · (g·sinφ, 0)
 
 1. 倾斜会给小 yaw 一个重力矩 `G_s(θ_s) = |P|·|g_A|·sin(θ_s + ·)`，本项目量级
    `0.01 kg·m × 1.7 m/s² ≈ 0.017 N·m`，**远小于小 yaw 的力矩能力**（PID 轻松顶住），不构成问题；
-2. **小 yaw 零点的手动捕获建议在"放平"状态下做**（`--method=manual`；人工摆放的基准若本身与
+2. **小 yaw 零点的读取建议在"放平"状态下做**（人工摆放的基准若本身与
    姿态无关则无妨，但放平更可复现）;
 3. 固定倾角下**其余参数（惯量/摩擦）的辨识不受影响**。
 
@@ -350,7 +351,7 @@ python3 python/scripts/collect_sysid.py --dry-run --segments=1
      此时 `Px/Py` 只能靠 `d·Q` 弱观测（共线，见 §6.4），建议只把结果当粗值；
    - 列**有非零值** ⇒ 必须**逐样本**代入（不要用段平均值），因为 A 系里的 `(gx, gy)` 会随
      `θ_big`（平台方位角）的变化而旋转 —— 这正是倾斜段给 `P` 带来的独立观测通道；
-   - `tools/identify_params.cpp` 会自动识别这两列（`findCol` 按列名匹配，含 `g_a_x` 等别名），
+   - 读取器按列名匹配（含 `g_a_x` 等别名）即可识别这两列，
      也可以用 `--gravity-a=gx,gy` / `--tilt-deg=<deg>` 手工指定（后者只适合合成数据自检）；
    - 元数据 `tilted=1` 标记该段来自倾斜静置；`tilt_slot` 指示 `--tilt-rolling` 下的倾角槽位，
      可用于分组检查"不同倾角是否都采到"。
@@ -365,11 +366,10 @@ python3 python/scripts/collect_sysid.py --dry-run --segments=1
 | 文档 / 脚本 | 内容 |
 |---|---|
 | `python/scripts/collect_sysid.py` | 本文件描述的采集脚本（分轴激励 + 录制序列增强 + 上位机 PID + 静态倾斜段） |
-| [`small_zero_calib.md`](small_zero_calib.md) | **小 yaw 编码器零位标定（主路径 = `--method=manual` 人工摆位捕获）**: 物理推导、粘滞带误差、`--sim` 消融表、**Ω≤π 硬上限下的可行性判定与重力平衡法**、`--probe-travel`、零点手动替换与 `P = \|P\|·R(−θ*_meas)·d̂` |
-| `python/scripts/calibrate_small_zero.py` | 上文的配套脚本（真机 + `--sim` 虚拟台架）；行程三档与本采集脚本**共用同一份常量**，仿真用自带 1 自由度 stick-slip 被控对象。**支持离心法（Ω≤π）与重力平衡法（`--method=gravity`）两条路径**，见该文档 §8~§9 |
+| [`../tools/test_serial.cpp`](../tools/test_serial.cpp) | ★ **小 yaw 零点的读法**: 跑 `./build/tcbs_test_serial`（两关节恒「仅力矩 + 0 N·m」），人工摆到机械零点读 `yaw_small_angle`，取负写进 `recv_small_yaw_offset`（`send_small_yaw_offset` 取相反符号，见 `calibration.md` §3.5）。**不需要单独的标定程序** |
 | [`model.md`](model.md) | 平面 2 自由度模型（小 yaw 力矩方程、μ/G_s 的来源） |
 | [`calibration.md`](calibration.md) | 全系统标定顺序（几何/映射/延迟/动力学），零位标定是其中一步 |
 
-> 小 yaw 的行程三档（硬限位 −25°/+20°、参考包络 −17°/+12°、行程中心 −2.5°）
-> 在两个脚本里**共用同一份常量**（`collect_sysid.py` 定义，`calibrate_small_zero.py` 导入），
-> 改一处即可两处生效。
+> 小 yaw 的行程三档（硬限位 ±30°、参考包络 ±22°、行程中心 0）由 `collect_sysid.py` 的
+> `SMALL_TRAVEL_MIN/MAX` 一处定义、其余全部派生；改行程要同时改 C++ 的
+> `defaultMpcConfig().small.min/max_angle` 与电控侧 `YAW_SMALL_MIN_RAD/MAX_RAD`。

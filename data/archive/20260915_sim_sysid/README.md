@@ -1,5 +1,9 @@
 # 归档：仿真采集数据与辨识结果（2026-09-15）
 
+> ⚠ **工具变更（2026-09 后期）**: C++ 线性最小二乘辨识工具（`tcbs_identify_params`）、
+> 三方法对比脚本（`compare_ident_methods.py`/`eval_params_holdout.py`）与仿真数据生成脚本
+> （`dump_sim_dataset.py`）**已从仓库删除** —— 现在只有 torch 一条辨识路径。
+> 本目录里带 `ls_`/`ls_runs` 的输出是**当时的 LS 结果**，作为数据记录保留，**无法再复现**。
 > **这是历史归档，不要在这里写新数据。** 新的实机采集数据请写到 `data/sysid/`；
 > 新一次辨识的结果写到 `data/sysid/` 或另建 `data/archive/<日期>_<用途>/`。
 > 本目录是为了"不干扰新数据"而把 2026-09-15 那轮**仿真验证**的全部产物集中存放。
@@ -49,7 +53,7 @@ python3 python/scripts/dump_sim_dataset.py --plant-lambda=1e4 \
         --out=data/archive/20260915_sim_sysid/datasets/sim100_lam1e4              # ≈40 s
 ```
 
-## 结论摘要（详细表格见 `docs/sysid_ls_vs_torch.md`）
+## 结论摘要（详细表格见 `docs/sysid_torch.md`）
 
 1. **torch 输出误差法 > LS**：惯量/摩擦 1~6% vs LS 的 16~72%（LS 的 θ̈ 来自量化角二阶差分，噪声与真值同量级）。
 2. **水平数据下 `Px/Py` 不可辨识**（LS −1200%~−2100%，torch 也只能压到 ±25%）；

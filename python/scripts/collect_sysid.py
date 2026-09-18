@@ -105,7 +105,7 @@
 三、安全策略
 ================================================================================
 
-* 小 yaw θ 超出**硬限位 [−25°, +20°]** → 立即中止本段（**不保存**被污染的数据）→ PID 回
+* 小 yaw θ 超出**硬限位 [−30°, +30°]** → 立即中止本段（**不保存**被污染的数据）→ PID 回
   **行程中心 −2.5°** → 零力矩；距界限 < 3° 时只打印告警（见 §七）;
 * 电机温度 ≥ ``--max-temp`` → 中止本段 → 零力矩 100 Hz 保温等待降温后重试（超时退出）；
 * ``--tilt-rolling`` 段间改倾角时，两轴**保持闭环守位**（倾斜后重力会在小 yaw 上产生力矩，
@@ -132,7 +132,7 @@
 **为什么需要**: `P = m_u·ρ`（上装一阶矩）是本项目的重点（小 yaw 载荷质心不在小 yaw 转轴上）。
 但底盘**水平**时 `gravity_a` 的平面分量为 0 ⇒ 重力项 `G_s = Qx·gy − Qy·gx` 恒为 0，
 `Px/Py` 只能靠 `M11/M12/μ` 里的 `d·Q = d·R(θ_s)·P` 间接观测，而 `d ≈ 0.03 m` 很小 ——
-`tools/identify_params.cpp` 的自检显示此时 `P` 与惯量参数**共线（corr ≈ −0.93）**，
+此前的 LS 自检显示此时 `P` 与惯量参数**共线（corr ≈ −0.93）**，
 虽然仍能估到 ~10% 以内，但一旦有摩擦形状失配/柔度等未建模误差，`P` 的偏差会被放大。
 
 **倾斜为什么有效**: 底盘以固定倾角静置后，`gravity_a` 的平面分量 ≈ `g·sin(tilt)`（10° ⇒ 1.7 m/s²），
@@ -176,14 +176,17 @@
   · 中止判定: `θ > max` **或** `θ < min`（两个阈值不再同号对称）。
 
 ================================================================================
-八、小 yaw 零点标定（配套脚本 python/scripts/calibrate_small_zero.py）
+八、小 yaw 零点（**直接在串口测试里读，不需要单独程序**）
 ================================================================================
 
-本仓库另有一个**离心平衡点法**的小 yaw 编码器零位标定脚本（见 docs/small_zero_calib.md）:
-底盘水平时把大 yaw 以恒定 Ω 转起来、小 yaw 松手（力矩 0），它会停到 `μ(θ_s) = 0` 的
-稳定平衡点（上装质心被离心力甩到"大 yaw 轴 ↔ 小 yaw 轴"连线的径向外侧），
-该位置与编码器零位无关 ⇒ 多次测量取平均即可标出零位偏移。
-它同样使用本文件的行程三档与小 yaw 安全判据。
+做法: 跑 `./build/tcbs_test_serial`（两个 yaw 关节恒为「仅力矩 + 0 N·m」，不会动），
+人工把小 yaw 摆到**机械零点**，读它打印的 `yaw_small_angle`（电控原始弧度）：
+
+* `recv_small_yaw_offset = −(零点处的 yaw_small_angle)`
+* `send_small_yaw_offset = +(零点处的 yaw_small_angle)`（下发与上报同一原始坐标系 ⇒ 互为逆映射）
+
+写回 `McuDataPreprocessor::LinearParams` 后，**全系统的角度语义都切到这个新零点**
+（MPC 的小 yaw 限位 ±30°、回中中心 0、电控夹取都用新零点）⇒ 写回后必须复核限位。
 
 ================================================================================
 九、与旧采集脚本（TorqueController/python/scripts/collect_sysid_data.py）的差异
@@ -317,7 +320,14 @@ BIG_PLANNER = dict(max_velocity=8.0, max_acceleration=30.0, max_jerk=800.0)
 SMALL_PLANNER = dict(max_velocity=3.0, max_acceleration=15.0, max_jerk=400.0)
 
 # ── 时序 ──
-SETTLE_SEC = 2.0                      # 采样前的到位+稳定时间（= 原仓库 pid_to_target(target, 2.0)）
+SETTLE_SEC = 5.0                      # 采样前先 PID 到位并保持这么久（固定时长，不判据）
+STABLE_SEC = 3.0                      # 之后还需**连续**满足稳定条件这么久才开采
+# 稳定条件（四个量全部满足; 任何一个越界 ⇒ 连续计时**归零重计**）:
+#   ① 大 yaw 方位角误差 ② 小 yaw 关节角误差 都 ≤ STABLE_ERR_TOL
+#   ③ 大 yaw 平台角速度 ④ 小 yaw 关节角速度 都 < STABLE_VEL_TOL
+# ⇒ 两次采样至少间隔 SETTLE_SEC + STABLE_SEC = 8 s（不满足就一直保持稳定控制等下去）。
+STABLE_ERR_TOL_DEG = 3.0              # 误差容差（度；两轴共用）
+STABLE_VEL_TOL_DEG_S = 3.0            # 速度阈值（度/秒；两轴共用）
 ZERO_FRAMES_AT_EXIT = 20              # 退出前必发的零力矩帧数（规格: 连发几帧）
 MAX_COOL_WAIT_S = 600.0               # 过热等待上限（超过则退出）
 COOL_HYSTERESIS_C = 5.0               # 降温到 max_temp − 5 ℃ 才恢复
@@ -346,7 +356,7 @@ AXIS_NAME = {AXIS_BIG: "big", AXIS_SMALL: "small"}
 
 # ── CSV 列头（前 10 列与 docs/sysid_data.md §2 逐字一致；末尾两列是可选的重力列）──
 #   gravity_ax / gravity_ay: 重力在 **A 系（大 yaw 转子系）** 的平面分量 (m/s²)，
-#   水平静置时 ≈ 0。**追加在最后**是为了让 tools/identify_params.cpp 的按列名取列
+#   水平静置时 ≈ 0。**追加在最后**是为了让按列名取列的读取器
 #   (findCol) 继续工作；只有这两列"有非零值"时，下游才会启用重力项。
 CSV_HEADER = ["t", "theta_big", "theta_small", "dtheta_big", "dtheta_small",
               "tau_big", "tau_small", "axis", "held_target", "mcu2_seq",
@@ -1111,6 +1121,66 @@ def drive_steps(link, ref_big: np.ndarray, ref_small: np.ndarray, pids, limiters
     return None, n
 
 
+def hold_until_stable(link, pids, limiters, max_temp, tgt_big: float, tgt_small: float,
+                      err_tol: float, vel_tol: float, stable_sec: float):
+    """保持稳定控制（100 Hz 继续跑 PID 指向固定目标），直到**连续 stable_sec** 满足稳定条件。
+
+    稳定条件（四个量同时满足）:
+      ① |大 yaw 方位角误差| ≤ err_tol      ② |小 yaw 关节角误差| ≤ err_tol
+      ③ |大 yaw 平台角速度| < vel_tol      ④ |小 yaw 关节角速度| < vel_tol
+    **任何一个越界 ⇒ 连续计时归零重计**。不满足就一直等（无上限），每秒打一行实时量。
+
+    返回 ``(reason, waited_s)``；reason 为 None 表示已满足（正常进入采样）。
+    期间与 drive_steps 一样做安全检查（小 yaw 硬限位 / 过温）。
+    """
+    n_need = max(1, int(round(stable_sec * RATE)))
+    stable_n = 0
+    k = 0
+    t0_ns = time.perf_counter_ns()
+    next_log_ns = t0_ns
+    while True:
+        busy_wait_until(t0_ns + k * DT_NS)
+        k += 1
+        st = link.read()
+
+        # ── 安全检查（与 drive_steps 同判据）──
+        th_s = float(st.small_joint_angle)
+        if th_s > SMALL_ABORT_MAX or th_s < SMALL_ABORT_MIN:
+            log(f"  [SAFETY] 稳定等待期间小 yaw θ={_deg(th_s):+.1f}° 触及行程界限 → 中止本段")
+            return "small_limit", k * DT
+        if max(st.temp_big, st.temp_small) >= max_temp:
+            return "overheat", k * DT
+
+        # ── 继续 PID 控制（保持稳定）, 目标固定不动 ──
+        e_big = wrap_pi(tgt_big - st.platform_azimuth)
+        e_small = wrap_pi(tgt_small - st.small_joint_angle)
+        tau_big = limiters[0].limit(pids[0].update(e_big, DT))
+        tau_small = limiters[1].limit(pids[1].update(e_small, DT))
+        link.send(tau_big, tau_small, st.big_joint_angle + e_big, tgt_small)
+
+        # ── 稳定判据: 四个量全满足才累加, 否则归零 ──
+        v_big = abs(float(st.platform_rate))
+        v_small = abs(float(st.small_joint_rate))
+        ok = (abs(e_big) <= err_tol and abs(e_small) <= err_tol
+              and v_big < vel_tol and v_small < vel_tol)
+        stable_n = stable_n + 1 if ok else 0
+
+        now_ns = time.perf_counter_ns()
+        if now_ns >= next_log_ns:
+            next_log_ns = now_ns + int(1e9)
+            log(f"    [稳定等待] 已等 {(now_ns - t0_ns) * 1e-9:5.1f}s  "
+                f"e_big={_deg(e_big):+.2f}° e_small={_deg(e_small):+.2f}°  "
+                f"|ω_big|={_deg(v_big):.2f}°/s |ω_small|={_deg(v_small):.2f}°/s  "
+                f"连续 {stable_n * DT:.1f}/{stable_sec:g}s"
+                + ("" if ok else f"  ← 未满足"
+                   + ("" if abs(e_big) <= err_tol else " e_big超差")
+                   + ("" if abs(e_small) <= err_tol else " e_small超差")
+                   + ("" if v_big < vel_tol else " ω_big超速")
+                   + ("" if v_small < vel_tol else " ω_small超速")))
+        if stable_n >= n_need:
+            return None, k * DT
+
+
 def run_zero_torque(link, limiters, seconds: float, stop_temp: float | None = None):
     """零力矩保温（过热等待用）: 100 Hz 发零力矩，必要时监测温度。
 
@@ -1188,7 +1258,7 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
     CSV 里它们是每行一列（同值）；其余列一一对应。详见 docs/sysid_data.md。
 
     CSV = 10 个固定列 + 末尾两列 ``gravity_ax,gravity_ay``（重力 A 系平面分量，
-    水平静置时全 0）——追加在最后，保证 tools/identify_params.cpp 的按列名取列不失效。
+    水平静置时全 0）——追加在最后，保证按列名取列的读取器不失效。
     """
     tag = tag_override or AXIS_NAME[plan.axis]
     npz_path, csv_path = _unique_paths(out_dir, tag, segment_index)
@@ -1353,9 +1423,12 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
             f"两侧各留 {_deg(SMALL_TRACK_MARGIN):.0f}° 跟踪余量; 中心 {_deg(SMALL_CENTER_RAD):+.1f}°）")
         log(f"  held   大 yaw: 目标={plan.held_target:+.3f} rad（现有方位角 ±π 内随机）")
 
-    # ── 到位: PID 跑固定 `--settle-sec`（默认 2.0 s）就算到位 —— 与原仓库
-    #    `pid_to_target(target, 2.0)` 完全同口径: 单次、不判收敛、不重试。
-    #    参考仍由轨迹规划器整形（不是阶跃），否则 PID 会饱和过冲把小 yaw 顶到限位。
+    # ── 到位 + 稳定（★ 两段）──
+    #   第一段: PID 把两轴带到目标并保持 `--settle-sec`（默认 5.0 s），固定时长、不判据；
+    #   第二段: 之后开始判稳定 —— 误差与速度四个量**连续** `--stable-sec`（默认 3.0 s）
+    #           全部满足才算稳；任何一个越界就重新计时，不满足就一直保持控制等下去。
+    #   ⇒ 两次采样至少间隔 5 + 3 = 8 s。
+    #   参考仍由轨迹规划器整形（不是阶跃），否则 PID 会饱和过冲把小 yaw 顶到限位。
     settle_n = max(1, int(round(args.settle_sec * RATE)))
     pids[0].reset()
     pids[1].reset()
@@ -1374,8 +1447,25 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
             return "abort"
         return "retry"
     st = link.read()
-    log(f"  到位(PID {args.settle_sec:g}s): err_big={_deg(wrap_pi(plan.ref_big[0] - st.platform_azimuth)):+.2f}°"
+    log(f"  到位(固定 {args.settle_sec:g}s): err_big={_deg(wrap_pi(plan.ref_big[0] - st.platform_azimuth)):+.2f}°"
         f" err_small={_deg(wrap_pi(plan.ref_small[0] - st.small_joint_angle)):+.2f}°")
+
+    # ── 第二段: 连续稳定判据（不满足就一直保持控制等）──
+    err_tol = math.radians(args.err_tol_deg)
+    vel_tol = math.radians(args.vel_tol_deg_s)
+    log(f"  等待连续 {args.stable_sec:g}s 稳定（判据: 两轴误差 ≤ {args.err_tol_deg:g}° 且 "
+        f"两轴速度 < {args.vel_tol_deg_s:g}°/s；任一越界即重新计时）…")
+    reason, waited = hold_until_stable(link, pids, limiters, args.max_temp,
+                                       float(plan.ref_big[0]), float(plan.ref_small[0]),
+                                       err_tol, vel_tol, args.stable_sec)
+    if reason == "small_limit":
+        recenter(link, pids, limiters, args.max_temp)
+        return "abort"
+    if reason == "overheat":
+        if not cooldown(link, limiters, args.max_temp, "稳定等待阶段温度过高"):
+            return "abort"
+        return "retry"
+    log(f"  ✓ 已稳定（第二段用时 {waited:.2f}s，两段合计 {args.settle_sec + waited:.2f}s）")
 
     # ── 采样: 300 点 @100 Hz ──
     log(f"  采样 {samples} 点 ({samples * DT:.2f} s @100Hz)…")
@@ -1468,8 +1558,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ki", type=float, default=PID_KI, help=f"PID 积分增益（默认 {PID_KI}）")
     p.add_argument("--kd", type=float, default=PID_KD,
                    help=f"PID 微分增益（默认 {PID_KD}；注意用的是未滤波差分, 给大会抖）")
+    p.add_argument("--stable-sec", type=float, default=STABLE_SEC,
+                   help=f"到位后还需连续满足稳定条件这么久（默认 {STABLE_SEC:g}s）")
+    p.add_argument("--err-tol-deg", type=float, default=STABLE_ERR_TOL_DEG,
+                   help=f"稳定判据: 两轴与目标的误差容差（度，默认 {STABLE_ERR_TOL_DEG:g}）")
+    p.add_argument("--vel-tol-deg-s", type=float, default=STABLE_VEL_TOL_DEG_S,
+                   help=f"稳定判据: 两轴速度阈值（度/秒，默认 {STABLE_VEL_TOL_DEG_S:g}）")
     p.add_argument("--settle-sec", type=float, default=SETTLE_SEC,
-                   help="采样前到位+稳定时间 s（规格 1.5~2 s）")
+                   help=f"第一段: 采样前 PID 到位并保持这么久 s（默认 {SETTLE_SEC:g}）")
     p.add_argument("--tilted", action="store_true",
                    help="静态倾斜段: 每段前提示把底盘以固定倾角静置（**不做任何倾角补偿、"
                         "不改变激励方式**），并把 gravity_ax/ay 记进数据、元数据记 tilted=1")

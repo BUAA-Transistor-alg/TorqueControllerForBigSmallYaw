@@ -30,7 +30,8 @@ namespace tcbs {
 //     R_world_B = R_world_A · Rz(θ_s)
 //     R_world_H = R_world_B · Rx(θ_p)              （H 相对 B 只绕 x 转 pitch）
 //
-//   ★ 构型 ON_BIG_YAW（现状，IMU 固定在大 yaw 转子 A 系上；见 Config::imu_location）
+//   ★ 构型 **ON_HEAD（现状/默认，IMU 固定在头上、pitch 之后；见 Config::imu_location）**
+//     —— 备选构型 ON_BIG_YAW（IMU 固定在大 yaw 转子 A 系上）仍然支持，切 `imu_location` 即可
 //     R_world_imu = R_world_A · R_mount            （R_mount = R_A_IMU，由 mount_yaw/pitch/roll 给出）
 //     反解: R_world_A = R_world_imu · R_mountᵀ
 //           R_world_H = R_world_A · Rz(θ_s) · Rx(θ_p)
@@ -61,7 +62,9 @@ namespace tcbs {
 //     但**真正用于瞄准的世界方位角**（platform_azimuth / small_output_azimuth /
 //     head_world_* / LOS）在两种构型下都只由 IMU + 可信编码器严格反解，不受该噪声影响
 //     （实测仍为 mrad 量级；重力同理，不依赖 θ_b 与延迟链路）。
-//     ON_BIG_YAW 仍是精度最优的构型；ON_HEAD 的价值在于 IMU 离开大 yaw 转子后的机械/走线便利。
+//     **ON_BIG_YAW 在『大 yaw 关节角/角速度』这一项上精度仍是最优**；ON_HEAD 的代价是
+//     θ̇_big 要用「平台角速度 − 编码器小 yaw 速率」算（多一次差分+LPF ⇒ 该通道噪声更大），
+//     换来的是 IMU 离开大 yaw 转子的机械/走线便利（且 pitch 可直接由 IMU 读出 ⇒ pitch 标定可行）。
 //
 // 输出分四组:
 //   1) Trusted: IMU 欧拉角/平台方位角/平台角速度 + 小 yaw/pitch 关节角与角速度
@@ -75,15 +78,15 @@ public:
     // ── 标定/配置参数 ──
     struct Config {
         // ── IMU 安装位置（**运行时**可切换；一份二进制支持两种构型）──
-        //   ON_BIG_YAW: IMU 固定在大 yaw 转子 A 上（现状）→ 用 mount_* 标定
-        //   ON_HEAD   : IMU 装在头上（pitch 之后，H 系）→ 用 head_mount_* 标定
+        //   ON_HEAD   : IMU 装在头上（pitch 之后，H 系）→ 用 head_mount_* 标定【默认/现状】
+        //   ON_BIG_YAW: IMU 固定在大 yaw 转子 A 上（备选）→ 用 mount_* 标定
         // 说明: 切换构型只改变"反解/重力/关节轴/角速度投影"的分支，**所有对外字段
         //       的语义不变**（见 Estimate 各字段注释）。
         enum class ImuLocation { ON_BIG_YAW = 0, ON_HEAD = 1 };
-        ImuLocation imu_location = ImuLocation::ON_BIG_YAW;
+        ImuLocation imu_location = ImuLocation::ON_HEAD;
 
         // IMU 安装旋转 R_A_IMU（IMU 系 → 大 yaw 转子 A 系），ZXY 欧拉角
-        // ——仅 ON_BIG_YAW 使用；语义与旧版完全不变
+        // ——仅 ON_BIG_YAW（备选构型）使用
         double mount_yaw   = 0.0;
         double mount_pitch = 0.0;
         double mount_roll  = 0.0;

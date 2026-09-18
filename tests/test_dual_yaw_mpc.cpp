@@ -353,55 +353,61 @@ int main() {
               -0.30, -soft.lo);
     }
 
-    printf("\n[7] 非对称行程 (b): 回中代价把冗余自由度拉向**行程中心 −2.5°**（而不是 0）\n");
+    printf("\n[7] 回中代价把冗余自由度拉向**配置的** small_center_angle（与行程是否对称无关）\n");
     {
         // 大/小 yaw 给**同一个**方位角参考 ⇒ 小 yaw 关节角是冗余自由度（任意 θs 都能精确
         // 跟踪）, 唯一决定它的是回中代价 ⇒ 稳态 θs 由 small_center_angle 决定。
         // 注意: 默认 w_c=0.05 只是"打破多解"级别的弱权重, 在带库伦静摩擦的样机上会被
         // 卡住（稳态几乎不动）; 因此该场景把 w_small_center 提到 100 让回中项主导, 被验证
-        // 的是**回中目标角**的语义（−2.5° vs 0）, 不是权重本身。
-        // 理论稳态（忽略摩擦/力矩代价）: θs → c·w_c/(w_c + w_b), 与 c 成正比 ⇒ 中心换了
-        // 稳态就跟着换, 这正是"显式可配置"要保证的性质。
+        // 的是**回中目标角**的语义, 不是权重本身。
+        // 理论稳态（忽略摩擦/力矩代价）: θs → c·w_c/(w_c + w_b), 与 c 成正比。
+        // ★ 行程现在是**对称 ±30°**（中心恰好 0）, 所以不能再拿"默认中心 ≠ 0"当判据
+        //   （那只是非对称行程的巧合）。这里改成**显式配置两个不同的非零中心** ——
+        //   直接验证"center 是配置量、真的被代价使用", 与行程对称与否都成立。
         DualYawMpcConfig ccen = cfg;
         ccen.w_small_center = 100.0;
         auto ref = smoothStepRef(n, dt, 0.12, 0.42, 6.0);
-        // 初始把小 yaw 放在 +0.12 rad(+6.9°, 仍在正侧软限位 8.75° 内), 让它必须往中心走
-        auto m = runClosedLoop(ctrl_model, plant_model, ccen, T, 0.0, ref, ref, false, 0.0, nullptr, 0.12);
-        printf("   初始 θs = +6.90°, 默认中心: 稳态 θs = %.4f rad (%.3f°)；行程中心 = %.4f rad (%.3f°)\n",
-               m.final_small_joint, m.final_small_joint / kDeg,
-               cfg.small_center_angle, cfg.small_center_angle / kDeg);
+        // 初始把小 yaw 放在 +0.12 rad(+6.9°), 让它必须往中心走
+        printf("   默认 small_center_angle = %.4f rad (%.3f°), 行程中心 0.5·(min+max) = %.4f rad (%.3f°)\n",
+               cfg.small_center_angle, cfg.small_center_angle / kDeg,
+               0.5 * (smin + smax), 0.5 * (smin + smax) / kDeg);
         check(std::fabs(cfg.small_center_angle - 0.5 * (smin + smax)) < 1e-12,
               "默认 small_center_angle = 行程中心 0.5·(min+max)", cfg.small_center_angle,
               0.5 * (smin + smax));
-        check(std::fabs(m.final_small_joint - cfg.small_center_angle) < 0.01,
-              "稳态 θs 收敛到行程中心 −2.5°（容差 0.57°）",
-              std::fabs(m.final_small_joint - cfg.small_center_angle), 0.01);
-        check(std::fabs(m.final_small_joint - cfg.small_center_angle) <
-                  std::fabs(m.final_small_joint),
-              "稳态 θs 更靠近 −2.5° 而不是 0（非对称行程下 ≠ 回中到 0）",
-              std::fabs(m.final_small_joint - cfg.small_center_angle), std::fabs(m.final_small_joint));
-        check(m.rms_aim_err < 0.05, "冗余自由度下跟踪 RMS < 0.05 rad", m.rms_aim_err, 0.05);
 
-        // 显式可配置: 把中心改成 0 → 关节应回到 0（证明中心是配置量, 不是隐式平均）
-        DualYawMpcConfig czero = ccen;
-        czero.small_center_angle = 0.0;
-        auto m0 = runClosedLoop(ctrl_model, plant_model, czero, T, 0.0, ref, ref, false, 0.0, nullptr, 0.12);
-        printf("   初始 θs = +6.90°, center=0  : 稳态 θs = %.4f rad (%.3f°)\n",
-               m0.final_small_joint, m0.final_small_joint / kDeg);
-        check(std::fabs(m0.final_small_joint) < 0.005, "center=0 时稳态 θs 收敛到 0",
-              m0.final_small_joint, 0.005);
-        check(std::fabs(m.final_small_joint - m0.final_small_joint) > 0.025,
-              "两种 center 配置的稳态差 > 1.4°（证明 center 真的生效）",
-              std::fabs(m.final_small_joint - m0.final_small_joint), 0.025);
+        DualYawMpcConfig cneg = ccen; cneg.small_center_angle = -5.0 * kDeg;
+        DualYawMpcConfig cpos = ccen; cpos.small_center_angle = +5.0 * kDeg;
+        auto mn = runClosedLoop(ctrl_model, plant_model, cneg, T, 0.0, ref, ref, false, 0.0, nullptr, 0.12);
+        auto mp = runClosedLoop(ctrl_model, plant_model, cpos, T, 0.0, ref, ref, false, 0.0, nullptr, 0.12);
+        printf("   初始 θs = +6.90°, center=−5°: 稳态 θs = %.4f rad (%.3f°)\n",
+               mn.final_small_joint, mn.final_small_joint / kDeg);
+        printf("   初始 θs = +6.90°, center=+5°: 稳态 θs = %.4f rad (%.3f°)\n",
+               mp.final_small_joint, mp.final_small_joint / kDeg);
+        check(std::fabs(mn.final_small_joint - cneg.small_center_angle) < 0.01,
+              "center=−5° ⇒ 稳态 θs 收敛到 −5°（容差 0.57°）",
+              std::fabs(mn.final_small_joint - cneg.small_center_angle), 0.01);
+        check(std::fabs(mp.final_small_joint - cpos.small_center_angle) < 0.01,
+              "center=+5° ⇒ 稳态 θs 收敛到 +5°（容差 0.57°）",
+              std::fabs(mp.final_small_joint - cpos.small_center_angle), 0.01);
+        check(std::fabs(mn.final_small_joint - mp.final_small_joint) > 8.0 * kDeg,
+              "两个 center 差 10° ⇒ 稳态 θs 跟着差 > 8°（证明 center 真的生效）",
+              std::fabs(mn.final_small_joint - mp.final_small_joint), 8.0 * kDeg);
+        // 瞄准误差的界: 本场景 w_c=100 ≫ w_b=w_s=1, 是**故意**让回中项主导 ⇒ 稳态会拿
+        // "偏离参考 |center| 那么多"去换"停在中心"。所以这里不能再用固定的 0.05 rad
+        // （那对 ±2.5° 的旧中心刚好过, 对 ±5° 就不成立）; 改成"瞄准误差不超过 |center| + 3°",
+        // 这才是该场景真正成立的性质。
+        const double rms_tol = 5.0 * kDeg + 0.03;
+        check(mn.rms_aim_err < rms_tol && mp.rms_aim_err < rms_tol,
+              "回中主导下跟踪 RMS 不超过 |center|+3°", std::max(mn.rms_aim_err, mp.rms_aim_err), rms_tol);
     }
 
-    printf("\n[8] 非对称行程 (c): 明显偏向负侧的大运动能正常跟踪且不撞限位\n");
+    printf("\n[8] 大运动偏向一侧: 能正常跟踪且不撞限位\n");
     {
         auto big_ref = constantRef(n, 0.0);
         auto neg_ref = smoothStepRef(n, dt, 0.0, -0.30, 2.0);   // 要求小 yaw 往 −25° 一侧走
 
         // ① 默认权重（大 yaw 可协助承担一部分）: 应能正常跟踪, 且负侧能走到
-        //    正侧软限位（8.75°）之外 —— 这正是非对称行程带来的能力。
+        //    行程足够深的一侧（旧的 8.75° 软限位之外）。
         auto m2 = runClosedLoop(ctrl_model, plant_model, cfg, T, 0.0, big_ref, neg_ref, false, 0.0, nullptr);
         printf("   默认权重: 最大|ε| %.4f / RMS %.4f rad, θs 最小 %.2f°, 越限 %d/%d\n",
                m2.max_aim_err, m2.rms_aim_err, m2.min_small_joint / kDeg, m2.over_min, m2.over_max);
@@ -409,9 +415,9 @@ int main() {
         check(m2.rms_aim_err < 0.02, "偏向负侧的大运动 RMS 误差 < 0.02 rad", m2.rms_aim_err, 0.02);
         check(m2.over_min == 0 && m2.over_max == 0, "偏向负侧的大运动不撞限位",
               (double)(m2.over_min + m2.over_max), 0.0);
-        check(m2.min_small_joint >= smin + 1.0 * kDeg, "与 −25° 硬限位仍留有 ≥1° 余量",
+        check(m2.min_small_joint >= smin + 1.0 * kDeg, "与负侧硬限位仍留有 ≥1° 余量",
               smin - m2.min_small_joint, -1.0 * kDeg);
-        check(m2.min_small_joint <= soft.lo, "负侧走到了软限位 −13.75° 之外（负侧行程确实可用）",
+        check(m2.min_small_joint <= soft.lo, "负侧走到了软限位之外（负侧行程确实可用）",
               m2.min_small_joint, soft.lo);
 
         // ② 大 yaw 强保持（权重 100）: 全部由小 yaw 承担, 障碍项必须把它软性挡在限位内
@@ -422,7 +428,7 @@ int main() {
                m.max_aim_err, m.rms_aim_err, m.min_small_joint / kDeg, m.over_min, m.over_max);
         check(m.over_min == 0 && m.over_max == 0, "大 yaw 强保持下也不撞限位",
               (double)(m.over_min + m.over_max), 0.0);
-        check(m.min_small_joint >= smin + 1.0 * kDeg, "大 yaw 强保持下与 −25° 仍留有 ≥1° 余量",
+        check(m.min_small_joint >= smin + 1.0 * kDeg, "大 yaw 强保持下与负侧硬限位仍留有 ≥1° 余量",
               smin - m.min_small_joint, -1.0 * kDeg);
         check(m.min_small_joint <= -(11.0 * kDeg), "大 yaw 强保持下确实往负侧走了 ≥11°",
               -m.min_small_joint, 11.0 * kDeg);

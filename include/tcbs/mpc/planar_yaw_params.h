@@ -10,8 +10,8 @@ namespace tcbs {
 // planar_yaw_params.h — 默认参数集中定义
 //
 // ★ **8 个待辨识参数全是占位值**，必须由 python/scripts/collect_sysid.py 采集、
-//   再经 LS（tools/identify_params）或 torch（python/scripts/identify_params_torch.py）
-//   辨识后替换。几何量（d）是实测值，请按实际机械填写。
+//   再用 python/scripts/identify_params_torch.py（**唯一辨识路径**，torch 输出误差法）
+//   辨识后替换。几何量（d = dx/dy）是实测值，请按实际机械填写（当前 (0, 0.07)）。
 // ============================================================================
 namespace dual_yaw {
 

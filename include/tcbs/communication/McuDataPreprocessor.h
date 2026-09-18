@@ -51,7 +51,9 @@ public:
         // ── 小 yaw ──
         // ★ 小 yaw 零位（已标定）: 物理零点处电控上报 **+1.025466 rad**
         //   ⇒ 按 `mapped = raw·scale + offset` 反推: offset = −1.025466
-        //   （与 calibrate_small_zero.py 的约定一致: Δoffset = −mapped_zero，见该脚本 §"零位建议"）。
+        //   —— 读法: 跑 `./build/tcbs_test_serial`，人工把 **小 yaw 摆到机械零点**，
+        //   读它打印的 `yaw_small_angle`（电控原始弧度），**取负**就是本 offset。
+        //   不需要单独的标定程序（用户确认: 串口测试里直接读即可）。
         //   校验: raw = +1.025466 ⇒ mapped = 1.0·1.025466 − 1.025466 = 0 ✔
         //   ⇒ **全系统（MPC 限位 ±30°、回中中心 0、电控夹取）都以这个零点解释角度**。
         double recv_small_yaw_scale      = 1.0;

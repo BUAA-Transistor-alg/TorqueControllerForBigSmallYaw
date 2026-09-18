@@ -1,7 +1,8 @@
 # TorqueControllerForBigSmallYaw — 双级 yaw 云台力矩 MPC 控制
 
-两级平行 yaw 的云台控制系统（**大 yaw 可多圈自由转、响应慢；小 yaw 行程 −25°~+20°、响应快；
-`IMU 固定在大 yaw 转子上`**）。上位机通过串口与电控（MCU）和 IMU 通信，
+两级平行 yaw 的云台控制系统（**大 yaw 可多圈自由转、响应慢；小 yaw 行程 ±30°、响应快；
+`IMU 固定在头上`（构型 `ON_HEAD`，默认；`ON_BIG_YAW` 为备选，运行时切换）**）。
+上位机通过串口与电控（MCU）和 IMU 通信，
 完成状态估计与**耦合非线性 MPC** 求解，输出两关节力矩（可选叠加电控内环）。
 
 > 本工程是 `TorqueController`（单 yaw 版本）的改版：模型从"单自由度 + J/τ_c/b"升级为
@@ -38,7 +39,7 @@
 | 量 | 怎么测 | 精度 | 填到哪 |
 |---|---|---|---|
 | **两 yaw 轴平面偏置 `d = (dx, dy)`** | 卡尺/三坐标量两轴中心距与方向（A 系 x-y 平面内）。**本构型已实测 = `(0, 0.07)` m**（横向无偏置、小 yaw 轴在大 yaw 轴**前方** 0.07 m） | ±0.5 mm | `ModelParams::dx/dy`（`planar_yaw_params.h`，**已按实测填好**） |
-| **小 yaw 实际行程两端角度** | 手动（力矩 0）转到两侧机械限位，读编码器；确认 `[−25°, +20°]` | ±0.2° | `defaultMpcConfig().small.min_angle/max_angle` + 电控宏 `YAW_SMALL_MIN/MAX_RAD` |
+| **小 yaw 实际行程两端角度** | 手动（力矩 0）转到两侧机械限位，读编码器；确认 `±30°`（也可在 `./build/tcbs_test_serial` 里读） | ±0.2° | `defaultMpcConfig().small.min_angle/max_angle` + 电控宏 `YAW_SMALL_MIN/MAX_RAD` |
 | **两关节力矩能力**（峰值力矩 × 减速比 × 效率） | 电机手册 + **实测堵转/斜坡**（不要只信手册） | — | `big/small.max_torque`、`max_torque_rate`（**直接决定控制权限与安全**） |
 | （可选）上装质量 `m_u` | 电子秤 | ±10 g | `ModelParams::m_u_known`（不称重填 0，代价见 §8-8） |
 | （可选）上装质心偏置 `ρ` | 吊线/称重法 | ±2 mm | 仅用于核对辨识出的 `P`（`P = m_u·ρ`），**不填进模型** |
@@ -49,7 +50,7 @@
 |---|---|---|
 | `recv_pitch_*` / `send_pitch_*` | ★ `./build/tcbs_pitch_calibration --points=20 --min=<原始单位下限> --max=<原始单位上限>`（两段线性拟合：`recv_*`: 电控原始值→关节角，`send_*`: 关节角→下发值；无硬件先跑 `--sim`/`--selftest`）。**前提: IMU 临时装到头上**（`ImuLocation::ON_HEAD`）—— 否则 `imu.euler_pitch` 不是 pitch 关节角、结果无效（§3.3） | 0.2° |
 | `recv_small_yaw_scale` | **临时 head IMU 法**（`docs/calibration.md` §3.3）——大 yaw 静止、小 yaw 慢速三角波 | 0.05° |
-| `recv_small_yaw_offset`（**零位**） | ★ **手动零点捕获**：`python3 python/scripts/calibrate_small_zero.py --method=manual --repeats=3 --note="<用的工装/基准>"`（力矩 0、人工摆到正确零点、读编码器求 `Δoffset`；重复性就是精度上限）。离心/重力平衡法（`--method=centrifugal/gravity`）只作实验性交叉校核 | 0.2~1°（取决于人工重复性） |
+| `recv_small_yaw_offset`（**零位**） | ★ **在串口测试里直接读**：跑 `./build/tcbs_test_serial`（力矩恒 0），人工把小 yaw 摆到**机械零点**，读它打印的 `yaw_small_angle`（电控原始弧度），**取负**写进 `recv_small_yaw_offset`；`send_small_yaw_offset` 取**相反符号**（下发与上报同一原始坐标系）。**不需要单独的标定程序**。重复性 = 人工摆放的可重复性 | 0.2~1°（取决于人工重复性） |
 | `recv_big_yaw_scale/offset` | **IMU 法**（§3.1）：底盘静止时 `Δ(IMU 方位角) == Δ(关节角)` | 0.05° |
 | `send_*_torque_scale` | 力矩常数独立校核（§5：已知惯量体或吊质量块测稳态力矩） | 1% |
 
@@ -57,7 +58,7 @@
 
 | 项 | 标定方法 | 备注 |
 |---|---|---|
-| `imu_location` | 装配决定（`ON_BIG_YAW` 默认 / `ON_HEAD`） | 运行时可切换，一份二进制支持两种构型 |
+| `imu_location` | 装配决定（**默认 `ON_HEAD`**：IMU 在头上；备选 `ON_BIG_YAW`） | 运行时可切换，一份二进制支持两种构型 |
 | `mount_yaw/pitch/roll`（或 `head_mount_*`） | **静止时**用 IMU 加速度计把安装倾斜标到 0.1°；yaw 部分按约定（"机械零位处 x 轴指向世界 +x ⇒ 方位角 0"） | 重力方向直接乘这个矩阵 ⇒ 直接影响 `P` 的辨识 |
 | `transport_delay_s` | §3.1：用 `big_enc_innovation` 与 `big_enc_age` 在线校核（默认 15 ms） | MCU 无时钟，只标传输时延 |
 | `bore[3]` | §3.4：激光/照准器或相机像素反解视轴方向 | 默认 `(0,1,0)`（本工程 x=右/y=前/z=上，pitch 绕 x ⇒ 光轴在 y-z 平面） |
@@ -82,8 +83,6 @@ python3 python/scripts/collect_sysid.py --tag=small --segments=6 --tilted
 #   只有换机械或跑旧归档数据（用 (0.10, 0) 生成的那批）时才显式覆盖
 python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' \
         --truth-params=<若有真值> --epochs=1000
-./build/tcbs_identify_params data/sysid/*.csv --held=measured --lambda=100
-./build/tcbs_identify_params data/sysid/*.csv --held=ideal    --lambda=100
 # ③ 结果填进 include/tcbs/mpc/planar_yaw_params.h 的 defaultModelParams()（或运行时 setModelParams）
 ```
 
@@ -129,9 +128,7 @@ cd build && ctest --output-on-failure
 # 参数辨识: 采集（Python，无硬件可 --dry-run）+ 拟合（C++ 线性最小二乘 / torch 可导仿真）
 python3 python/scripts/collect_sysid.py --tag=big --segments=6      # 大 yaw 被激励
 python3 python/scripts/collect_sysid.py --tag=small --segments=6    # 小 yaw 被激励
-./tcbs_identify_params data/sysid/sysid_big_*.csv --held=measured
-python3 python/scripts/identify_params_torch.py --data='data/sysid/sysid_*.npz'
-python3 python/scripts/compare_ident_methods.py --sim-only          # 三种方法仿真对比
+python3 python/scripts/identify_params_torch.py --data='data/sysid/sysid_*.csv'   # 唯一辨识路径
 
 # pitch 映射标定（两段线性拟合）: ★ 需把 IMU 临时装到头上（ON_HEAD）
 ./tcbs_pitch_calibration --sim                # 无硬件自检（虚拟台架 + 断言，秒级）
@@ -142,7 +139,7 @@ python3 python/scripts/compare_ident_methods.py --sim-only          # 三种方�
 ```
 
 产物（`build/`）: `libtcbs_robot_comm_c.so`（C++/C/Python 动态库）、`libtcbs_communication.a`（静态库）、
-`tcbs_control_demo`、`tcbs_identify_params`、`tcbs_mpc_param_eval`、`tcbs_pitch_calibration`、`tcbs_test_serial`（实车链路自检，**不注册 ctest**）、三个 ctest 测试程序。
+`tcbs_control_demo`、`tcbs_mpc_param_eval`、`tcbs_pitch_calibration`、`tcbs_test_serial`（实车链路自检，**不注册 ctest**）、四个 ctest 测试程序。
 
 > **作为子模组嵌入父工程**（模块标识 `tcbs`）: 本仓库的全部对外名字都带 `tcbs_` 前缀，
 > C++ 代码整体在 `namespace tcbs` 内，头文件一律走 `#include "tcbs/..."`，
@@ -331,7 +328,7 @@ st.mpc     // 控制输出/参考/预测/性能
 ```cpp
 auto sp = rc.getState().strict_pose;
 sp.imu_euler_yaw/pitch/roll      // ① IMU 原始姿态（世界←IMU, ZXY）——唯一绝对基准
-sp.imu_location;                 //   构型: 0 = IMU 在大 yaw 转子上, 1 = 在头上
+sp.imu_location;                 //   构型: 0 = IMU 在大 yaw 转子上, 1 = 在头上（默认）
 sp.big_joint_angle;              //   θ_b（延迟补偿估计值）＋ sp.big_joint_angle_age
 sp.small_joint_angle;            //   θ_s
 sp.pitch_joint_angle;            //   θ_p
@@ -509,7 +506,6 @@ include/tcbs/                  # ★ 所有头文件都在 include/tcbs/ 下（�
 src/                           # 对应实现
 tools/
   test_serial.cpp              # ★ 串口链路自检（原仓库 test_serial 的移植；--list/--selftest/--no-send）
-  identify_params.cpp          # 线性最小二乘辨识（SNR 加权 / held 模式 / 帧对齐搜索 / SVD 截断）
   pitch_calibration.cpp        # ★ pitch 映射标定（两段线性拟合；--sim/--selftest；★需 IMU 在头上）
   mpc_param_eval.cpp           # MPC 参数评估（用辨识参数跑闭环）
 tests/
@@ -519,19 +515,15 @@ tests/
 mcu_code_demo/                 # 电控侧示例 C 代码
 python/
   scripts/collect_sysid.py     # ★ 辨识数据采集（录制目标序列+增强+PID，分轴，100Hz）
-  scripts/identify_params_torch.py    # torch 可导仿真输出误差法拟合
-  scripts/compare_ident_methods.py    # 三种辨识方法仿真对比
-  scripts/calibrate_small_zero.py     # ★ 小 yaw 零位标定（手动零点为主，离心/重力法作实验交叉）
+  scripts/identify_params_torch.py    # ★ 唯一的参数辨识路径（torch 可导仿真输出误差法）
   scripts/mpc_demo.py          # 控制台示例（小 yaw 正弦跟踪；可切 IMU 构型/临时改 8 参）
   scripts/c_api_selftest.py    # C API / 绑定自检（无硬件可跑）
   torque_controller/           # ctypes 绑定（对应 C API v4: 平面 8 参模型）
 docs/
   model.md                     # ★ 平面 8 参模型: 化简前提/推导/可辨识性/验证/IMU 构型开关
-  calibration.md               # ★ 本构型下的完整标定方法（含三种辨识方法与采集规格）
+  calibration.md               # ★ 本构型下的完整标定方法（含辨识方法与采集规格）
   sysid_data.md                # 辨识数据格式与采集协议（CSV/NPZ 列头、增强规则、安全策略）
-  sysid_ls_vs_torch.md         # ★ LS（ideal/measured/drop）与 torch 在同一批 100 段数据上的对比
-  small_zero_calib.md          # ★ 小 yaw 零位标定（离心平衡法）的原理、精度与仿真消融
-  sysid_compare.md             # 三种辨识方法的仿真对比结果（LS 理想/实测保持值、torch）
+  sysid_torch.md               # ★ torch 辨识结果 + MPC 闭环验证（λ、N、ON_HEAD、倾斜数据）
 ```
 
 ---
@@ -548,25 +540,24 @@ docs/
    **前提是 IMU 临时装在头上**，见 `docs/calibration.md` §3.3）；
    无硬件时先跑 `./build/tcbs_pitch_calibration --sim`（虚拟台架 + 断言）与 `--selftest`；
 3. **小 yaw 零位（必须先做，后面所有小 yaw 角度语义都依赖它）**:
-   首选 `python/scripts/calibrate_small_zero.py --method=manual` ——
-   **小 yaw 力矩置 0、人工把它摆到"准确的零点"位置，此刻读出编码器角度**，
-   `Δoffset = −mapped` 写进 `recv_small_yaw_offset`（重复几次做统计，重复性就是零点精度上限）。
-   离心平衡法（`--method=centrifugal`）/ 重力平衡法（`--method=gravity`）是
-   **实验性质的交叉校核**（大 yaw 恒速旋转 / 底盘静态倾斜，小 yaw 松手停在
-   `μ(θ_s)=0` 即 `R(θ_s)P ∥ d` 的平衡点）；实测结论: **在 2 s/圈 与真实参数下离心法推不动小 yaw**，
-   要可用需要更高 Ω、更大 `|P|` 或更小摩擦（见 `docs/small_zero_calib.md`）。
-   注意: **手动零点与平衡点无关 ⇒ 不能假设 `Py=0`**；`--probe-travel` 只用于**校核编码器比例**。
+   跑 `./build/tcbs_test_serial`（两关节恒「仅力矩 + 0 N·m」，工具不驱动任何关节）——
+   **人工把小 yaw 摆到"准确的零点"位置并扶稳，读它打印的 `yaw_small_angle`**（电控原始弧度，
+   多摆几次取平均；**重复性就是零点精度上限**），然后
+   `recv_small_yaw_offset = −(零点读数)`、`send_small_yaw_offset = +(零点读数)`
+   （下发与上报共用同一原始坐标系 ⇒ 互为逆映射；电控判据是"下发值 == 编码器回读值 ⇒ 不动"）。
+   **不需要单独的标定程序**（用户确认: 串口测试里直接读即可）。
+   注意: 零点只给出"哪个读数对应 0" ⇒ **`P` 的方向仍然未知，不能假设 `Py=0`**。
 4. 用 `python/scripts/collect_sysid.py` 采集（**录制目标序列 + 增强 + 上位机 PID**、
-   **分轴激励**、另一轴 PID 保持在固定/随机位置、pitch≡0、100 Hz）+
-   `tcbs_identify_params`（线性最小二乘，SVD 截断）或 `identify_params_torch.py`（可导仿真）
-   辨识 8 个参数——**逆动力学对这些参数严格线性**，所以是标准线性辨识问题；
+   **分轴激励**、另一轴 PID 保持在固定/随机位置、pitch≡0、100 Hz）→
+   用 `python/scripts/identify_params_torch.py`（**唯一辨识路径**: torch 可导仿真输出误差法）
+   辨识 8 个参数；
 4. 关键: **两轴力矩都必须记录**（被保持轴的力矩就是耦合项 `P` 的传感器，见
    `docs/calibration.md` §4.2）；小 yaw 应**尽量用满行程**（`[−25°, +20°]`，
    两侧各留 8° 余量 ⇒ 约 29° 摆幅），摆幅越小 `Px/Py` 与惯量越共线；
    **强烈建议加静态倾斜段**（底盘静止但静置成 ±10° 左右，`--tilted`），
    否则水平数据下 `Px/Py` 几乎不可辨识（详见 `docs/sysid_data.md` §6.4）；
-5. 三种拟合方法（LS+理想保持值 / LS+实测值 / torch 输出误差）都要跑，先在
-   `compare_ident_methods.py --sim-only` 里确认与真值一致，再上实车。
+5. 辨识完做三项检查: 参数物理合理（`J>0`、`fc/fv ≥ 0`）、`|Px|/σ ≥ 3`、
+   **未参与拟合的留出段**做开环前向仿真的 RMSE；再上实车跑 `tcbs_control_demo` 低幅验证。
 
 ---
 

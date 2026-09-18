@@ -11,7 +11,9 @@
 //      —— 即 `strictPoseReconstructImu()` 的结果与 `R_world_imu` 逐元素相等（测试里按 1e-15 校核）。
 //
 // ── 坐标链（A 系 = 大 yaw 转子系, C 系 = 底盘系, H 系 = 头部, IMU = IMU 自身坐标系）──
-//   构型 0（`IMU_ON_BIG_YAW`，默认: IMU 固定在大 yaw 转子上）:
+//   构型 1（`ON_HEAD`，**默认/现状**: IMU 固定在头上、pitch 之后）:
+//     （构型 0 `ON_BIG_YAW`（IMU 固定在大 yaw 转子上）为备选，两者字段语义相同）
+//   构型 0（`IMU_ON_BIG_YAW`，备选: IMU 固定在大 yaw 转子上）:
 //       R_world_imu = R_world_chassis · Rz(θ_b) · R_A_IMU
 //       ⇒ 反解:  R_world_chassis = R_world_imu · R_A_IMUᵀ · Rz(θ_b)ᵀ
 //   构型 1（`IMU_ON_HEAD`: IMU 在头上, pitch 之后）:
@@ -42,7 +44,7 @@ namespace dual_yaw {
 
 // IMU 安装位置（与 YawStateEstimator::Config::ImuLocation 取值一致）
 enum class StrictPoseImuLocation : int {
-    ON_BIG_YAW = 0,   // IMU 固定在大 yaw 转子 A 上（默认）
+    ON_BIG_YAW = 0,   // IMU 固定在大 yaw 转子 A 上（备选；默认见 YawStateEstimator::Config）
     ON_HEAD    = 1,   // IMU 装在头上（pitch 之后）
 };
 

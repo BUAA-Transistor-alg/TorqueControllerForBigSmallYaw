@@ -24,7 +24,7 @@ identify_params_torch.py — 平面二维 8 参模型的 **PyTorch 可导前向�
     因此 G_b = G_s = 0、底盘耦合项为 0 —— 本脚本仍按完整公式实现，置零只是工况。
   * 角度按**编码器量化**处理（8192 计数/整圈 ⇒ 步长 2π/8192 ≈ 7.66e-4 rad）。
   * 辨识模型 λ = 10；仿真被控对象(plant) 可用 λ = 100 模拟真实库伦摩擦
-    ⇒ 这本身就是**摩擦形状失配**，由 compare_ident_methods.py 量化。
+    ⇒ 这本身就是**摩擦形状失配**（见 docs/sysid_torch.md §3.5 的量化结果）。
 
 辨识方法 = **输出误差法（output error）**: 用记录的**两轴力矩**作为输入，从记录的初始状态
 出发对被控对象做前向仿真（dt = 0.01 s），最小化预测角度/角速度与记录值的差。
@@ -55,7 +55,7 @@ identify_params_torch.py — 平面二维 8 参模型的 **PyTorch 可导前向�
      fv_small=0.008`）——**不**照搬原仓库那几个单 yaw 魔数（log(0.05)/log(0.5)/log(0.03)/0），
      因为两者是**不同的物理模型**，初值必须来自本模型的 CAD 量级。
   7. **无训练/验证划分、无 holdout**（原仓库也没有）；`val_loss` 只是最后在全批算一次的
-     训练损失，供 compare_ident_methods.py 打印用。
+     训练损失，供收敛曲线/上报打印用。
   8. 训练中记录每 epoch 的 `loss_history` 与 `param_history`，最后画收敛曲线（见下）。
 
 ★ 与原仓库**刻意不同**的一点: 摩擦软符号陡度 **λ = 10**（本仓库约定，见
@@ -436,7 +436,7 @@ def simulate_np(p: PlanarParams, q0, qd0, tau_seq, dt, exo: Exo = EXO_ZERO, subs
                 exo_seq=None, integrator: str = "rk4"):
     """numpy 前向仿真（力矩零阶保持）。tau_seq [T,2]；返回 theta [T,2], dtheta [T,2]。
 
-    integrator = "rk4"（默认，旧行为，compare_ident_methods 里的 plant 用）或 "euler"
+    integrator = "rk4"（默认）或 "euler"
     （★ 辨识默认配方，与原仓库一致）。
     exo_seq 非 None 时按步使用 exo_seq[i]（静态倾斜下 A 系重力方向随 θ_b 旋转 ⇒ 逐样本重力）。
     """
@@ -617,7 +617,7 @@ def smooth3(x):
 
 
 def derivatives_from_angles(theta, dt, smooth: bool = True):
-    """量化角 → (dθ, d²θ)：中心差分 + 3 点平滑（与 compare_ident_methods 的预处理一致）。"""
+    """量化角 → (dθ, d²θ)：中心差分 + 3 点平滑（与 collect_sysid.py 的记录口径一致）。"""
     theta = np.asarray(theta, dtype=np.float64)
     v = central_diff(theta, dt)
     a = central_diff(v, dt)          # 对未平滑的一阶差分再差分
@@ -843,7 +843,7 @@ class ParamSpace:
 
     冻结参数（fit_axis 只拟合单轴 / p_constraint）直接用初值常量，不参与优化。
 
-    ★ `p_along_d`（可选，compare_ident_methods.py 用）: 小 yaw 零点已按"离心平衡点"标定后
+    ★ `p_along_d`（可选）: 小 yaw 零点是按"离心平衡点"标定出来后
       模型必然满足 `P = |P|·d̂` ⇒ `Px/Py` 不是两个自由参数，而是**一个自由标量 s = |P|**:
           Px = s·ux,  Py = s·uy,   (ux, uy) = d/|d|
       此时 `Px/Py` 从 free_idx 里移除，raw 向量末尾追加 1 个分量给 s（s 同样**自由、无界**，
@@ -951,7 +951,7 @@ class FitConfig:
         integrator="euler"（半隐式欧拉）, substeps=1, lbfgs_iters=0, window_len=0,
         batch_size=0, windows_per_seg=1, iters=0（⇒ 走新配方；>0 才回到旧配方）。
 
-    字段名全部保留（`compare_ident_methods.py` 在用 `iters/lbfgs_iters/lr/huber_delta/
+    字段名全部保留（`iters/lbfgs_iters/lr/huber_delta/
     window_len/batch_size/p_constraint/p_zero_angle_deg/vel_weight` 等），只改了默认值。
     """
 

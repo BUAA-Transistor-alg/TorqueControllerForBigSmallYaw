@@ -286,7 +286,7 @@ typedef struct TcbsDualYawMpcConfig_C {
 // 状态估计配置（对应 YawStateEstimator::Config，字段顺序与 C++ 一致）
 typedef struct TcbsEstimatorConfig_C {
     // IMU 安装位置（**运行时**可切换；一份二进制支持两种构型）:
-    //   0 = ON_BIG_YAW: IMU 固定在大 yaw 转子 A 上（现状）→ 用 mount_* 标定
+    //   0 = ON_BIG_YAW: IMU 固定在大 yaw 转子 A 上（备选）→ 用 mount_* 标定
     //   1 = ON_HEAD   : IMU 装在头上（pitch 之后，H 系）→ 用 head_mount_* 标定
     // 切换只改变"反解/重力/关节轴/角速度投影"的分支，所有对外字段语义不变。
     int32_t imu_location;          // 0 = ON_BIG_YAW, 1 = ON_HEAD（其它值按 0 处理）

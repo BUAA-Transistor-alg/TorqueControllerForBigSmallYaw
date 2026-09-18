@@ -6,11 +6,14 @@
 //   即 YawStateEstimator::Config::ImuLocation::ON_HEAD）—— 与原仓库
 //   `TorqueController/src/pitch_calibration.cpp` 的构型完全一致。
 //   只有在这种构型下，`imu.euler_pitch` **就是 pitch 关节角**（物理角真值）。
-//   若 IMU 仍固定在大 yaw 转子上（本工程默认构型 ON_BIG_YAW），
-//   `imu.euler_pitch` 是"大 yaw 平台 + 小 yaw + pitch"的**合成倾角**，
-//   **不是** pitch 关节角 ⇒ 本工具标出来的 4 个数完全无效，
-//   照抄进 McuDataPreprocessor 会把 pitch 目标角映射到错误值（可能顶到机械限位）。
-//   程序启动时也会把这条警告再打一遍（大字/多行）。
+//   ★ 本工程**默认构型就是 ON_HEAD**（YawStateEstimator::Config::imu_location 默认值），
+//     所以正常情况下直接跑就行。
+//   ⚠ 但一旦有人把 `imu_location` 切成 ON_BIG_YAW（IMU 固定在大 yaw 转子上），
+//     `imu.euler_pitch` 就变成"大 yaw 平台 + 小 yaw + pitch"的**合成倾角**，
+//     **不是** pitch 关节角 ⇒ 本工具标出来的 4 个数完全无效，
+//     照抄进 McuDataPreprocessor 会把 pitch 目标角映射到错误值（可能顶到机械限位）。
+//   ⚠ 本工具**不经过状态估计器**（直接用 IMU + MCU 串口）⇒ 无法自动检测实际构型，
+//     只能把这条件当前提打印出来；上实车前请自行确认 `imu_location` 的取值。
 //
 // 算法（与原仓库**逐段一致**）: 采样 target_angle(pitch_target_angle)、
 //   imu_euler_pitch、mcu_pitch_angle 三者的关系，做两级线性拟合
@@ -34,7 +37,7 @@
 //   拟合，得到的斜率和截距更能代表系统的真实线性特性，避免端点异常值
 //   拉偏回归结果。
 //
-// 安全（本仓库约定，见 tools/identify_params.cpp / python/scripts/collect_sysid.py）:
+// 安全（本仓库约定，见 python/scripts/collect_sysid.py / tools/test_serial.cpp）:
 //   · yaw **两个关节一律"仅力矩模式 + 零力矩"**（YAW_MODE_TORQUE_ONLY，τ_big = τ_small = 0），
 //     本工具绝不驱动 yaw；
 //   · pitch 只有目标角通道（协议里没有独立力矩通道），因此只发 pitch_target_angle；
@@ -828,9 +831,10 @@ void usage(const char* prog) {
         "        任何退出路径都先连发零力矩帧再关句柄。\n"
         "\n"
         "★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★\n"
-        "★ 前提: IMU 必须**临时装在头上**（与 head 固连，pitch 之后 = YawStateEstimator::\n"
-        "★       Config::ImuLocation::ON_HEAD）—— 与原仓库构型一致。\n"
-        "★ 若 IMU 仍在大 yaw 转子上（本工程默认构型 ON_BIG_YAW），imu.euler_pitch 是\n"
+        "★ 前提: IMU 必须在头上（与 head 固连，pitch 之后 = YawStateEstimator::\n"
+        "★       Config::ImuLocation::ON_HEAD）。本工程**默认构型就是 ON_HEAD**，\n"
+        "★       正常情况下直接跑即可。\n"
+        "★ 若 IMU 在大 yaw 转子上（构型 ON_BIG_YAW，非默认），imu.euler_pitch 是\n"
         "★ 「大 yaw + 小 yaw + pitch」的合成倾角，**不是** pitch 关节角 ⇒ 标定结果无效，\n"
         "★ 照抄进 McuDataPreprocessor 会把 pitch 目标角映射到错误值（可能顶到机械限位）。\n"
         "★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★\n"
@@ -935,7 +939,7 @@ void printBanner(const Options& o, const char* mode) {
         "╚════════════════════════════════════════════════════════════════════════════╝\n"
         "  · 只有 IMU 在头上（pitch 之后）时，imu.euler_pitch 才**就是 pitch 关节角**，\n"
         "    Fit1 / Fit2 才有物理意义 —— 这与原仓库 TorqueController 的构型一致。\n"
-        "  · 若 IMU 仍固定在大 yaw 转子上（本工程默认构型 ON_BIG_YAW），\n"
+        "  · 若 IMU 固定在大 yaw 转子上（构型 ON_BIG_YAW，非默认），\n"
         "    imu.euler_pitch = 「大 yaw 平台 + 小 yaw + pitch」的合成倾角，**不是** pitch 关节角：\n"
         "    标定出的 recv_pitch_*/send_pitch_* **完全无效**；照抄进 McuDataPreprocessor 会把\n"
         "    pitch 目标角放大/缩小到错误值，可能把 pitch 顶到机械限位（危险）。\n"

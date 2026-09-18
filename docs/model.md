@@ -103,7 +103,8 @@ fric_k = fc_k·tanh(λ·θ̇_k) + fv_k·θ̇_k                      （λ 固定
 `r_u^A = d + R(θ_s)ρ` **不含 θ_b**，于是：
 
 1. 公式对 `θ_b` 无关 ⇒ 预测窗内不需要（延迟/带误差的）`θ_b`；
-2. `g_A` 可由 IMU **直接**算得：默认构型下 `g_A = R_mount·g_imu`（连 θ_b 都不用）。
+2. `g_A` 可由 IMU **直接**算得（都不需要 θ_b）: `ON_HEAD` 下 `g_A = Rz(θ_s)Rx(θ_p)·R_H_IMU·g_imu`，
+   `ON_BIG_YAW` 下 `g_A = R_A_IMU·g_imu`。
 
 若误用 C 系重力（`g_C`），会丢掉"质心随大 yaw 转动使重力矩随 θ_b 变化"的部分 ⇒ 倾斜时出现
 系统性偏差。`YawStateEstimator` 输出的 `gravity_a` 就是按此定义的。
@@ -145,7 +146,8 @@ fric_k = fc_k·tanh(λ·θ̇_k) + fv_k·θ̇_k                      （λ 固定
 
 这一点的价值在于 **`θ_s*` 只由机械几何决定**——与编码器零位无关、与任何 IMU 无关，
 而且是个**稳定吸引子**（等效刚度 `k = Ω²·|d|·|P|`），所以它可以直接当作小 yaw 编码器的
-**绝对零位参考**（工具: `python/scripts/calibrate_small_zero.py`，详见 `docs/calibration.md` §3.5）。
+**绝对零位参考**（做法: 在 `./build/tcbs_test_serial` 里把小 yaw 摆到机械零点、读 `yaw_small_angle`，
+取负写进 `recv_small_yaw_offset`；详见 `docs/calibration.md` §3.5）。
 
 **两个必须记住的推论**:
 
@@ -189,7 +191,7 @@ fric_k = fc_k·tanh(λ·θ̇_k) + fv_k·θ̇_k                      （λ 固定
 - λ=100、`fc≈0.22/0.097`、`J≈0.02~0.05` ⇒ 上限 **≈ 4~8 ms** ⇒ 控制步 `dt=10 ms`
   时**必须用积分子步**：`DualYawMpcConfig::substeps = 4`（有效步长 2.5 ms，实测留 ~2× 余量）；
 - λ=1000 ⇒ 上限 **≈ 0.4~0.8 ms** ⇒ 需要 `substeps ≈ 32`，MPC 单次求解从 ~0.9 ms 涨到
-  **3~6 ms（最坏 12~20 ms）**，**超过 10 ms 控制周期**（实测见 `docs/sysid_ls_vs_torch.md` §5）；
+  **3~6 ms（最坏 12~20 ms）**，**超过 10 ms 控制周期**（实测见 `docs/sysid_torch.md` §2.5/§3）；
 - 仿真被控对象 λ=1e4 ⇒ 上限 ≈ 57 µs ⇒ 用 20 µs 子步（`tests/test_dual_yaw_mpc.cpp`）。
 
 `recommendedFrictionLambda()` 给出给定 `dt`（**应传有效步长 `dt/substeps`**）下的上限，
@@ -229,7 +231,7 @@ fric_k = fc_k·tanh(λ·θ̇_k) + fv_k·θ̇_k                      （λ 固定
 
 `tcbs::YawStateEstimator::Config::imu_location` 支持两种构型：
 
-| | 默认（`ON_BIG_YAW`，IMU 在大 yaw 转子上） | 备选（`ON_HEAD`，IMU 移到头上） |
+| | **默认（`ON_HEAD`，IMU 在头上）** | 备选（`ON_BIG_YAW`，IMU 在大 yaw 转子上） |
 |---|---|---|
 | 头姿态 | 反解 `R_imu·R_mountᵀ·Rz(θ_s)·Rx(θ_p)` | **IMU 直测** |
 | 大 yaw 平台方位角 | **IMU 直测** | 由 `头IMU − 小yaw编码器` 反推（仍是实时可信量） |
