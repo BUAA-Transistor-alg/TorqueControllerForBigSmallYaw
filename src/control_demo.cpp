@@ -37,12 +37,12 @@ constexpr double kDeg = M_PI / 180.0;
 struct Options {
     double duration = 10.0;
     double period = 3.0;       // 正弦周期
-    double amp = 0.12;         // 小 yaw 方位角正弦幅值 (rad)
+    double amp = 0.50;         // 小 yaw 方位角正弦幅值 (rad)
                                // ★ 小 yaw 机械行程 ±30°（中心 0）, 且 C++ 侧从两侧各向内 15° 起
                                //   就加软限位代价（默认 ratio=0.75 ⇒ 软限位区 [−15°, +15°]）;
                                //   所以演示幅值取 0.12 rad ≈ 6.9°, 留足余量。要更大摆幅请让
                                //   大 yaw 分担（本 demo 两目标同相）。
-    bool   sequence = false;   // 序列模式
+    bool   sequence = true;   // 序列模式
     double loop_dt = 0.01;     // 主循环周期（与 mpc_loop_period 一致更自然）
 };
 
@@ -84,8 +84,8 @@ int main(int argc, char** argv) {
     // ── 控制参数（默认值见 include/tcbs/mpc/planar_yaw_params.h；标定后替换）──
     RobotController::Config cfg;
     cfg.controller.loop_period = opt.loop_dt;
-    cfg.controller.big_torque_only = false;     // 大 yaw: 力矩 + 电控内环
-    cfg.controller.small_torque_only = false;   // 小 yaw: 力矩 + 电控内环
+    cfg.controller.big_torque_only = true;     // 大 yaw: 力矩 + 电控内环
+    cfg.controller.small_torque_only = true;   // 小 yaw: 力矩 + 电控内环
     cfg.controller.integral_gain[1] = 0.01;     // 小 yaw 积分补偿
     cfg.controller.integral_limit[1] = 0.20;
     cfg.sequence_mode = opt.sequence;     // 序列模式必须在构造时选定
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
     while (g_running) {
         const auto loop_start = std::chrono::steady_clock::now();
         const double t = std::chrono::duration<double>(loop_start - t0).count();
-        if (t > opt.duration) break;
+        // if (t > opt.duration) break;
 
         auto st = rc.getState();
         const double psi_big_now = st.est.platform_azimuth;
@@ -149,10 +149,10 @@ int main(int argc, char** argv) {
                 pitch_seq[k] = pitch_target;
             }
             std::vector<bool> fire_seq(N, false);
-            rc.set(true, false, false, big_seq, small_seq, pitch_seq, fire_seq, true);
+            rc.set(true, true, true, big_seq, small_seq, pitch_seq, fire_seq, true);
         } else {
             rc.set(/*auto_aim_enable=*/true,
-                   /*big_torque_only=*/false, /*small_torque_only=*/false,
+                   /*big_torque_only=*/true, /*small_torque_only=*/true,
                    psi_big_target, psi_small_target,
                    pitch_target, /*fire=*/false, /*integral_enable=*/true);
         }

@@ -56,8 +56,8 @@ struct JointLimits {
 struct DualYawMpcConfig {
     // ── 离散化 ──
     double dt_control = 0.01;   // 控制周期 (s)
-    int    N = 12;              // 预测步数
-    int    substeps = 1;        // 每步 RK4 子步
+    int    N = 24;              // 预测步数
+    int    substeps = 4;        // 每步 RK4 子步
     bool   use_rk4 = true;      // true: RK4；false: 半隐式欧拉（更快，精度略低）
     int    max_iter = 15;       // Ceres 迭代上限
 

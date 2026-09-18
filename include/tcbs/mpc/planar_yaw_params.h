@@ -71,7 +71,7 @@ inline DualYawMpcConfig defaultMpcConfig() {
     DualYawMpcConfig c;
     c.dt_control = 0.01;
     // 平面 8 参模型的每次求值远小于原 40 参版本 → 预测步数可以取更长
-    c.N = 12;
+    c.N = 24;
     // ★ λ=100 时 dt=10 ms 的显式 RK4 不稳定（|J_f|≈360~700/s ⇒ 上限 ≈4~8 ms）
     //   ⇒ 每个控制步内细分 4 个子步（2.5 ms），兼顾稳定与求解耗时（实测 ~4×）
     c.substeps = 4;
@@ -80,13 +80,13 @@ inline DualYawMpcConfig defaultMpcConfig() {
 
     c.w_big_azimuth = 1.0;
     c.w_small_azimuth = 1.0;
-    c.w_small_center = 0.05;
+    c.w_small_center = 0.0;
     c.w_small_limit = 1e4;
     c.small_limit_soft_ratio = 0.75;
     c.r_big_torque = 0.01;
     c.r_small_torque = 0.01;
-    c.rd_big_rate = 0.1;
-    c.rd_small_rate = 0.1;
+    c.rd_big_rate = 10.0;
+    c.rd_small_rate = 10.0;
     c.smooth_eps = 1e-6;
     c.ref_delay_steps = 0;
 
@@ -95,8 +95,8 @@ inline DualYawMpcConfig defaultMpcConfig() {
     c.big.min_angle = -1e9;
     c.big.max_angle = 1e9;
 
-    c.small.max_torque = 0.5;        // N·m（★ 占位：小 yaw 电机力矩能力）
-    c.small.max_torque_rate = 80.0;  // N·m/s
+    c.small.max_torque = 1.0;        // N·m（★ 占位：小 yaw 电机力矩能力）
+    c.small.max_torque_rate = 40.0;  // N·m/s
     // ── 小 yaw 机械行程（**对称** ±30°）──
     // 大 yaw 可多圈自由转（min/max = ∓1e9 = 不限位）; 小 yaw 只能在这个区间内转动。
     //   ★ 该值必须与电控侧硬限位宏（mcu_code_demo 的 YAW_SMALL_MIN_RAD/MAX_RAD）
