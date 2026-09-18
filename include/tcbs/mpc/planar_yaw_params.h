@@ -29,18 +29,34 @@ inline ModelParams defaultModelParams() {
     p.gravity = 9.81;
     p.m_u_known = 0.0;    // 不称重 ⇒ 保持 0（仅倾斜时 m_u·d·g⊥ 项受影响）
 
-    // ── 8 个待辨识参数（占位值，量级取自典型 RM 云台）──
-    p.Jbig_eff = 0.0240;  // 大 yaw 侧惯量（含 m_u|d|²）
-    p.Js       = 0.0130;  // 上装绕小 yaw 轴总惯量
-    p.Px       = 0.0000;  // 上装一阶矩（kg·m）；占位 0 = 假定质心在小 yaw 轴上
-    p.Py       = 0.0000;
-    p.fcBig    = 0.090;  p.fvBig   = 0.030;
-    p.fcSmall  = 0.030;  p.fvSmall = 0.008;
+    // ── 8 个待辨识参数（★ 已由实车数据辨识；来源见下方注释）──
+    // 数据: data/cars/Sentry1/ 287 段（95 大 + 93 小 + 99 保持段）
+    // 方法: python/scripts/identify_params_torch.py --epochs=1000（λ=100，输出误差法）
+    // 结果: data/cars/Sentry1/ident/lam100.txt（用时 3022 s，loss 0.130 → 0.060）
+    // ⚠ **可信度分级**（同一批数据用不同 seed/epochs 复跑仍会漂的参数不要当真）:
+    //   · 较可信: Jbig_eff、fc_big、fc_small
+    //   · 可疑:   Js（−30%）、fv_big / fv_small（训练末尾仍在单调上升，且 fv_big=0.209
+    //            是 fc_big=0.103 的 **2.0 倍** —— 粘滞>库仑在云台上不寻常，通常说明
+    //            有未建模的"速度比例项"被 fv 吸收）
+    //   · **不可信: Px/Py**（本批数据底盘只倾斜 ~1.4°（|g_A| 中位 0.238 m/s²），
+    //            而辨识 P 需要固定 ~10°（1.70 m/s²）；训练中 Px 在 ±0.005 之间来回跳，
+    //            幅值 ~0.002 远小于预期的 |P|≈0.01 ⇒ 这就是噪声。
+    //            要定 P 必须补一批**固定 ~10° 倾角**的数据（`--tilted`）。）
+    p.Jbig_eff = 0.051893;  // 大 yaw 侧惯量（含 m_u|d|²）
+    p.Js       = 0.009162;  // 上装绕小 yaw 轴总惯量
+    p.Px       = 0.001897;  // 上装一阶矩（kg·m）★ 不可信（见上）
+    p.Py       = -0.001017; //                    ★ 不可信（见上）
+    p.fcBig    = 0.103360;  p.fvBig   = 0.209044;
+    p.fcSmall  = 0.030582;  p.fvSmall = 0.048735;
 
     // ── 固定/可选 ──
     // ★ λ = 100（用户确认）: 软符号在 |ω| ≳ 1°/s ≈ 0.0175 rad/s 即饱和，足以逼近真实库仑摩擦。
-    //   数值稳定性: 摩擦模态 Jacobian = fc·λ/J_eff；λ=100、fc≈0.22/0.097、J≈0.02~0.05
-    //   ⇒ |J_f| ≈ 490~1100 /s ⇒ 显式 RK4 稳定上限 dt ≲ 2.78/|J_f| ≈ 2.5~5.7 ms。
+    //   数值稳定性: 摩擦模态 Jacobian = fc·λ·(M⁻¹)_kk；λ=100、当前辨识参数
+    //   （fc_big=0.1034/fc_small=0.0306、Jbig_eff=0.0519/Js=0.00916）下
+    //   det M = Jbig_eff·Js = 4.75e-4，(M⁻¹)_bb = 19.3、(M⁻¹)_ss = 128
+    //   ⇒ |J_f| ≈ fc_big·λ·19.3 ≈ 200 /s（大 yaw）、fc_small·λ·128 ≈ 392 /s（小 yaw）
+    //   ⇒ 显式 RK4 稳定上限 dt ≲ 2.78/392 ≈ **7.1 ms**（小 yaw 侧是瓶颈，因为 Js 小）。
+    //   用 recommendedFrictionLambda() 复核；换参数后必须重算。
     //   控制步 dt=10 ms 时必须用积分子步（`DualYawMpcConfig::substeps ≥ 2`，建议 4~8），
     //   否则 ω≈0 附近梯度符号翻转 → MPC 输出零力矩（历史上踩过）。
     //   用 recommendedFrictionLambda() 检查当前参数下的上限。

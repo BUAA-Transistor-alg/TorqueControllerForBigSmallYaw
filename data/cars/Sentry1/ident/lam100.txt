@@ -1,0 +1,10 @@
+# identify_params_torch.py 输出（输出误差法）
+# 配方: 原仓库配方(epochs×段数 个单片段 Adam 步)
+Jbig_eff = 0.051892895
+Js = 0.009161842
+Px = 0.001897338
+Py = -0.001017086
+fc_big = 0.103359903
+fv_big = 0.209043702
+fc_small = 0.030581918
+fv_small = 0.048735271

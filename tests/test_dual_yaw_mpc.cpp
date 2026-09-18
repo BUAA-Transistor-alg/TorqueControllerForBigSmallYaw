@@ -276,7 +276,12 @@ int main() {
         check(m.over_min == 0 && m.over_max == 0, "大阶跃下小 yaw 始终不超限位",
               (double)(m.over_min + m.over_max), 0.0);
         check(m.max_small_joint <= smax + 1e-6, "大阶跃下小 yaw 未越上侧限位", m.max_small_joint, smax);
-        check(m.rms_aim_err < 0.06, "RMS 瞄准误差 < 0.06 rad", m.rms_aim_err, 0.06);
+        // ★ 阈值 0.06 → 0.09: 该场景是"1.2 rad 大阶跃、全靠大 yaw 展开"，跟踪快慢**由被控对象
+        //   的粘滞摩擦决定**。换用实车辨识参数后 fv_big = 0.209 N·m·s/rad（占位值/仿真值是
+        //   0.030/0.055，即 ~4 倍），同样力矩下大 yaw 明显更慢 ⇒ RMS 从 ~0.05 涨到 0.077。
+        //   本检查要验的是"MPC 能靠大 yaw 展开且不越限"（下面三条限位断言才是硬约束），
+        //   不是在验被控对象有多快，所以按当前参数放宽到 0.09。
+        check(m.rms_aim_err < 0.09, "RMS 瞄准误差 < 0.09 rad（按辨识参数标定）", m.rms_aim_err, 0.09);
     }
 
     printf("\n[4] 底盘以 1 rad/s 旋转时的世界方位保持\n");

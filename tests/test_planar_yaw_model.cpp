@@ -353,7 +353,13 @@ void testEnergy() {
     ModelParams p = defaultModelParams();
     p.fcBig = p.fvBig = p.fcSmall = p.fvSmall = 0.0;
     ModelExo e;
-    e.gravity_a[0] = 0.4; e.gravity_a[1] = -0.25;
+    // ★ 重力必须置 0: 本检查只取动能 T，而含重力时守恒量是 T + V ⇒ dT/dt = q̇ᵀ·G ≠ 0，
+    //   "dT/dt = 0" 这个断言本身不成立。
+    //   历史上这条一直是"空过的": 那时 Px=Py=0（占位值）⇒ G≡0 且 μ≡0 ⇒ h≡0，检查退化成常数。
+    //   换成实车辨识参数后 P≠0（重力通道打开）才暴露出来。
+    //   置重力为 0 后，h 只剩科氏/离心项（∝ μ ∝ |P|）⇒ 这条检查反而**变成真的**:
+    //   它验证 T 与 q̈=M⁻¹(τ−h) 在 μ≠0 时仍然自洽。重力项本身由 [B] 的解析特例覆盖。
+    e.gravity_a[0] = 0.0; e.gravity_a[1] = 0.0;
     auto energy = [&](const double q[2], const double qd[2]) {
         double M[2][2], h[2];
         eom(q, qd, p, e, M, h);

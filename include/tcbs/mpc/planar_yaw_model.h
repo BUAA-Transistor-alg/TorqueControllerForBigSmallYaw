@@ -71,13 +71,14 @@ struct ModelParams {
     double gravity = 9.81;           // 重力加速度 (m/s²)
     // 可选: 上装质量（**仅**用于倾斜时 m_u·d·g⊥ 那一项；不称重时保持 0 即可）
     double m_u_known = 0.0;
-    // ── ★ 8 个待辨识参数 ──
-    double Jbig_eff = 0.020;         // 大 yaw 侧惯量（含 m_u|d|²）      kg·m²
-    double Js       = 0.012;         // 上装绕小 yaw 轴总惯量            kg·m²
-    double Px       = 0.0;           // 上装一阶矩 m_u·ρ_x               kg·m
-    double Py       = 0.0;           // 上装一阶矩 m_u·ρ_y               kg·m
-    double fcBig    = 0.09, fvBig   = 0.030;   // 大 yaw 库仑/粘滞摩擦
-    double fcSmall  = 0.03, fvSmall = 0.008;   // 小 yaw 库仑/粘滞摩擦
+    // ── ★ 8 个待辨识参数（标定值；**与 dual_yaw::defaultModelParams() 保持一致**，
+    //    那里是权威来源、并记录了可信度分级）──
+    double Jbig_eff = 0.051893;      // 大 yaw 侧惯量（含 m_u|d|²）      kg·m²
+    double Js       = 0.009162;      // 上装绕小 yaw 轴总惯量            kg·m²
+    double Px       = 0.001897;      // 上装一阶矩 m_u·ρ_x               kg·m（★ 本批数据不可辨识）
+    double Py       = -0.001017;     // 上装一阶矩 m_u·ρ_y               kg·m（★ 同上）
+    double fcBig    = 0.103360, fvBig   = 0.209044;   // 大 yaw 库仑/粘滞摩擦（fv 可疑）
+    double fcSmall  = 0.030582, fvSmall = 0.048735;   // 小 yaw 库仑/粘滞摩擦（fv 可疑）
     // ── 固定 / 可选 ──
     double frictionLambda = 100.0;   // tanh 软符号陡度（固定，不辨识）
                                      // ★ 100: |ω| ≳ 1°/s 即饱和（逼近真库仑）;
