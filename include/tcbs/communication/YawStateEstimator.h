@@ -116,7 +116,7 @@ public:
         // α = 1.0 ⇒ **直通（不做任何滤波）**；α 越小越平滑、滞后越大。
         // ★ 要"角速度完全取自 MCU、不滤波"就是 `small_rate_lpf_alpha = 1.0`
         //   （大 yaw 那个是陀螺投影，与本项无关）。
-        double small_rate_lpf_alpha = 1.0;   // 小 yaw 关节角速度
+        double small_rate_lpf_alpha = 0.35;   // 小 yaw 关节角速度
         double big_rate_lpf_alpha   = 0.35;   // 大 yaw 平台/关节角速度（IMU 支路的高频低通）
         // ── 大 yaw 角速度: 用 MCU 编码器角速度 `yaw_big_omega` 校正 IMU 支路的直流 ──
         //   IMU 陀螺投影高频准但**有直流误差**（陀螺偏置、底盘项残差、ON_HEAD 的 θ̇_s
