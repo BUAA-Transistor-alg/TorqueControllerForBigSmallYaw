@@ -105,6 +105,8 @@
 三、安全策略
 ================================================================================
 
+* **静止保持段也落盘**（`--record-hold`，默认开；文件名后缀 `_hold`）: 到位+稳定等待期间
+  两轴都在走大角度阶跃，这段数据同样逐样本记录、同样参与辨识（首段除外）。
 * 小 yaw θ 超出**硬限位 [−30°, +30°]** → 立即中止本段（**不保存**被污染的数据）→ PID 回
   **行程中心 −2.5°** → 零力矩；距界限 < 3° 时只打印告警（见 §七）;
 * 电机温度 ≥ ``--max-temp`` → 中止本段 → 零力矩 100 Hz 保温等待降温后重试（超时退出）；
@@ -320,6 +322,7 @@ BIG_PLANNER = dict(max_velocity=8.0, max_acceleration=30.0, max_jerk=800.0)
 SMALL_PLANNER = dict(max_velocity=3.0, max_acceleration=15.0, max_jerk=400.0)
 
 # ── 时序 ──
+HOLD_SUFFIX = "_hold"                 # 静止保持段落盘文件名的后缀（见 --record-hold）
 SETTLE_SEC = 5.0                      # 采样前先 PID 到位并保持这么久（固定时长，不判据）
 STABLE_SEC = 3.0                      # 之后还需**连续**满足稳定条件这么久才开采
 # 稳定条件（四个量全部满足; 任何一个越界 ⇒ 连续计时**归零重计**）:
@@ -1122,7 +1125,9 @@ def drive_steps(link, ref_big: np.ndarray, ref_small: np.ndarray, pids, limiters
 
 
 def hold_until_stable(link, pids, limiters, max_temp, tgt_big: float, tgt_small: float,
-                      err_tol: float, vel_tol: float, stable_sec: float):
+                      err_tol: float, vel_tol: float, stable_sec: float,
+                      record: SegmentRecord | None = None, axis: int = AXIS_BIG,
+                      held_target: float = 0.0, t_offset: float = 0.0):
     """保持稳定控制（100 Hz 继续跑 PID 指向固定目标），直到**连续 stable_sec** 满足稳定条件。
 
     稳定条件（四个量同时满足）:
@@ -1132,6 +1137,9 @@ def hold_until_stable(link, pids, limiters, max_temp, tgt_big: float, tgt_small:
 
     返回 ``(reason, waited_s)``；reason 为 None 表示已满足（正常进入采样）。
     期间与 drive_steps 一样做安全检查（小 yaw 硬限位 / 过温）。
+
+    ``record`` 给定时把这一段也逐样本记下来（列与 drive_steps 完全一致），
+    ``t_offset`` 用于把 t 接在**前一段（到位轨迹）之后**，保持整段 t 单调连续。
     """
     n_need = max(1, int(round(stable_sec * RATE)))
     stable_n = 0
@@ -1157,6 +1165,26 @@ def hold_until_stable(link, pids, limiters, max_temp, tgt_big: float, tgt_small:
         tau_big = limiters[0].limit(pids[0].update(e_big, DT))
         tau_small = limiters[1].limit(pids[1].update(e_small, DT))
         link.send(tau_big, tau_small, st.big_joint_angle + e_big, tgt_small)
+
+        if record is not None:
+            record.append(dict(
+                t=t_offset + (time.perf_counter_ns() - t0_ns) * 1e-9,
+                theta_big=st.big_joint_angle,
+                theta_small=st.small_joint_angle,
+                dtheta_big=st.big_joint_rate,
+                dtheta_small=st.small_joint_rate,
+                tau_big=tau_big,
+                tau_small=tau_small,
+                axis=axis,
+                held_target=held_target,
+                mcu2_seq=st.mcu2_seq,
+                chassis_yaw=st.chassis_yaw,
+                chassis_omega=st.chassis_omega,
+                big_enc_age=st.big_enc_age,
+                gravity_ax=st.gravity_ax,
+                gravity_ay=st.gravity_ay,
+                target_big=tgt_big,
+                target_small=tgt_small))
 
         # ── 稳定判据: 四个量全满足才累加, 否则归零 ──
         v_big = abs(float(st.big_joint_rate))       # ★ RobotSample 没有 platform_rate; 与记录口径一致
@@ -1240,8 +1268,8 @@ def recenter(link, pids, limiters, max_temp: float, seconds: float = RECENTER_SE
 # ============================================================================
 # 保存（npz + csv 同时写）
 # ============================================================================
-def _unique_paths(out_dir: str, tag: str, segment_index: int):
-    base = f"sysid_{tag}_{time.strftime('%Y%m%d_%H%M%S')}_{segment_index:02d}"
+def _unique_paths(out_dir: str, tag: str, segment_index: int, suffix: str = ""):
+    base = f"sysid_{tag}_{time.strftime('%Y%m%d_%H%M%S')}_{segment_index:02d}{suffix}"
     npz_path = os.path.join(out_dir, base + ".npz")
     csv_path = os.path.join(out_dir, base + ".csv")
     k = 1
@@ -1253,7 +1281,7 @@ def _unique_paths(out_dir: str, tag: str, segment_index: int):
 
 
 def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
-                 tag_override: str | None, segment_index: int):
+                 tag_override: str | None, segment_index: int, suffix: str = ""):
     """同时写 npz 与 csv。npz 里的 ``axis``/``held_target`` 是**标量**（段内恒定），
     CSV 里它们是每行一列（同值）；其余列一一对应。详见 docs/sysid_data.md。
 
@@ -1261,7 +1289,7 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
     水平静置时全 0）——追加在最后，保证按列名取列的读取器不失效。
     """
     tag = tag_override or AXIS_NAME[plan.axis]
-    npz_path, csv_path = _unique_paths(out_dir, tag, segment_index)
+    npz_path, csv_path = _unique_paths(out_dir, tag, segment_index, suffix)
     axis = int(plan.axis)
 
     def arr(name):
@@ -1432,13 +1460,21 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
     settle_n = max(1, int(round(args.settle_sec * RATE)))
     pids[0].reset()
     pids[1].reset()
+    # ── ★ 静止保持段也记录（可选, 默认开）──
+    #   这一段是"从当前位姿 → 本段目标"的**大角度阶跃**（由轨迹规划器整形），
+    #   刚好补上采样轨迹里稀缺的"大幅阶跃"激励 ⇒ 一并落盘、一并参与辨识。
+    #   跳过**最开始的第一次**（segment_index == 0）: 那一拍的起始位姿是任意的
+    #   （可能是人工摆放/上电瞬态），不是一个有意义的受控阶跃。
+    rec_hold = (SegmentRecord()
+                if (args.record_hold and segment_index > 0) else None)
     st = link.read()
     ref_big_home = homing_sequence(st.platform_azimuth, float(plan.ref_big[0]),
                                    settle_n, planners["big"])
     ref_small_home = homing_sequence(st.small_joint_angle, float(plan.ref_small[0]),
                                      settle_n, planners["small"])
     reason, _ = drive_steps(link, ref_big_home, ref_small_home, pids, limiters,
-                            args.max_temp)
+                            args.max_temp, record=rec_hold, axis=axis,
+                            held_target=plan.held_target)
     if reason == "small_limit":
         recenter(link, pids, limiters, args.max_temp)
         return "abort"
@@ -1457,7 +1493,10 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
         f"两轴速度 < {args.vel_tol_deg_s:g}°/s；任一越界即重新计时）…")
     reason, waited = hold_until_stable(link, pids, limiters, args.max_temp,
                                        float(plan.ref_big[0]), float(plan.ref_small[0]),
-                                       err_tol, vel_tol, args.stable_sec)
+                                       err_tol, vel_tol, args.stable_sec,
+                                       record=rec_hold, axis=axis,
+                                       held_target=plan.held_target,
+                                       t_offset=settle_n * DT)
     if reason == "small_limit":
         recenter(link, pids, limiters, args.max_temp)
         return "abort"
@@ -1466,6 +1505,13 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
             return "abort"
         return "retry"
     log(f"  ✓ 已稳定（第二段用时 {waited:.2f}s，两段合计 {args.settle_sec + waited:.2f}s）")
+    if rec_hold is not None and len(rec_hold) > 0:
+        h_npz, h_csv = save_segment(rec_hold, plan, args.out, args.tag, segment_index,
+                                    suffix=HOLD_SUFFIX)
+        log(f"  静止保持段已记录: {h_csv}  ({len(rec_hold)} 行, "
+            f"t=0~{rec_hold.t[-1]:.2f}s, 含大角度阶跃)")
+        if args.dry_run:
+            pass
 
     # ── 采样: 300 点 @100 Hz ──
     log(f"  采样 {samples} 点 ({samples * DT:.2f} s @100Hz)…")
@@ -1558,6 +1604,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ki", type=float, default=PID_KI, help=f"PID 积分增益（默认 {PID_KI}）")
     p.add_argument("--kd", type=float, default=PID_KD,
                    help=f"PID 微分增益（默认 {PID_KD}；注意用的是未滤波差分, 给大会抖）")
+    p.add_argument("--record-hold", action=argparse.BooleanOptionalAction, default=True,
+                   help="把每次的静止保持段（到位+稳定等待, 含大角度阶跃）也落盘并参与辨识"
+                        "（文件名后缀 %s；**最开始的第一次不记**）。默认开；--no-record-hold 关闭"
+                        % HOLD_SUFFIX)
     p.add_argument("--stable-sec", type=float, default=STABLE_SEC,
                    help=f"到位后还需连续满足稳定条件这么久（默认 {STABLE_SEC:g}s）")
     p.add_argument("--err-tol-deg", type=float, default=STABLE_ERR_TOL_DEG,
@@ -1615,6 +1665,8 @@ def main(argv=None) -> int:
         f"到位={args.settle_sec:g}s  种子={args.seed}")
     log(f"  PID: kp={args.kp} ki={args.ki} kd={args.kd} 输出限幅 ±{PID_OUT_MAX:g} N·m  "
         f"力矩变化限幅 {MAX_TORQUE_DELTA:g} N·m/步")
+    log(f"  静止保持段记录={'开（后缀 ' + HOLD_SUFFIX + '）' if args.record_hold else '关'}"
+        f"（首段除外）")
     log(f"  仅力矩模式(mode=0)  pitch=0  小 yaw 行程="
         f"[{_deg(SMALL_TRAVEL_MIN):+.0f}°, {_deg(SMALL_TRAVEL_MAX):+.0f}°]"
         f"  参考包络=[{_deg(SMALL_ENV_MIN):+.0f}°, {_deg(SMALL_ENV_MAX):+.0f}°]"

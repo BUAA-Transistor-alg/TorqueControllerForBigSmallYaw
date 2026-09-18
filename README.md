@@ -78,6 +78,8 @@
 # ① 采集（分轴：一轴激励、另一轴 PID 保持；pitch≡0；100 Hz；建议全程固定同一个 10° 静态倾角）
 python3 python/scripts/collect_sysid.py --tag=big   --segments=6 --tilted --held-big-stratified
 python3 python/scripts/collect_sysid.py --tag=small --segments=6 --tilted
+# ↑ 默认还会把每个"静止保持段"也落盘（文件名后缀 _hold，首段除外）并参与辨识 ——
+#   它补的是采样轨迹里稀缺的**大角度阶跃**激励；不要就用 --no-record-hold
 # ② 拟合（torch 输出误差法为主，LS 交叉校核；λ 固定 100，不改）
 # ★ 几何已按实测填好（(dx, dy) = (0, 0.07)），实机数据**不需要**再给 --dx/--dy；
 #   只有换机械或跑旧归档数据（用 (0.10, 0) 生成的那批）时才显式覆盖
