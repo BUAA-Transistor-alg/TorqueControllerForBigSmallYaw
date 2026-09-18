@@ -381,7 +381,8 @@ class TcbsEstimatorConfig(Structure):
         ("stale_age_s", c_double),           # 采样年龄超过该值 → prov.*.stale
         ("chassis_imu_timeout_s", c_double), # 底盘 IMU 可用超时 s（零阶保持）
         ("max_extrap_s", c_double),
-        ("rate_lpf_alpha", c_double),
+        ("small_rate_lpf_alpha", c_double),   # α=1.0 ⇒ 小 yaw 角速度直通（取自 MCU）
+        ("big_rate_lpf_alpha", c_double),     # α=1.0 ⇒ 大 yaw（IMU 陀螺投影）直通
         ("pitch_rate_lpf_alpha", c_double),
         ("pitch_acc_lpf_alpha", c_double),
         ("bore", c_double * 3),

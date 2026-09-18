@@ -163,7 +163,7 @@ ON_HEAD   : θ̇_b = gyro·a_imu(θ_p) − ω_chassis − θ̇_s            ← 
 ```
 
 ON_HEAD 里被减掉的 θ̇_s **不是直接测量**，而是估计器里的
-`small_rate_ = small_rate_lpf_`（编码器差分 + 一阶低通，`rate_lpf_alpha=0.35` @100 Hz ⇒ τ≈19 ms；
+`small_rate_ = small_rate_lpf_`（MCU 发来的 `yaw_small_omega` + 一阶低通，`small_rate_lpf_alpha=0.35` @100 Hz ⇒ τ≈19 ms；
 编码器本身只按 MCU 包率更新）。于是 θ̇_b 多出一项误差
 
 ```

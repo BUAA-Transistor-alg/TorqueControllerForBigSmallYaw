@@ -108,7 +108,8 @@ int main() {
     cfg.estimator.stale_age_s = 0.40;
     cfg.estimator.chassis_imu_timeout_s = 1.5;
     cfg.estimator.max_extrap_s = 0.06;
-    cfg.estimator.rate_lpf_alpha = 0.30;
+    cfg.estimator.small_rate_lpf_alpha = 0.30;
+    cfg.estimator.big_rate_lpf_alpha = 0.66;
     cfg.estimator.pitch_rate_lpf_alpha = 0.20;
     cfg.estimator.pitch_acc_lpf_alpha = 0.10;
     cfg.estimator.bore[0] = 0.02; cfg.estimator.bore[1] = 0.999; cfg.estimator.bore[2] = 0.01;
@@ -184,7 +185,8 @@ int main() {
     check(near(est.transport_delay_s, 0.017), "transport_delay_s");
     check(near(est.big_enc_max_jump, 0.25) && near(est.stale_age_s, 0.40), "big_enc_max_jump / stale_age_s");
     check(near(est.chassis_imu_timeout_s, 1.5) && near(est.max_extrap_s, 0.06), "chassis_imu_timeout / max_extrap");
-    check(near(est.rate_lpf_alpha, 0.30) && near(est.pitch_rate_lpf_alpha, 0.20) &&
+    check(near(est.small_rate_lpf_alpha, 0.30) && near(est.big_rate_lpf_alpha, 0.66) &&
+          near(est.pitch_rate_lpf_alpha, 0.20) &&
           near(est.pitch_acc_lpf_alpha, 0.10), "三个 LPF alpha");
     check(near(est.bore[0], 0.02) && near(est.bore[1], 0.999) && near(est.bore[2], 0.01), "bore[3]");
     check(near(est.gravity, 9.80665), "重力");

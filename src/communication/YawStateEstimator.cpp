@@ -159,7 +159,7 @@ void YawStateEstimator::onImu(double euler_yaw, double euler_pitch, double euler
     if (!imu_seen_) {
         big_rate_lpf_ = rate_target;
     } else {
-        big_rate_lpf_ += cfg_.rate_lpf_alpha * (rate_target - big_rate_lpf_);
+        big_rate_lpf_ += cfg_.big_rate_lpf_alpha * (rate_target - big_rate_lpf_);
     }
     big_rate_ = big_rate_lpf_;
     prov_.big_rate_from_imu = imu_seen_;
@@ -225,7 +225,7 @@ void YawStateEstimator::onMcu(double yaw_big_angle, double yaw_big_omega,
         if (!small_seen_) {
             small_rate_lpf_ = yaw_small_omega;
         } else {
-            small_rate_lpf_ += cfg_.rate_lpf_alpha * (yaw_small_omega - small_rate_lpf_);
+            small_rate_lpf_ += cfg_.small_rate_lpf_alpha * (yaw_small_omega - small_rate_lpf_);
         }
         small_rate_ = small_rate_lpf_;
         small_seen_ = true;

@@ -302,7 +302,12 @@ typedef struct TcbsEstimatorConfig_C {
     double  stale_age_s;           // 采样年龄超过该值视为"过旧"（见 prov.*.stale），s
     double  chassis_imu_timeout_s; // 底盘 IMU"可用"超时，s（零阶保持，比 stale_age_s 宽松）
     double  max_extrap_s;          // 可信量（小 yaw / pitch 编码器）外推上限，s
-    double  rate_lpf_alpha;        // 角速度低通系数
+    // 角速度低通系数（分轴）。α = 1.0 ⇒ 直通（不滤波）。
+    // ★ 本结构体**新增了一个字段**（原 `rate_lpf_alpha` 拆成下面两个）⇒ sizeof 变大；
+    //   调用方若用旧头文件编译，`tcbs_robot_comm_check_abi()` 会报
+    //   "结构体布局不匹配 TcbsEstimatorConfig_C"（**有意的显式失败**，不是静默错位）⇒ 重新编译即可。
+    double  small_rate_lpf_alpha;  // 小 yaw 关节角速度低通（来源: MCU yaw_small_omega）
+    double  big_rate_lpf_alpha;    // 大 yaw 平台/关节角速度低通（来源: IMU 陀螺投影）
     double  pitch_rate_lpf_alpha;  // pitch 角速度低通系数
     double  pitch_acc_lpf_alpha;   // pitch 角加速度低通系数（0 = 不使用角加速度）
     double  bore[3];               // 视轴方向（head 系单位矢量）

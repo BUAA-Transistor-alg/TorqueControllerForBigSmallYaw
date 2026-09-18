@@ -388,7 +388,8 @@ YawStateEstimator::Config toCpp(const TcbsEstimatorConfig_C& c) {
     d.stale_age_s = c.stale_age_s;
     d.chassis_imu_timeout_s = c.chassis_imu_timeout_s;
     d.max_extrap_s = c.max_extrap_s;
-    d.rate_lpf_alpha = c.rate_lpf_alpha;
+    d.small_rate_lpf_alpha = c.small_rate_lpf_alpha;
+    d.big_rate_lpf_alpha = c.big_rate_lpf_alpha;
     d.pitch_rate_lpf_alpha = c.pitch_rate_lpf_alpha;
     d.pitch_acc_lpf_alpha = c.pitch_acc_lpf_alpha;
     for (int i = 0; i < 3; ++i) d.bore[i] = c.bore[i];
@@ -412,7 +413,8 @@ void toC(const YawStateEstimator::Config& s, TcbsEstimatorConfig_C& c) {
     c.stale_age_s = s.stale_age_s;
     c.chassis_imu_timeout_s = s.chassis_imu_timeout_s;
     c.max_extrap_s = s.max_extrap_s;
-    c.rate_lpf_alpha = s.rate_lpf_alpha;
+    c.small_rate_lpf_alpha = s.small_rate_lpf_alpha;
+    c.big_rate_lpf_alpha = s.big_rate_lpf_alpha;
     c.pitch_rate_lpf_alpha = s.pitch_rate_lpf_alpha;
     c.pitch_acc_lpf_alpha = s.pitch_acc_lpf_alpha;
     for (int i = 0; i < 3; ++i) c.bore[i] = s.bore[i];

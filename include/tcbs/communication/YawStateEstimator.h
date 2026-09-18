@@ -110,8 +110,14 @@ public:
         double chassis_imu_timeout_s = 1.0;
         // 可信量（小 yaw / pitch 编码器）外推上限（s）: 防 MCU 停流时发散
         double max_extrap_s = 0.30;
-        // 角速度低通系数（编码器差分/陀螺投影）
-        double rate_lpf_alpha = 0.35;
+        // ── 角速度低通系数（**分轴**，两者来源不同，噪声特性也不同）──
+        //   小 yaw: 来源 = MCU 每帧发来的 `yaw_small_omega`（不差分）；
+        //   大 yaw: 来源 = IMU 陀螺在关节轴上的投影 − 底盘 ω（ON_HEAD 再 − θ̇_s）。
+        // α = 1.0 ⇒ **直通（不做任何滤波）**；α 越小越平滑、滞后越大。
+        // ★ 要"角速度完全取自 MCU、不滤波"就是 `small_rate_lpf_alpha = 1.0`
+        //   （大 yaw 那个是陀螺投影，与本项无关）。
+        double small_rate_lpf_alpha = 1.0;   // 小 yaw 关节角速度
+        double big_rate_lpf_alpha   = 0.35;   // 大 yaw 平台/关节角速度
         double pitch_rate_lpf_alpha = 0.25;
         // pitch 角加速度估计低通（0 = 不使用角加速度，置 0）
         double pitch_acc_lpf_alpha = 0.15;

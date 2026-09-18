@@ -62,7 +62,7 @@
 | `mount_yaw/pitch/roll`（或 `head_mount_*`） | **静止时**用 IMU 加速度计把安装倾斜标到 0.1°；yaw 部分按约定（"机械零位处 x 轴指向世界 +x ⇒ 方位角 0"） | 重力方向直接乘这个矩阵 ⇒ 直接影响 `P` 的辨识 |
 | `transport_delay_s` | §3.1：用 `big_enc_innovation` 与 `big_enc_age` 在线校核（默认 15 ms） | MCU 无时钟，只标传输时延 |
 | `bore[3]` | §3.4：激光/照准器或相机像素反解视轴方向 | 默认 `(0,1,0)`（本工程 x=右/y=前/z=上，pitch 绕 x ⇒ 光轴在 y-z 平面） |
-| `chassis_imu_timeout_s`、`rate_lpf_alpha`、`stale_age_s`… | 保持默认，按实测噪声/带宽微调 | 不影响正确性，只影响平滑度 |
+| `chassis_imu_timeout_s`、`small_rate_lpf_alpha`/`big_rate_lpf_alpha`、`stale_age_s`… | 保持默认，按实测噪声/带宽微调 | 不影响正确性，只影响平滑度 |
 
 ### D. 动力学参数（8 个，必须**辨识**，不要手填）
 

@@ -79,7 +79,7 @@
 | `stale_age_s` | 判"过旧"的年龄阈值 | 0.3 s（仅影响 `prov.stale` 上报） | — |
 | `chassis_imu_timeout_s` | 底盘 IMU "可用"超时（更宽松，因为底盘角速度变化缓慢，宁可零阶保持也不当 0） | 1.0 s | — |
 | `source_timeout_s` | 数据源无效超时 | 0.5 s | — |
-| `rate_lpf_alpha` / `pitch_rate_lpf_alpha` | 关节角速度低通 | 按陀螺噪声/带宽折中 | — |
+| `small_rate_lpf_alpha` / `big_rate_lpf_alpha` / `pitch_rate_lpf_alpha` | 关节角速度低通（**分轴**）| 按各自来源的噪声/带宽折中；`1.0` = 直通不滤波（小 yaw 的来源就是 MCU 发来的 `yaw_small_omega`） | — |
 | `pitch_acc_lpf_alpha` | pitch 角加速度估计低通（平面模型下**不使用** pitch 角加速度，仅上报） | 0.15 | — |
 | `max_extrap_s` | 可信量外推上限 | 0.05 s | — |
 | `use_chassis_imu` | 是否用底盘 IMU 分离大 yaw 关节角速度 | true（关掉则退化为"底盘不转"假设） | — |
