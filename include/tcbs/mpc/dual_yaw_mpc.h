@@ -91,9 +91,14 @@ struct DualYawMpcConfig {
 class DualYawMpc {
 public:
     struct Input {
-        // 状态（关节系）: q = {θ_big, θ_small}, qd = {θ̇_big, θ̇_small}
-        double q[2] = {0.0, 0.0};
-        double qd[2] = {0.0, 0.0};
+        // ★ 状态（关节系, **3-DOF**）: q = {θ_motor, θ_platform, θ_small}
+        //   大 yaw 拆成**电机侧**与**云台侧**两个自由度，中间是传动背隙:
+        //     Δ = θ_motor − θ_platform − exo.backlash_beta
+        //     τ_t = k·dz(Δ) + c·Δ̇   （dz = δ 宽的死区；见 planar_yaw_model.h）
+        //   力矩指令作用在**电机**（θ_motor）；跟踪代价作用在**云台**（θ_platform）。
+        //   目标/参考仍然是"世界系两个 yaw 方位角"（对外接口不变）。
+        double q[3] = {0.0, 0.0, 0.0};
+        double qd[3] = {0.0, 0.0, 0.0};
         ModelExo exo;                       // 只有 3 项: gravity_a[2] / base_omega / base_alpha（★ 不含 pitch）
 
         double platform_azimuth = 0.0;      // ψ_big（当前，解卷绕）
@@ -109,10 +114,10 @@ public:
 
     struct Output {
         double torque[2] = {0.0, 0.0};          // 第一步力矩指令 (N·m)
-        double pred_q[2] = {0.0, 0.0};          // 第一步预测关节角
-        double pred_qd[2] = {0.0, 0.0};         // 第一步预测关节角速度
+        double pred_q[3] = {0.0, 0.0, 0.0};     // 第一步预测关节角 {θ_motor, θ_platform, θ_small}
+        double pred_qd[3] = {0.0, 0.0, 0.0};    // 第一步预测关节角速度
         std::vector<double> ref_joint[2];       // 参考换算到关节系（显示/诊断）
-        std::vector<double> pred_joint[2];      // 预测关节角序列
+        std::vector<double> pred_joint[2];      // 预测关节角序列 {θ_platform, θ_small}（沿用 2 轴语义）
         std::vector<double> pred_azimuth[2];    // 预测世界方位角序列 {big, small}
         bool   usable = false;
         int    iterations = 0;

@@ -149,8 +149,8 @@ bool DualYawMpcCost::operator()(T const* const* parameters, T* residuals) const 
     }
 
     // ── 2. 前向预测 ──
-    T q[2] = {T(in_.q[0]), T(in_.q[1])};
-    T qd[2] = {T(in_.qd[0]), T(in_.qd[1])};
+    T q[3] = {T(in_.q[0]), T(in_.q[1]), T(in_.q[2])};
+    T qd[3] = {T(in_.qd[0]), T(in_.qd[1]), T(in_.qd[2])};
 
     const double sw_b = std::sqrt(cfg_.w_big_azimuth);
     const double sw_s = std::sqrt(cfg_.w_small_azimuth);
@@ -166,36 +166,37 @@ bool DualYawMpcCost::operator()(T const* const* parameters, T* residuals) const 
 
     int idx = 0;
     for (int k = 0; k < N; ++k) {
-        const ModelExo& e = in_.exo;   // 平面模型: pitch 不进动力学
-        const T tau[2] = {ub[k], us[k]};
-        T qn[2], qdn[2];
+        const ModelExo& e = in_.exo;   // 平面模型: pitch 不进动力学；含背隙中心 β
+        // ★ 3-DOF: 力矩只有两个通道 —— 大 yaw 作用在**电机**（q[0]），小 yaw 直接驱动（q[2]）
+        const T u3[3] = {ub[k], T(0.0), us[k]};
+        T qn[3], qdn[3];
         if (cfg_.use_rk4) {
-            integrateStep(q, qd, tau, model_, e, cfg_.dt_control, cfg_.substeps, qn, qdn);
+            integrateStepBacklash(q, qd, u3, model_, e, cfg_.dt_control, cfg_.substeps, qn, qdn);
         } else {
-            // 半隐式（辛）欧拉: 先更新速度再更新位置（比显式欧拉稳定，且只需 1 次动力学求值）
-            T acc[2];
-            forwardAccel(q, qd, tau, model_, e, acc);
-            for (int i = 0; i < 2; ++i) {
+            // 半隐式（辛）欧拉: 先更新速度再更新位置
+            T acc[3];
+            forwardAccelBacklash(q, qd, u3, model_, e, acc);
+            for (int i = 0; i < 3; ++i) {
                 qdn[i] = qd[i] + T(cfg_.dt_control) * acc[i];
                 qn[i] = q[i] + T(cfg_.dt_control) * qdn[i];
             }
         }
-        q[0] = qn[0]; q[1] = qn[1];
-        qd[0] = qdn[0]; qd[1] = qdn[1];
+        for (int i = 0; i < 3; ++i) { q[i] = qn[i]; qd[i] = qdn[i]; }
 
         // ── 3. 世界方位角预测（底盘转动在窗内线性外推）──
         const T t = T((k + 1) * cfg_.dt_control);
         const T psi_c = T(in_.chassis_azimuth) + T(in_.chassis_rate) * t;
-        const T psi_b = psi_c + q[0];
-        const T psi_s = psi_b + q[1];
+        // 世界方位角: 大 yaw 用**云台**侧 q[1]（跟踪代价作用在云台上），小 yaw 用 q[2]
+        const T psi_b = psi_c + q[1];
+        const T psi_s = psi_b + q[2];
 
         residuals[idx++] = T(sw_b) * smoothAbs(psi_b - T(ref_big_[k]), cfg_.smooth_eps);
         residuals[idx++] = T(sw_s) * smoothAbs(psi_s - T(ref_small_[k]), cfg_.smooth_eps);
         residuals[idx++] = T(sr_b) * ub[k];
         residuals[idx++] = T(sr_s) * us[k];
         // 回中到**行程中心**（非对称行程下 ≠ 0, 由配置显式给出）
-        residuals[idx++] = T(sw_c) * (q[1] - T(cfg_.small_center_angle));
-        residuals[idx++] = T(sw_l) * limitPenalty(q[1], sl);
+        residuals[idx++] = T(sw_c) * (q[2] - T(cfg_.small_center_angle));
+        residuals[idx++] = T(sw_l) * limitPenalty(q[2], sl);
         if (k > 0) {
             residuals[idx++] = T(srd_b) * d[k];
             residuals[idx++] = T(srd_s) * d[N + k];
@@ -267,7 +268,7 @@ DualYawMpc::Output DualYawMpc::solve(const Input& in) {
     // ── 参考序列补齐 ──
     std::vector<double> ref_big(N), ref_small(N);
     const double hold_big = in.platform_azimuth;
-    const double hold_small = in.platform_azimuth + in.q[1];
+    const double hold_small = in.platform_azimuth + in.q[2];
     for (int k = 0; k < N; ++k) {
         if (k < static_cast<int>(in.ref_big_azimuth.size())) {
             ref_big[k] = in.ref_big_azimuth[k];
@@ -386,42 +387,41 @@ DualYawMpc::Output DualYawMpc::solve(const Input& in) {
     out.pred_azimuth[0].resize(N);
     out.pred_azimuth[1].resize(N);
     {
-        double q[2] = {in.q[0], in.q[1]};
-        double qd[2] = {in.qd[0], in.qd[1]};
+        double q[3] = {in.q[0], in.q[1], in.q[2]};
+        double qd[3] = {in.qd[0], in.qd[1], in.qd[2]};
         for (int k = 0; k < N; ++k) {
             const ModelExo& e = in.exo;
-            const double tau[2] = {ub[k], us[k]};
-            double qn[2], qdn[2];
+            const double u3[3] = {ub[k], 0.0, us[k]};
+            double qn[3], qdn[3];
             if (cfg_.use_rk4) {
-                integrateStep(q, qd, tau, model_, e, cfg_.dt_control, cfg_.substeps, qn, qdn);
+                integrateStepBacklash(q, qd, u3, model_, e, cfg_.dt_control, cfg_.substeps, qn, qdn);
             } else {
-                double acc[2];
-                forwardAccel(q, qd, tau, model_, e, acc);
-                for (int i = 0; i < 2; ++i) {
+                double acc[3];
+                forwardAccelBacklash(q, qd, u3, model_, e, acc);
+                for (int i = 0; i < 3; ++i) {
                     qdn[i] = qd[i] + cfg_.dt_control * acc[i];
                     qn[i] = q[i] + cfg_.dt_control * qdn[i];
                 }
             }
-            q[0] = qn[0]; q[1] = qn[1];
-            qd[0] = qdn[0]; qd[1] = qdn[1];
+            for (int i = 0; i < 3; ++i) { q[i] = qn[i]; qd[i] = qdn[i]; }
 
             const double t = (k + 1) * cfg_.dt_control;
             const double psi_c = in.chassis_azimuth + in.chassis_rate * t;
-            const double psi_b = psi_c + q[0];
-            out.pred_joint[0][k] = q[0];
-            out.pred_joint[1][k] = q[1];
+            const double psi_b = psi_c + q[1];       // 大 yaw: 云台侧
+            out.pred_joint[0][k] = q[1];             // pred_joint 沿用 {云台, 小yaw}
+            out.pred_joint[1][k] = q[2];
             out.pred_azimuth[0][k] = psi_b;
-            out.pred_azimuth[1][k] = psi_b + q[1];
+            out.pred_azimuth[1][k] = psi_b + q[2];
         }
-        out.pred_q[0] = out.pred_joint[0][0];
-        out.pred_q[1] = out.pred_joint[1][0];
+        out.pred_q[0] = q[0];                        // {θ_motor, θ_platform, θ_small}
+        out.pred_q[1] = out.pred_joint[0][0];
+        out.pred_q[2] = out.pred_joint[1][0];
         // 第一步预测速度（用解析动力学再算一次）
         const ModelExo& e0 = in.exo;
-        const double tau0[2] = {ub[0], us[0]};
-        double acc0[2];
-        forwardAccel(in.q, in.qd, tau0, model_, e0, acc0);
-        out.pred_qd[0] = in.qd[0] + cfg_.dt_control * acc0[0];
-        out.pred_qd[1] = in.qd[1] + cfg_.dt_control * acc0[1];
+        const double u0[3] = {ub[0], 0.0, us[0]};
+        double acc0[3];
+        forwardAccelBacklash(in.q, in.qd, u0, model_, e0, acc0);
+        for (int i = 0; i < 3; ++i) out.pred_qd[i] = in.qd[i] + cfg_.dt_control * acc0[i];
     }
 
     out.torque[0] = ub[0];

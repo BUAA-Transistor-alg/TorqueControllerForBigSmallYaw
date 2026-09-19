@@ -59,7 +59,7 @@ extern "C" {
 //         **A 系（大 yaw 转子系）** 的投影，不再是 C 系）；
 //       - 新增 tcbs_robot_controller_get_* 配置读取与 tcbs_robot_comm_check_abi（版本/布局自检）。
 //     ※ 旧绑定的 sizeof/偏移与 v4 不同，**不可混用**。
-#define TCBS_ROBOT_COMM_C_API_VERSION 4u
+#define TCBS_ROBOT_COMM_C_API_VERSION 5u
 
 // ============================================================================
 // 错误码
@@ -186,7 +186,17 @@ typedef struct TcbsRobotEstimate_C {
     // ── 2) 大 yaw（延迟编码器 + IMU 速率 → 延迟补偿估计）──
     double   big_joint_angle_meas;  // 原始测量值（滞后），rad
     double   big_joint_angle;       // 延迟补偿后的估计（控制用），rad
-    double   big_joint_rate;        // 关节角速度估计，rad/s
+    double   big_joint_rate;        // 关节角速度估计，rad/s（= 云台侧，见下）
+    // ── ★ 大 yaw 电机侧 / 云台侧 显式分离（背隙建模用）──
+    double   big_motor_angle;       // 电机侧关节角（= big_joint_angle），rad
+    double   big_motor_rate;        // 电机侧角速度（MCU 编码器，低通后），rad/s
+    double   big_platform_angle;    // 云台侧关节角 θ_p = platform_azimuth − ψ_chassis，rad
+                                    //   （ψ_chassis 已做一阶延时补偿: 底盘 IMU 与大 yaw 同链路、
+                                    //    同样有链路延迟 + 值保持，见 YawStateEstimator 文件头）
+    double   big_platform_rate;     // 云台侧角速度（= big_joint_rate），rad/s
+    // ── 背隙中心的在线估计（β；只有宽度 δ 是静态标定量）──
+    double   backlash_center;       // β，rad（加在云台角上: Δ = θ_motor − (θ_platform + β)）
+    double   backlash_width_obs;    // 观测到的 Δ 极差（≈ δ；诊断用），rad
     double   big_enc_age;           // 大 yaw 值的年龄，s（上位机计时；-1 = 从未收到）
     double   big_sample_interval;   // 最近两次大 yaw 新样本的间隔，s（上位机计时）
     double   chassis_imu_age;       // 底盘 IMU 值的年龄，s（上位机计时；-1 = 从未收到）
@@ -310,9 +320,11 @@ typedef struct TcbsEstimatorConfig_C {
     //   ⇒ 重新编译即可（Python 侧同步改 `python/torque_controller/_bridge.py`）。
     double  small_rate_lpf_alpha;  // 小 yaw 关节角速度低通（来源: MCU yaw_small_omega）
     double  big_rate_lpf_alpha;    // 大 yaw 平台/关节角速度低通（来源: IMU 陀螺投影）
-    uint8_t big_rate_use_encoder;  // 1 = 用 MCU 编码器角速度校正大 yaw 角速度的直流（默认 0 = 关）
-    double  big_rate_enc_alpha;    // 编码器支路低通系数（拿不到采样间隔时的兜底值）
-    double  big_rate_bias_tau_s;   // 直流校正时间常数，s（≤0 = 关闭校正）
+    // ★ v5: 删掉"用编码器角速度校正云台角速度"的三项（原理错误: 编码器是**电机**侧），
+    //   换成大 yaw **电机侧**角速度的低通 + 背隙中心的在线估计时间常数。
+    double  big_motor_rate_tau_s;  // 电机侧角速度低通（按 MCU 新样本间隔换算），s
+    double  big_motor_rate_alpha;  // 拿不到采样间隔时的兜底系数
+    double  backlash_center_tau_s; // 背隙中心 β 在线估计的遗忘时间常数，s（≤0 = 关闭）
     double  pitch_rate_lpf_alpha;  // pitch 角速度低通系数
     double  pitch_acc_lpf_alpha;   // pitch 角加速度低通系数（0 = 不使用角加速度）
     double  bore[3];               // 视轴方向（head 系单位矢量）

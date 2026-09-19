@@ -185,8 +185,14 @@ void McuMpcController::loop() {
 
         // ── 3. 组装 MPC 输入 ──
         DualYawMpc::Input in;
-        in.q[0] = est.big_joint_angle;
-        in.q[1] = est.small_joint_angle;
+        // ★ 大 yaw 的模型状态 = **云台侧**关节角（θ_p）:
+        //   模型（无论 2-DOF 还是 3-DOF 的云台行）描述的是云台，且参考是世界方位角，
+        //   二者必须同源。以前这里填的是**电机侧**编码器角（big_joint_angle），
+        //   在背隙内电机与云台解耦 ⇒ 状态与参考不同源，是抖动的模型根源之一。
+        // 3-DOF 状态 {θ_motor, θ_platform, θ_small}: 电机侧有独立惯量，与小 yaw 一起填
+        in.q[0] = est.big_motor_angle;
+        in.q[1] = est.big_platform_angle;
+        in.q[2] = est.small_joint_angle;
         in.qd[0] = est.big_joint_rate;
         in.qd[1] = est.small_joint_rate;
         // 平面模型外生量: 重力在关节参考系的平面分量 + 底盘绕关节轴的 ω/α
@@ -196,6 +202,8 @@ void McuMpcController::loop() {
         in.exo.base_omega = est.base_omega[2];   // 绕关节轴分量
         in.exo.base_alpha = 0.0;
         in.platform_azimuth = est.platform_azimuth;
+        // 背隙死区中心 β（在线估计）作为外生量送进模型
+        in.exo.backlash_beta = est.backlash_center;
         in.chassis_azimuth = est.chassis_azimuth;
         in.chassis_rate = est.chassis_yaw_rate;
 
@@ -225,7 +233,7 @@ void McuMpcController::loop() {
         if (solved) {
             if (integral_en) {
                 if (have_prev_pred_) {
-                    integral_[0] += cfg_local.integral_gain[0] * (prev_pred_joint_[0] - est.big_joint_angle);
+                    integral_[0] += cfg_local.integral_gain[0] * (prev_pred_joint_[0] - est.big_platform_angle);
                     integral_[1] += cfg_local.integral_gain[1] * (prev_pred_joint_[1] - est.small_joint_angle);
                 }
                 integral_[0] = clampv(integral_[0], -cfg_local.integral_limit[0], cfg_local.integral_limit[0]);
@@ -233,8 +241,8 @@ void McuMpcController::loop() {
             } else {
                 integral_[0] = integral_[1] = 0.0;
             }
-            prev_pred_joint_[0] = res.pred_q[0];
-            prev_pred_joint_[1] = res.pred_q[1];
+            prev_pred_joint_[0] = res.pred_q[1];   // 云台侧
+            prev_pred_joint_[1] = res.pred_q[2];   // 小 yaw
             have_prev_pred_ = true;
 
             const auto& mc = mpc_.config();
@@ -261,15 +269,20 @@ void McuMpcController::loop() {
         double theta_star[2] = {0.0, 0.0};
         double omega_star[2] = {0.0, 0.0};
         if (solved) {
-            theta_star[0] = res.pred_q[0];
-            theta_star[1] = res.pred_q[1];
-            omega_star[0] = res.pred_qd[0];
-            omega_star[1] = res.pred_qd[1];
+            theta_star[0] = res.pred_q[1];     // ★ 云台侧（theta_star 语义 = 云台目标）
+            theta_star[1] = res.pred_q[2];
+            omega_star[0] = res.pred_qd[1];
+            omega_star[1] = res.pred_qd[2];
         } else {
-            theta_star[0] = est.big_joint_angle;
+            theta_star[0] = est.big_platform_angle;
             theta_star[1] = est.small_joint_angle;
         }
-        pkt.yaw_big_target_angle = theta_star[0];
+        // ★ 下发的 yaw_big_target_angle/velocity **控制的是电机**，而 theta_star 是云台角
+        //   ⇒ mode=1（电控位置环）时必须换算到**电机**坐标系: 保持当前传动形变
+        //   Δ_meas = θ_motor − θ_platform，令电机目标 = 云台目标 + Δ_meas。
+        //   （mode=0 仅力矩时电控不使用该字段，换算也无害。）
+        const double transmission_offset = est.big_motor_angle - est.big_platform_angle;
+        pkt.yaw_big_target_angle = theta_star[0] + transmission_offset;
         pkt.yaw_big_target_velocity = static_cast<float>(omega_star[0]);
         pkt.yaw_big_torque = static_cast<float>(tau_out[0]);
         pkt.yaw_small_target_angle = static_cast<float>(theta_star[1]);

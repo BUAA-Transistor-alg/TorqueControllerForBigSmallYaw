@@ -1,71 +1,107 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-identify_params_torch.py — 平面二维 8 参模型的 **PyTorch 可导前向仿真** 参数辨识
+identify_params_torch.py — **三维（含大 yaw 背隙）**模型的 **PyTorch 可导前向仿真** 参数辨识
 ================================================================================
 
-模型（与 `include/tcbs/mpc/planar_yaw_model.h` 逐项对应，务必保持一致）:
+模型（与 `include/tcbs/mpc/planar_yaw_model.h` 的 `eomBacklash` 逐项对应，务必保持一致）:
 
-    τ = M(q)·q̈ + h(q, q̇)
+    q = (θ_motor, θ_platform, θ_small)      # q[0] 电机、q[1] 大 yaw 云台、q[2] 小 yaw
+    u = (τ_cmd, 0, τ_small)                 # 只有电机被大 yaw 力矩驱动
+
+    Δ  = θ_motor − θ_platform − β
+    τ_t = k·[ dz(Δ) + γ·Δ ] + c·Δ̇            # 传动扭矩（电机受到 −τ_t）
+    dz(Δ) = relu_ε(Δ − δ/2) − relu_ε(−Δ − δ/2)      # 平滑死区，relu_ε(x)=½(x+√(x²+ε²))
+    M    = blkdiag(J_motor, M2)             # M2 = 云台/小 yaw 子块（与 2-DOF 完全同一组式）
+    h[0] = τ_t + fc_motor·tanh(λ·θ̇_motor) + fv_motor·θ̇_motor + τ_off_motor
+    h[1] = h_b − τ_t      h[2] = h_s
+    q̈    = M⁻¹(u − h)
+
+云台/小 yaw 子块（= 2-DOF 那套"平面耦合"模型，**一字不改地复用**）:
 
     Q(θs) = R(θs)·P                     # P = (Px, Py) 上装一阶矩 m_u·ρ
     M11 = Jbig_eff + Js + 2·(d·Q)       M12 = Js + (d·Q)      M22 = Js
     μ   = 2·(dy·Qx − dx·Qy)             # = ∂M11/∂θs
-    h_b = μ·θ̇b·θ̇s + ½μ·θ̇s² − G_b + μ·θ̇s·ω_c + M11·α_c + fric_b
-    h_s = −½μ·θ̇b²      − G_s − μ·θ̇b·ω_c − ½μ·ω_c² + M12·α_c + fric_s
+    h_b = μ·θ̇p·θ̇s + ½μ·θ̇s² − G_b + μ·θ̇s·ω_c + M11·α_c + fric_b
+    h_s = −½μ·θ̇p²      − G_s − μ·θ̇p·ω_c − ½μ·ω_c² + M12·α_c + fric_s
     fric_k = fc_k·tanh(λ·θ̇_k) + fv_k·θ̇_k
 
-8 个待辨识参数（顺序固定，与 paramsToVector / regressor 列一致）:
-    0 Jbig_eff  1 Js  2 Px  3 Py  4 fc_big  5 fv_big  6 fc_small  7 fv_small
+16 个待辨识参数（顺序固定；前 8 个与 `paramsToVector` / `regressor` 列一致）:
+
+    0 Jbig_eff  1 Js        2 Px      3 Py       4 fc_big   5 fv_big
+    6 fc_small  7 fv_small
+    8 backlash_delta(δ)     9 backlash_k     10 backlash_c    11 backlash_through(γ)
+    12 Jmotor   13 fc_motor 14 fv_motor      15 backlash_beta(β)
+
+★ 15 个参数**直接进 torch 模型一起拟合**；**第 11 个 γ（背隙直通项）默认冻结**
+  （钉在 `--backlash-through` 的初值上，默认 0.002），原因见下面第 1 条。
+  要复现"γ 自由"的消融：`--no-freeze-backlash-through`。
+
+★ 新增参数**直接进 torch 模型一起拟合**（用户要求: 不做任何"特殊"处理）:
+  · 没有"用实测 Δ 反算 τ_t 当输入"的近似路径（旧版有，已删除）—— 电机是模型的第 3 个状态，
+    τ_t 由模型自己算；θ_motor 的记录值直接把 δ/k/c/J_motor/电机摩擦钉住；
+  · β 是死区中心（= Δ 的零点偏置），仿真数据里真值为 0；实机数据里它随 IMU 漂移而缓慢变化，
+    运行期由估计器在线给出（`Estimate::backlash_center`），这里作为**同一个模型参数**在离线
+    拟合里一起解出来（不另设"每段一个 β"之类的特殊自由量）；
+  · γ 是死区里的**直通线性项**（同步带等弹性），量很小，作用是给死区内部提供非零梯度
+    （|Δ| < δ/2 时 dz 的梯度≈0，靠 k·γ·Δ 才把 k 拉得动）；它是自由参数（可为 0/负）。
+  · `backlash_smooth_eps`（ε）是**固定量**，不辨识（= C++ 默认 1e-4）。
 
 约定（与 docs/calibration.md §4 / 用户要求一致）:
-  * **λ 固定 10，不辨识**；几何 d 是实测值（dx, dy 不是辨识参数）。
-  * 采集工况: 底盘静止（base_omega = base_alpha = 0）、水平（gravity_a = 0）、pitch 恒 0。
-    因此 G_b = G_s = 0、底盘耦合项为 0 —— 本脚本仍按完整公式实现，置零只是工况。
+  * **λ 固定 100，不辨识**；几何 d 是实测值（dx, dy 不是辨识参数）。
+  * 采集工况: 底盘静止（base_omega = base_alpha = 0）、水平或固定倾角、pitch 恒 0。
+    本脚本按完整公式实现，置零只是工况。
   * 角度按**编码器量化**处理（8192 计数/整圈 ⇒ 步长 2π/8192 ≈ 7.66e-4 rad）。
-  * 辨识模型 λ = 10；仿真被控对象(plant) 可用 λ = 100 模拟真实库伦摩擦
-    ⇒ 这本身就是**摩擦形状失配**（见 docs/sysid_torch.md §3.5 的量化结果）。
 
-辨识方法 = **输出误差法（output error）**: 用记录的**两轴力矩**作为输入，从记录的初始状态
-出发对被控对象做前向仿真（dt = 0.01 s），最小化预测角度/角速度与记录值的差。
+辨识方法 = **输出误差法（output error）**: 用记录的**力矩**作为输入，从记录的初始状态
+(q0, q̇0) 出发对 3-DOF 模型做前向仿真（dt = 0.01 s），最小化预测角度/角速度与记录值的差。
 
 ================================================================================
 ★ 默认配方 = **原仓库 TorqueController/python/scripts/param_ident.py 的同款配方**
 ================================================================================
-（原仓库是单 yaw 4 参 `J·dω/dt = τ − τ_c·tanh(λ·ω) − b·ω + τ_d`；本仓库是平面 2 自由度
- 8 参模型，所以"同款配方"指的是**同一套训练/损失/积分/参数化/收敛曲线做法**，而不是同几个
+（原仓库是单 yaw 4 参 `J·dω/dt = τ − τ_c·tanh(λ·ω) − b·ω + τ_d`；本仓库是平面 3 自由度
+ 16 参模型，所以"同款配方"指的是**同一套训练/损失/积分/参数化/收敛曲线做法**，而不是同几个
  魔数。逐条对齐如下:)
 
-  1. **无任何参数限位**：不再用 sigmoid 软边界 / clamp / 投影 / 惩罚项。
-     * 天然为正的 6 个参数（`Jbig_eff, Js, fc_big, fv_big, fc_small, fv_small`）采用
-       **原仓库同款 log 参数化**：φ = exp(raw)（正性由参数化隐式保证）；
-     * `Px, Py` 可正可负 ⇒ **直接自由参数**（φ = raw）。
-  2. **积分 = 半隐式（symplectic）欧拉**，`substeps = 1`，`dt` 取自数据（100 Hz ⇒ 0.01 s）：
-     先 ω ← ω + dt·α，再 θ ← θ + dt·ω（与原仓库 `param_ident.py` 逐行同序；
-     `--integrator=rk4` 可回到旧的 RK4 精细配方）。
-  3. **每次优化步只随机截取 `seg_steps = 10` 步（0.1 s）的片段**，`epochs = 200`；
+  1. **无任何参数限位**：没有 sigmoid 软边界 / clamp / 投影 / 惩罚项。
+     * 天然为正的 11 个自由参数（`Jbig_eff, Js, fc_big, fv_big, fc_small, fv_small,
+       backlash_delta, backlash_k, backlash_c, Jmotor, fc_motor, fv_motor` 去掉被冻结的 γ）
+       采用 **原仓库同款 log 参数化**：φ = exp(raw)（正性由参数化隐式保证）；
+     * `Px, Py, backlash_beta` 可正可负 ⇒ **直接自由参数**（φ = raw）；
+     * ★ **`backlash_through` γ 默认不参与拟合**（`--no-freeze-backlash-through` 可放开）：
+       它的定位只是死区内给优化器一个非零梯度；一旦放开，优化器会拿它去"填"刚性接触的
+       台阶 —— 实测 10000 epoch 下 γ 从 0.002 涨到 0.27~0.39、δ 同时被撑到 0.25 rad
+       （真值 0.087），参数失去物理意义，而留出误差几乎不变（γ 冻结 vs 自由：
+       1.285 vs 1.285 / 0.198 vs 0.189 / 0.161 vs 0.154）。
+  2. **积分 = RK4，`substeps = 4`**，`dt` 取自数据（100 Hz ⇒ 0.01 s）。
+     ★ 这是相对 2-DOF 配方（半隐式欧拉 + substeps=1）**刻意改的两处**，原因有两个：
+       · 稳定性: 背隙接触模态 ω = √(k/μ_red) ≈ 190 rad/s（k=200、J_motor=0.006、
+         J_platform≈0.07）⇒ 10 ms 一步已到显式积分稳定边界，4 子步（2.5 ms）留余量；
+         k 更大时按 C++ 的 `recommendedBacklashStiffness()` 再细分；
+       · 精度: 同子步数下 euler 的**数值**角速度误差可达 0.126 rad/s（随机力矩 ±0.2 N·m、
+         1 s 轨迹实测），与损失里角速度项同量级 ⇒ 优化会去"拟合积分器"而不是物理；
+         rk4 把它降到 3.9e-3（角度 6.4e-3 → 7.0e-4 rad），代价约 ×2。
+       想复现"原仓库同款"消融: `--integrator=euler --substeps=1`。
+  3. **每次优化步只随机截取 `seg_steps = 10` 步（0.1 s）的片段**，`epochs = 1000`；
      每个 epoch 对**每段数据各抽 1 个片段做 1 个 Adam 步** ⇒ 每 epoch 的步数 = 段数，
      总 Adam 步数 = `epochs × 段数`（= 原仓库 `num_epochs × sample 数` 的同构形式）。
-     ★ **`epochs = 1000`（与原仓库 num_epochs 同轮数）**。
   4. **损失 = 角度误差 MSE（先 wrap 到 (−π, π]）+ 角速度误差 MSE，两项等权相加**；
      **不用 Huber、不做分窗 mini-batch**（`--loss-mode=huber` 可回到旧配方）。
+     3 个状态通道按 `--fit-axis` 加权: big ⇒ (电机, 云台)；small ⇒ (小 yaw)；both ⇒ 三个都算。
   5. **Adam，lr = 3e-4**，**无学习率调度**（原仓库没有 scheduler），**无 LBFGS**。
-  6. **初值沿用本仓库的 CAD/占位初值** `defaultModelParams()`
-     （`Jbig_eff=0.0240, Js=0.0130, Px=0, Py=0, fc_big=0.090, fv_big=0.030, fc_small=0.030,
-     fv_small=0.008`）——**不**照搬原仓库那几个单 yaw 魔数（log(0.05)/log(0.5)/log(0.03)/0），
-     因为两者是**不同的物理模型**，初值必须来自本模型的 CAD 量级。
+  6. **初值 = `planar_yaw_params.h::defaultModelParams()` 当前那组**（前 8 个是实车辨识值，
+     后 8 个是背隙/电机侧的占位值，见 `default_param_vector()`）——**不**照搬原仓库那几个
+     单 yaw 魔数；要从 CAD 占位值重跑就显式 `--init-vector=...`。
+     `--backlash-delta` 不给时会从数据里粗估 δ 当**初值**（精估请看 `calibrate_backlash.py`）。
   7. **无训练/验证划分、无 holdout**（原仓库也没有）；`val_loss` 只是最后在全批算一次的
      训练损失，供收敛曲线/上报打印用。
   8. 训练中记录每 epoch 的 `loss_history` 与 `param_history`，最后画收敛曲线（见下）。
 
-★ 与原仓库**刻意不同**的一点: 摩擦软符号陡度 **λ = 10**（本仓库约定，见
+★ 与原仓库**刻意不同**的一点: 摩擦软符号陡度 **λ = 100**（本仓库约定，见
   `include/tcbs/mpc/planar_yaw_model.h` / FRICTION_LAMBDA），而原仓库单 yaw 版用 **λ = 1e4**。
-  不能照搬 1e4：本仓库的**前向仿真/被控对象/MPC 全部用 λ = 10**，辨识模型必须与之一致，
-  否则辨识出的 fc 是在拟合一个"更接近硬 sign"的摩擦形状，移植回控制器会造成系统性偏差；
-  且 λ = 1e4 时 tanh 在 ω ~ 1e-4 rad/s 内饱和，梯度几乎处处为 0（数值上是硬 sign），
-  对本仓库 100 Hz 采样 + 编码器量化（7.7e-4 rad）的数据没有意义。
+  不能照搬 1e4：本仓库的**前向仿真/被控对象/MPC 全部用 λ = 100**，辨识模型必须与之一致。
 
-迭代次数 = **与原仓库同轮数** ⇒ `epochs = 1000`，见 `FitConfig.epochs`（实测 300~500 epoch 即进平台，可自行调小）。
+迭代次数 = **与原仓库同轮数** ⇒ `epochs = 1000`，见 `FitConfig.epochs`。
 
 ★ 回到旧的"精细配方"（Huber + 分窗 mini-batch + LBFGS + lr=5e-3 + iters=400 + RK4）::
 
@@ -76,8 +112,8 @@ identify_params_torch.py — 平面二维 8 参模型的 **PyTorch 可导前向�
 
 收敛曲线（默认保存文件，不依赖显示环境）::
 
-    data/sysid/ident_torch_convergence.png   # loss(log 纵轴) + 8 个参数各自的收敛曲线（3×3）
-    data/sysid/ident_torch_traj.png          # 实测 vs 仿真（大 yaw 段 + 小 yaw 段，θ 与 θ̇）
+    data/sysid/ident_torch_convergence.png   # loss(log 纵轴) + 16 个参数各自的收敛曲线
+    data/sysid/ident_torch_traj.png          # 实测 vs 仿真（大 yaw 段 + 小 yaw 段，3 通道 θ 与 θ̇）
     --plot-out=PREFIX|DIR|xxx.png 改路径/前缀；--no-plot 关闭；--show-plot 交互显示。
 
 用法::
@@ -86,14 +122,17 @@ identify_params_torch.py — 平面二维 8 参模型的 **PyTorch 可导前向�
     python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv'
     # 只拟合大 yaw（小 yaw 摩擦参数冻结在初值）
     python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' --fit-axis=big
-    # 模型自检（回归矩阵 / numpy vs torch / 前向动力学一致性）
+    # 模型自检（回归矩阵 / numpy vs torch / 3-DOF 装配一致性 / 梯度）
     python3 python/scripts/identify_params_torch.py --selftest
 
-数据格式（与 collect_sysid 约定一致，两种都兼容）:
-  * CSV 列: t,theta_big,theta_small,dtheta_big,dtheta_small,tau_big,tau_small,axis,held_target,mcu2_seq
-  * npz 键: 同名列数组 + 标量 axis / dt(=0.01) / held_target
-    也可用 `theta`(T,2) / `dtheta`(T,2) / `tau`(T,2) 的打包形式。
-  缺失的 dtheta 会自动用「中心差分 + 3 点平滑」从角度补算（量化噪声下这是必要的预处理）。
+数据格式（与 collect_sysid 约定一致）:
+  * CSV 列: t, theta_big, theta_small, dtheta_big, dtheta_small, tau_big, tau_small, axis,
+    held_target, …, **theta_big_motor, theta_big_platform**（★ 3-DOF 辨识必需）
+  * npz 键: 同名列数组 + 标量 axis / dt(=0.01) / held_target；
+    也可用 `theta`(T,3) / `dtheta`(T,3) / `tau`(T,2) 的打包形式。
+  * **电机侧/云台侧角度都必须有**（老 12 列数据没有云台侧列 ⇒ 会被跳过并提示重采）。
+  * 角速度一律用「中心差分 + 3 点平滑」从角度列重算（记录里的角速度通道在"值保持"链路上
+    会有台阶/尖峰，不适合当拟合目标）。
 """
 
 from __future__ import annotations
@@ -121,24 +160,36 @@ else:
 # ============================================================================
 # 常量
 # ============================================================================
-PARAM_NAMES = ("Jbig_eff", "Js", "Px", "Py", "fc_big", "fv_big", "fc_small", "fv_small")
-PARAM_UNITS = ("kg·m²", "kg·m²", "kg·m", "kg·m", "N·m", "N·m·s/rad", "N·m", "N·m·s/rad")
-NPARAM = 8
+CORE_PARAM_NAMES = ("Jbig_eff", "Js", "Px", "Py", "fc_big", "fv_big", "fc_small", "fv_small")
+CORE_PARAM_UNITS = ("kg·m²", "kg·m²", "kg·m", "kg·m", "N·m", "N·m·s/rad", "N·m", "N·m·s/rad")
+NCORE = len(CORE_PARAM_NAMES)
+# ── ★ 新增（3-DOF 背隙/电机侧）参数: 直接进 torch 模型一起拟合，没有任何特殊处理 ──
+EXTRA_PARAM_NAMES = ("backlash_delta", "backlash_k", "backlash_c", "backlash_through",
+                     "Jmotor", "fc_motor", "fv_motor", "backlash_beta")
+EXTRA_PARAM_UNITS = ("rad", "N·m/rad", "N·m·s/rad", "—", "kg·m²", "N·m", "N·m·s/rad", "rad")
+PARAM_NAMES = CORE_PARAM_NAMES + EXTRA_PARAM_NAMES
+PARAM_UNITS = CORE_PARAM_UNITS + EXTRA_PARAM_UNITS
+NPARAM = len(PARAM_NAMES)                 # 16
 DT_DEFAULT = 0.01                      # 100 Hz
 FRICTION_LAMBDA = 100.0                # ★ 辨识模型固定 λ = 100（不辨识）
                                        #   λ=100 ⇒ |ω|≳1°/s 即饱和，逼近真库仑; 前向仿真须细子步
 ENCODER_CPR = 8192                     # 编码器计数/整圈
 QUANT_STEP = 2.0 * math.pi / ENCODER_CPR   # ≈ 7.669e-4 rad
 AXIS_BIG, AXIS_SMALL = 0, 1
+# ── 状态通道 ↔ 被激励轴（3-DOF: q = 电机, 云台, 小 yaw）──
+AXIS_CHANNELS = {AXIS_BIG: (0, 1), AXIS_SMALL: (2,)}
 
 # ★ 无参数限位（与原仓库 `param_ident.py` 一致）：不存在任何上下界 / clamp / 投影。
-#   · 天然为正的 6 个参数（Jbig_eff, Js, fc_big, fv_big, fc_small, fv_small）用 **log 参数化**
-#     φ = exp(raw) ⇒ 正性隐式保证（原仓库对 J / τ_c / b 就是这么做的）；
-#   · Px / Py 可正可负 ⇒ **直接自由参数** φ = raw。
-#   顺序与 PARAM_NAMES 一致。旧的 sigmoid 软边界（DEFAULT_BOUNDS / --p-bound）已删除。
-POSITIVE_PARAM = np.array([True, True, False, False, True, True, True, True])
+#   · 天然为正的 12 个参数用 **log 参数化** φ = exp(raw) ⇒ 正性隐式保证；
+#   · Px / Py / backlash_through / backlash_beta 可正可负 ⇒ **直接自由参数** φ = raw。
+POSITIVE_PARAM = np.array(
+    [True, True, False, False, True, True, True, True,     # 前 8 个（同旧版）
+     True, True, True, False,                             # δ, k, c 正；γ 自由
+     True, True, True, False],                            # J_motor, fc_motor, fv_motor 正；β 自由
+    dtype=bool)
 POSITIVE_IDX = tuple(int(i) for i in np.nonzero(POSITIVE_PARAM)[0])
 FREE_IDX = tuple(int(i) for i in np.nonzero(~POSITIVE_PARAM)[0])
+assert POSITIVE_PARAM.size == NPARAM
 
 
 def p_direction(dx: float, dy: float, zero_angle_deg: float = 0.0):
@@ -161,8 +212,21 @@ def p_direction(dx: float, dy: float, zero_angle_deg: float = 0.0):
 
 
 def default_param_vector() -> np.ndarray:
-    """CAD/占位初值（= planar_yaw_params.h 的 defaultModelParams()，Px/Py 取 0）。"""
-    return np.array([0.0240, 0.0130, 0.0, 0.0, 0.090, 0.030, 0.030, 0.008], dtype=np.float64)
+    """默认初值 = **`include/tcbs/mpc/planar_yaw_params.h::defaultModelParams()` 当前那组**。
+
+    前 8 个 = 平面 8 参（本仓库实车辨识值，见 data/cars/Sentry1/ident/lam100.txt；
+    Px/Py 因缺固定倾角而**不可信**，这里照抄头文件里的值，让拟合自己去动）；
+    后 8 个 = 背隙/电机侧（δ 用 C++ 默认 5°、k/c 用默认、J_motor/电机摩擦用 CAD 占位、β=0）。
+
+    ★ 为什么默认初值用"已在用的那组"而不是 CAD 占位值: 实机辨识的日常用法是
+    「参数已经有值 → 重采一次数据 → 再拟合修正」，从当前值出发只需微调；
+    log 参数化下从 CAD 占位值（Jbig_eff 0.024 vs 实车 0.052）爬到真值要几百个 epoch，
+    纯属浪费算力。要复现"从零辨识"就用 `--init-vector=<CAD 占位值>`。
+    """
+    return np.array([0.051893, 0.009162, 0.001897, -0.001017, 0.103360, 0.209044,
+                     0.030582, 0.048735,          # ← 与 planar_yaw_params.h 一致
+                     0.0873, 200.0, 2.0, 0.002, 0.006, 0.030, 0.010, 0.0],
+                    dtype=np.float64)
 
 
 # ============================================================================
@@ -170,7 +234,7 @@ def default_param_vector() -> np.ndarray:
 # ============================================================================
 @dataclass
 class PlanarParams:
-    """平面 8 参模型参数 + 实测几何（几何量不参与辨识）。"""
+    """平面 3-DOF（含大 yaw 背隙）模型参数 + 实测几何（几何量不参与辨识）。"""
 
     # ── 实测几何 / 固定量 ──
     # ★ 默认 = 本构型实测几何 (dx, dy) = (0, 0.07) m（与 C++ defaultModelParams()/ModelParams
@@ -183,7 +247,7 @@ class PlanarParams:
     friction_lambda: float = FRICTION_LAMBDA
     tau_offset_big: float = 0.0
     tau_offset_small: float = 0.0
-    # ── ★ 8 个待辨识参数 ──
+    # ── ★ 8 个待辨识的核心参数（平面 2-DOF 子块）──
     Jbig_eff: float = 0.0240
     Js: float = 0.0130
     Px: float = 0.0
@@ -192,12 +256,26 @@ class PlanarParams:
     fv_big: float = 0.030
     fc_small: float = 0.030
     fv_small: float = 0.008
+    # ── ★ 8 个新增（3-DOF 背隙/电机侧）待辨识参数 ──
+    backlash_delta: float = 0.0873      # δ: 背隙宽度（rad）
+    backlash_k: float = 200.0           # k: 接触刚度 (N·m/rad)
+    backlash_c: float = 2.0             # c: 接触阻尼 (N·m·s/rad)
+    backlash_through: float = 0.002     # γ: 死区直通线性项（梯度引导；**默认冻结在此值**）
+    Jmotor: float = 0.006               # 电机侧等效惯量 (kg·m²)
+    fc_motor: float = 0.030             # 电机侧库仑摩擦 (N·m)
+    fv_motor: float = 0.010             # 电机侧粘滞摩擦 (N·m·s/rad)
+    backlash_beta: float = 0.0          # β: 死区中心偏置（Δ = θ_m − θ_p − β）
+    # ── 固定量（**不**辨识）──
+    backlash_smooth_eps: float = 1.0e-4  # 平滑死区 ε（= C++ ModelParams 默认）
+    tau_offset_motor: float = 0.0        # 电机侧力矩偏置（默认关）
 
     # ── 向量化接口（顺序与 PARAM_NAMES 一致）──
     def vector(self) -> np.ndarray:
         return np.array(
             [self.Jbig_eff, self.Js, self.Px, self.Py,
-             self.fc_big, self.fv_big, self.fc_small, self.fv_small],
+             self.fc_big, self.fv_big, self.fc_small, self.fv_small,
+             self.backlash_delta, self.backlash_k, self.backlash_c, self.backlash_through,
+             self.Jmotor, self.fc_motor, self.fv_motor, self.backlash_beta],
             dtype=np.float64,
         )
 
@@ -210,6 +288,10 @@ class PlanarParams:
             Jbig_eff=float(phi[0]), Js=float(phi[1]), Px=float(phi[2]), Py=float(phi[3]),
             fc_big=float(phi[4]), fv_big=float(phi[5]),
             fc_small=float(phi[6]), fv_small=float(phi[7]),
+            backlash_delta=float(phi[8]), backlash_k=float(phi[9]),
+            backlash_c=float(phi[10]), backlash_through=float(phi[11]),
+            Jmotor=float(phi[12]), fc_motor=float(phi[13]), fv_motor=float(phi[14]),
+            backlash_beta=float(phi[15]),
         )
 
     def geometry_copy(self, **kw) -> "PlanarParams":
@@ -242,6 +324,12 @@ class Exo:
     base_omega: float = 0.0         # 底盘绕关节轴角速度（本任务 = 0）
     base_alpha: float = 0.0         # 底盘绕关节轴角加速度（本任务 = 0）
     gravity_on: bool | None = None  # None ⇒ 自动判定（张量不能直接做 if 判断）
+    # ★ 背隙死区中心 β：可以是标量，也可以是**逐样本**数组（np [T,B] / torch [B] 广播），
+    #   与 `gravity_a` 同一个用法。``None`` ⇒ 用模型参数 `PlanarParams.backlash_beta`。
+    #   为什么需要逐样本: 实机的 β 由估计器**在线**给出（随电机/云台共同旋转漂移），
+    #   数据里那列 `backlash_center` 就是它 ⇒ 辨识时把它当外生量喂进来，
+    #   与 MPC 运行期**完全一致**；只有一个全局常数 β 时（老数据/消融）才退回拟合。
+    backlash_beta: float | None = None
 
     def __post_init__(self):
         if self.gravity_on is None:
@@ -255,6 +343,11 @@ EXO_ZERO = Exo()
 def exo_from_gravity(gx, gy, base_omega: float = 0.0, base_alpha: float = 0.0) -> Exo:
     """按 A 系重力平面分量构造 Exo（自动置 gravity_on ⇒ eom 会自动启用重力项）。"""
     return Exo(gravity_a=(gx, gy), base_omega=base_omega, base_alpha=base_alpha)
+
+
+def beta_of(p: PlanarParams, exo: Exo):
+    """背隙死区中心 β: 优先用 Exo 里的（可逐样本），否则用模型参数。"""
+    return p.backlash_beta if exo.backlash_beta is None else exo.backlash_beta
 
 
 # ============================================================================
@@ -434,10 +527,12 @@ def regressor_np(q, qd, qdd, p: PlanarParams, exo: Exo = EXO_ZERO):
 
 def simulate_np(p: PlanarParams, q0, qd0, tau_seq, dt, exo: Exo = EXO_ZERO, substeps: int = 1,
                 exo_seq=None, integrator: str = "rk4"):
-    """numpy 前向仿真（力矩零阶保持）。tau_seq [T,2]；返回 theta [T,2], dtheta [T,2]。
+    """**2-DOF** 前向仿真（力矩零阶保持）。tau_seq [T,2]；返回 theta [T,2], dtheta [T,2]。
+
+    ⚠ 这是"平面 2-DOF 子块"的仿真（没有电机/背隙状态），主要用于自检与回归矩阵对照；
+    真实数据（有背隙）请用 `simulate_backlash_np`（3-DOF）。
 
     integrator = "rk4"（默认）或 "euler"
-    （★ 辨识默认配方，与原仓库一致）。
     exo_seq 非 None 时按步使用 exo_seq[i]（静态倾斜下 A 系重力方向随 θ_b 旋转 ⇒ 逐样本重力）。
     """
     tau_seq = np.asarray(tau_seq, dtype=np.float64)
@@ -452,6 +547,133 @@ def simulate_np(p: PlanarParams, q0, qd0, tau_seq, dt, exo: Exo = EXO_ZERO, subs
         q, qd = integrate_step_np(q, qd, tau_seq[i], p,
                                   exo if exo_seq is None else exo_seq[i],
                                   dt, substeps, integrator)
+    return th, dth
+
+
+# ============================================================================
+# ★ 3-DOF（含大 yaw 背隙）模型 —— numpy 版（与 C++ eomBacklash 逐项镜像）
+#   q = (θ_motor, θ_platform, θ_small)；u = (τ_cmd, 0, τ_small)
+#   与 2-DOF 的唯一区别: 大 yaw 云台行多一个 −τ_t、多一行电机方程；云台/小 yaw 子块完全复用。
+# ============================================================================
+def smooth_relu_np(x, eps):
+    """relu_ε(x) = ½(x + √(x²+ε²))（C++ `smoothRelu` 的 numpy 版）。"""
+    return 0.5 * (x + np.sqrt(x * x + eps * eps))
+
+
+def backlash_torque_np(Delta, DDelta, p: PlanarParams):
+    """τ_t = k·[dz(Δ) + γ·Δ] + c·Δ̇（C++ `backlashTorque` 的 numpy 版）。"""
+    h = 0.5 * p.backlash_delta
+    eps = p.backlash_smooth_eps
+    return (p.backlash_k * (smooth_relu_np(Delta - h, eps) - smooth_relu_np(-Delta - h, eps)
+                            + p.backlash_through * Delta)
+            + p.backlash_c * DDelta)
+
+
+def motor_friction_np(w, p: PlanarParams):
+    return p.fc_motor * np.tanh(p.friction_lambda * w) + p.fv_motor * w
+
+
+def eom_backlash_np(q, qd, p: PlanarParams, exo: Exo = EXO_ZERO):
+    """3-DOF 的 ``(M3, h3)``；M3 = blkdiag(J_motor, M2)（块对角 ⇒ 求逆只需标量 + 2×2 逆）。"""
+    M2, h2 = eom_np(q[..., 1:3], qd[..., 1:3], p, exo)
+    D = q[..., 0] - q[..., 1] - beta_of(p, exo)
+    Dd = qd[..., 0] - qd[..., 1]
+    tt = backlash_torque_np(D, Dd, p)
+    h = np.stack([tt + motor_friction_np(qd[..., 0], p) + p.tau_offset_motor,
+                  h2[..., 0] - tt,
+                  h2[..., 1]], axis=-1)
+    M = np.zeros(np.shape(q)[:-1] + (3, 3), dtype=np.float64)
+    M[..., 0, 0] = p.Jmotor
+    M[..., 1:, 1:] = M2
+    return M, h
+
+
+def _motor_input_np(tau):
+    """(τ_cmd, τ_small) → u = (τ_cmd, 0, τ_small)。"""
+    tau = np.asarray(tau, dtype=np.float64)
+    zero = np.zeros_like(tau[..., 0])
+    return np.stack([tau[..., 0], zero, tau[..., 1]], axis=-1)
+
+
+def forward_accel_backlash_np(q, qd, tau, p: PlanarParams, exo: Exo = EXO_ZERO):
+    """q̈ = M⁻¹(u − h)（3-DOF）。"""
+    M, h = eom_backlash_np(q, qd, p, exo)
+    r = _motor_input_np(tau) - h
+    M11, M12, M22 = M[..., 1, 1], M[..., 1, 2], M[..., 2, 2]
+    det2 = M11 * M22 - M12 * M12
+    return np.stack([r[..., 0] / M[..., 0, 0],
+                     (M22 * r[..., 1] - M12 * r[..., 2]) / det2,
+                     (-M12 * r[..., 1] + M11 * r[..., 2]) / det2], axis=-1)
+
+
+def inverse_dynamics_backlash_np(q, qd, qdd, p: PlanarParams, exo: Exo = EXO_ZERO):
+    """τ_gen = M·q̈ + h（3-DOF；用于一致性自检）。"""
+    M, h = eom_backlash_np(q, qd, p, exo)
+    return np.einsum("...ij,...j->...i", M, qdd) + h
+
+
+def rk4_step_backlash_np(q, qd, tau, p: PlanarParams, exo: Exo, dt, substeps: int = 1):
+    """RK4 单步（3-DOF，力矩零阶保持）。"""
+    substeps = max(1, int(substeps))
+    hh = dt / substeps
+    qa = np.array(q, dtype=np.float64)
+    qda = np.array(qd, dtype=np.float64)
+    for _ in range(substeps):
+        k1 = forward_accel_backlash_np(qa, qda, tau, p, exo)
+        k2 = forward_accel_backlash_np(qa + 0.5 * hh * qda, qda + 0.5 * hh * k1, tau, p, exo)
+        k3 = forward_accel_backlash_np(qa + 0.5 * hh * (qda + 0.5 * hh * k1),
+                                       qda + 0.5 * hh * k2, tau, p, exo)
+        k4 = forward_accel_backlash_np(qa + hh * (qda + 0.5 * hh * k2),
+                                       qda + hh * k3, tau, p, exo)
+        qa = qa + (hh / 6.0) * (qda + 2.0 * (qda + 0.5 * hh * k1)
+                                + 2.0 * (qda + 0.5 * hh * k2) + (qda + hh * k3))
+        qda = qda + (hh / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    return qa, qda
+
+
+def euler_step_backlash_np(q, qd, tau, p: PlanarParams, exo: Exo, dt, substeps: int = 1):
+    """半隐式（symplectic）欧拉单步（3-DOF）: ω ← ω + h·α; θ ← θ + h·ω。"""
+    substeps = max(1, int(substeps))
+    hh = dt / substeps
+    qa = np.array(q, dtype=np.float64)
+    qda = np.array(qd, dtype=np.float64)
+    for _ in range(substeps):
+        qda = qda + hh * forward_accel_backlash_np(qa, qda, tau, p, exo)
+        qa = qa + hh * qda
+    return qa, qda
+
+
+def integrate_step_backlash_np(q, qd, tau, p: PlanarParams, exo: Exo, dt,
+                               substeps: int = 1, integrator: str = "rk4"):
+    name = str(integrator).lower()
+    if name in ("euler", "semi-implicit", "semi_implicit"):
+        return euler_step_backlash_np(q, qd, tau, p, exo, dt, substeps)
+    if name == "rk4":
+        return rk4_step_backlash_np(q, qd, tau, p, exo, dt, substeps)
+    raise ValueError(f"未知积分器 {integrator!r}（支持 euler | rk4）")
+
+
+def simulate_backlash_np(p: PlanarParams, q0, qd0, tau_seq, dt, exo: Exo = EXO_ZERO,
+                         substeps: int = 4, exo_seq=None, integrator: str = "rk4",
+                         beta_seq=None):
+    """**3-DOF** 前向仿真（力矩零阶保持）。tau_seq [T,2]；返回 theta [T,3], dtheta [T,3]。
+
+    与 C++ `integrateStepBacklash` 同一组方程。``beta_seq`` 非 None 时**逐步**替换
+    ``exo.backlash_beta``（= 数据里那列在线估计的 β）。
+    """
+    tau_seq = np.asarray(tau_seq, dtype=np.float64)
+    T = tau_seq.shape[0]
+    q = np.array(q0, dtype=np.float64)
+    qd = np.array(qd0, dtype=np.float64)
+    th = np.zeros((T,) + q.shape, dtype=np.float64)
+    dth = np.zeros_like(th)
+    for i in range(T):
+        th[i] = q
+        dth[i] = qd
+        ex = exo if exo_seq is None else exo_seq[i]
+        if beta_seq is not None:
+            ex = replace(ex, backlash_beta=beta_seq[i])
+        q, qd = integrate_step_backlash_np(q, qd, tau_seq[i], p, ex, dt, substeps, integrator)
     return th, dth
 
 
@@ -559,10 +781,9 @@ def torch_integrate_step(q, qd, tau, p: PlanarParams, exo: Exo, dt, substeps: in
 
 def torch_rollout(p: PlanarParams, q0, qd0, tau_seq, dt, exo: Exo = EXO_ZERO, substeps: int = 1,
                   grav_seq=None, integrator: str = "rk4"):
-    """可导前向仿真。tau_seq [T,B,2], q0/qd0 [B,2]；返回 theta [T,B,2], dtheta [T,B,2]。
+    """**2-DOF** 可导前向仿真。tau_seq [T,B,2], q0/qd0 [B,2]；返回 [T,B,2]。
 
-    integrator: "rk4"（默认，旧行为）| "euler"（★ 辨识默认配方，与原仓库一致）。
-    grav_seq [T,B,2] 非 None 时逐步使用该步的 A 系重力平面分量（静态倾斜 + 大 yaw 转动）。
+    ⚠ 真实数据（有背隙）请用 `torch_rollout_backlash`（3-DOF）。本函数只用于 2-DOF 子块自检。
     """
     T = tau_seq.shape[0]
     q = q0
@@ -578,6 +799,101 @@ def torch_rollout(p: PlanarParams, q0, qd0, tau_seq, dt, exo: Exo = EXO_ZERO, su
             ex = exo_from_gravity(grav_seq[i, :, 0], grav_seq[i, :, 1],
                                   exo.base_omega, exo.base_alpha)
         q, qd = torch_integrate_step(q, qd, tau_seq[i], p, ex, dt, substeps, integrator)
+    return torch.stack(th, dim=0), torch.stack(dth, dim=0)
+
+
+# ============================================================================
+# ★ 3-DOF（含大 yaw 背隙）模型 —— torch 可导版（逐项镜像上面的 numpy 版）
+# ============================================================================
+def torch_smooth_relu(x, eps: float):
+    return 0.5 * (x + torch.sqrt(x * x + eps * eps))
+
+
+def torch_backlash_torque(D, Dd, p: PlanarParams):
+    """τ_t = k·[dz(Δ) + γ·Δ] + c·Δ̇（平滑死区；ε = p.backlash_smooth_eps）。"""
+    h = 0.5 * p.backlash_delta
+    eps = p.backlash_smooth_eps
+    dz = torch_smooth_relu(D - h, eps) - torch_smooth_relu(-D - h, eps)
+    return p.backlash_k * (dz + p.backlash_through * D) + p.backlash_c * Dd
+
+
+def torch_forward_accel_backlash(q, qd, tau, p: PlanarParams, exo: Exo = EXO_ZERO):
+    """q̈ = M⁻¹(u − h)（3-DOF，可导）。"""
+    M11, M12, h2 = torch_eom(q[..., 1:3], qd[..., 1:3], p, exo)
+    tt = torch_backlash_torque(q[..., 0] - q[..., 1] - beta_of(p, exo),
+                               qd[..., 0] - qd[..., 1], p)
+    h0 = (tt + p.fc_motor * torch.tanh(p.friction_lambda * qd[..., 0])
+          + p.fv_motor * qd[..., 0] + p.tau_offset_motor)
+    h1 = h2[..., 0] - tt
+    h2s = h2[..., 1]
+    Js = p.Js
+    det2 = M11 * Js - M12 * M12
+    r0 = tau[..., 0] - h0
+    r1 = -h1
+    r2 = tau[..., 1] - h2s
+    return torch.stack([r0 / p.Jmotor,
+                        (Js * r1 - M12 * r2) / det2,
+                        (M11 * r2 - M12 * r1) / det2], dim=-1)
+
+
+def torch_rk4_step_backlash(q, qd, tau, p: PlanarParams, exo: Exo, dt, substeps: int = 1):
+    hh = dt / max(1, int(substeps))
+    for _ in range(max(1, int(substeps))):
+        k1 = torch_forward_accel_backlash(q, qd, tau, p, exo)
+        k2 = torch_forward_accel_backlash(q + 0.5 * hh * qd, qd + 0.5 * hh * k1, tau, p, exo)
+        k3 = torch_forward_accel_backlash(q + 0.5 * hh * (qd + 0.5 * hh * k1),
+                                          qd + 0.5 * hh * k2, tau, p, exo)
+        k4 = torch_forward_accel_backlash(q + hh * (qd + 0.5 * hh * k2), qd + hh * k3,
+                                          tau, p, exo)
+        q = q + (hh / 6.0) * (qd + 2.0 * (qd + 0.5 * hh * k1)
+                              + 2.0 * (qd + 0.5 * hh * k2) + (qd + hh * k3))
+        qd = qd + (hh / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    return q, qd
+
+
+def torch_euler_step_backlash(q, qd, tau, p: PlanarParams, exo: Exo, dt, substeps: int = 1):
+    n = max(1, int(substeps))
+    hh = dt / n
+    for _ in range(n):
+        qd = qd + hh * torch_forward_accel_backlash(q, qd, tau, p, exo)
+        q = q + hh * qd
+    return q, qd
+
+
+def torch_integrate_step_backlash(q, qd, tau, p: PlanarParams, exo: Exo, dt,
+                                  substeps: int = 1, integrator: str = "euler"):
+    name = str(integrator).lower()
+    if name in ("euler", "semi-implicit", "semi_implicit"):
+        return torch_euler_step_backlash(q, qd, tau, p, exo, dt, substeps)
+    if name == "rk4":
+        return torch_rk4_step_backlash(q, qd, tau, p, exo, dt, substeps)
+    raise ValueError(f"未知积分器 {integrator!r}（支持 euler | rk4）")
+
+
+def torch_rollout_backlash(p: PlanarParams, q0, qd0, tau_seq, dt, exo: Exo = EXO_ZERO,
+                           substeps: int = 4, grav_seq=None, integrator: str = "rk4",
+                           beta_seq=None):
+    """**3-DOF** 可导前向仿真。tau_seq [T,B,2], q0/qd0 [B,3]；返回 theta/dtheta [T,B,3]。
+
+    ``grav_seq`` / ``beta_seq``（各 [T,B]）非 None 时**逐步**替换对应外生量
+    （β 逐样本 = 数据里在线估计的那列，与运行期一致）。
+    """
+    T = tau_seq.shape[0]
+    q = q0
+    qd = qd0
+    th = []
+    dth = []
+    for i in range(T):
+        th.append(q)
+        dth.append(qd)
+        if grav_seq is None:
+            ex = exo
+        else:
+            ex = exo_from_gravity(grav_seq[i, :, 0], grav_seq[i, :, 1],
+                                  exo.base_omega, exo.base_alpha)
+        if beta_seq is not None:
+            ex = replace(ex, backlash_beta=beta_seq[i])
+        q, qd = torch_integrate_step_backlash(q, qd, tau_seq[i], p, ex, dt, substeps, integrator)
     return torch.stack(th, dim=0), torch.stack(dth, dim=0)
 
 
@@ -632,19 +948,28 @@ def derivatives_from_angles(theta, dt, smooth: bool = True):
 # ============================================================================
 @dataclass
 class Segment:
-    """一段采集数据（两轴都有记录；axis 标明哪一轴被激励）。"""
+    """一段采集数据（两轴都有记录；axis 标明哪一轴被激励）。
+
+    ★ 状态是 **3-DOF**: ``theta[:, 0] = θ_motor``（电机编码器，延时补偿后）、
+      ``theta[:, 1] = θ_platform``（云台侧，IMU 反解）、``theta[:, 2] = θ_small``。
+      ``tau[:, 0] = τ_cmd``（发给电机的力矩）、``tau[:, 1] = τ_small``。
+    """
 
     t: np.ndarray                 # [T]
-    theta: np.ndarray             # [T,2] 关节角（实测 = 量化后）
-    dtheta: np.ndarray            # [T,2]
-    tau: np.ndarray               # [T,2]
+    theta: np.ndarray             # [T,3] 关节角（电机 / 云台 / 小 yaw）
+    dtheta: np.ndarray            # [T,3]
+    tau: np.ndarray               # [T,2] (τ_cmd_big, τ_small)
     axis: int = AXIS_BIG          # 0 = 大 yaw 被激励, 1 = 小 yaw 被激励
     held_target: float = 0.0
     dt: float = DT_DEFAULT
     mcu2_seq: np.ndarray | None = None
     gravity: np.ndarray | None = None      # [T,2] A 系重力平面分量 (m/s²)；None = 水平(0,0)
-    ddtheta: np.ndarray | None = None      # [T,2]（可选；oracle 消融用）
-    theta_true: np.ndarray | None = None   # [T,2]（仅仿真数据有；评测用）
+    # ★ [T] 背隙死区中心 β（**在线**估计值）= 数据列 `backlash_center`；None = 没有该列
+    #   ⇒ 那时只能把 β 当模型参数拟合（一个全局常数），见 `--beta-mode`
+    beta: np.ndarray | None = None
+    beta_true: np.ndarray | None = None    # [T] 仿真真值 β（仅诊断/画图；实机恒 None/0）
+    ddtheta: np.ndarray | None = None      # [T,3]（可选；oracle 消融用）
+    theta_true: np.ndarray | None = None   # [T,3]（仅仿真数据有；评测用）
     dtheta_true: np.ndarray | None = None
     ddtheta_true: np.ndarray | None = None
     source: str = "?"
@@ -680,26 +1005,85 @@ def _col(rec, names, n=None):
     raise KeyError(f"缺少列 {names}")
 
 
+# ★ 3-DOF 辨识需要的列（电机侧 + 云台侧都要有）:
+#   · `theta_big_motor`    = 电机侧（编码器 + 一阶延时补偿）—— 电机状态的真值
+#   · `theta_big_platform` = 云台侧（IMU 反解 θ_p = ψ_platform − ψ_chassis）—— 云台状态
+#   两者之差 Δ 就是传动形变（背隙）；**δ/k/c/J_motor 直接由模型拟合**（不再有"用实测 Δ
+#   反算 τ_t 当输入"的特殊近似路径）。
+_MOTOR_COLS = ("theta_big_motor", "theta_big", "theta_b")
+_PLATFORM_COLS = ("theta_big_platform", "theta_platform")
+_SMALL_COLS = ("theta_small", "theta_s")
+
+
+def seg_fingerprint(seg: "Segment") -> str:
+    """一段数据的指纹（只取"动力学内容": τ 与三通道角度）——用于检出**训练/留出重合**。
+
+    ⚠ 这个检查是必须的: `collect_sysid.py` 对 `--seed` 是**确定性**的（默认 42），
+    所以"另跑一次采留出集"会生成与训练集**逐位相同**的数据；早期就是这样把训练集
+    当留出集用了一轮。指纹刻意不看 `t`（t 来自墙钟，会变），只看物理量。
+    """
+    import hashlib
+    h = hashlib.md5()
+    for a in (seg.tau, seg.theta):
+        # 量化到 1e-6 再哈希: CSV 落盘只有 6 位小数，不量化会让"同一段数据的 CSV 版"
+        # 与"npz 版"指纹不同，从而漏报重合
+        h.update(np.ascontiguousarray(np.round(np.asarray(a, dtype=np.float64), 6)).tobytes())
+    return h.hexdigest()
+
+
+def state_arrays(seg: "Segment", state_mode: str = "est"):
+    """按 ``state_mode`` 取"状态目标": est = 记录/估计值（控制器真正看到的），
+    true = 仿真真值（仅 dry-run 数据有；**上限对照**，用来把"模型误差"与
+    "状态估计误差"分开）。返回 (theta, dtheta)。"""
+    if state_mode == "true" and seg.theta_true is not None:
+        th = np.asarray(seg.theta_true, dtype=np.float64)
+        dt_ = (np.asarray(seg.dtheta_true, dtype=np.float64)
+               if seg.dtheta_true is not None
+               else np.stack([derivatives_from_angles(th[:, k], seg.dt)[0] for k in range(3)],
+                             axis=-1))
+        if th.ndim == 2 and th.shape[1] >= 3:
+            return th[:, :3], dt_[:, :3]
+    return seg.theta, seg.dtheta
+
+
 def segment_from_arrays(rec: dict, dt: float, source: str = "?") -> Segment:
     """把「同名列数组」字典转成 Segment（CSV 与 npz 共用）。"""
     if "theta" in rec and np.ndim(rec["theta"]) == 2:
-        theta = np.asarray(rec["theta"], dtype=np.float64)[:, :2]
+        theta = np.asarray(rec["theta"], dtype=np.float64)
+        if theta.shape[1] < 3:
+            raise KeyError(
+                f"{source}: 打包的 theta 只有 {theta.shape[1]} 列；3-DOF 辨识需要 3 列"
+                "（电机 / 云台 / 小 yaw）")
+        theta = theta[:, :3]
     else:
-        tb = _col(rec, ["theta_big", "theta_b"])
-        ts = _col(rec, ["theta_small", "theta_s"])
-        theta = np.stack([tb, ts], axis=-1)
+        tb = _col(rec, list(_MOTOR_COLS))          # 电机侧
+        try:
+            tp = _col(rec, list(_PLATFORM_COLS))   # ★ 云台侧（3-DOF 必需）
+        except KeyError as exc:
+            raise KeyError(
+                f"缺少**云台侧**角度列 {_PLATFORM_COLS}（θ_p = platform_azimuth − "
+                f"chassis_azimuth）。3-DOF 背隙辨识必须同时有电机侧与云台侧两列 ⇒ "
+                f"12 列老数据需要重采（collect_sysid.py 已写全量列）") from exc
+        ts = _col(rec, list(_SMALL_COLS))
+        theta = np.stack([tb, tp, ts], axis=-1)
     if "tau" in rec and np.ndim(rec["tau"]) == 2:
         tau = np.asarray(rec["tau"], dtype=np.float64)[:, :2]
     else:
         tau = np.stack([_col(rec, ["tau_big", "tau_b"]), _col(rec, ["tau_small", "tau_s"])], axis=-1)
     if "dtheta" in rec and np.ndim(rec.get("dtheta")) == 2:
-        dtheta = np.asarray(rec["dtheta"], dtype=np.float64)[:, :2]
-    elif rec.get("dtheta_big") is not None and rec.get("dtheta_small") is not None:
-        dtheta = np.stack([_col(rec, ["dtheta_big"]), _col(rec, ["dtheta_small"])], axis=-1)
+        dtheta = np.asarray(rec["dtheta"], dtype=np.float64)
+        if dtheta.shape[1] < 3:
+            dtheta = None
+        else:
+            dtheta = dtheta[:, :3]
     else:
-        # 缺角速度列 → 用「中心差分 + 3 点平滑」补算（量化噪声下必须平滑）
-        dtheta = np.stack([derivatives_from_angles(theta[:, 0], dt)[0],
-                           derivatives_from_angles(theta[:, 1], dt)[0]], axis=-1)
+        dtheta = None
+    if dtheta is None:
+        # ★ 一律用「中心差分 + 3 点平滑」从角度列重算角速度（量化噪声下必须平滑）。
+        #   为什么不直接用记录里的角速度通道: 电机侧/底盘侧的角速度在"值保持"链路上会有
+        #   台阶与刷新尖峰（旧的 τ_t 反算就是被 Δ̇ 尖峰带飞的），不适合当拟合目标。
+        dtheta = np.stack([derivatives_from_angles(theta[:, k], dt)[0] for k in range(3)],
+                          axis=-1)
     if not np.all(np.isfinite(dtheta)):
         dtheta = np.nan_to_num(dtheta, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -718,17 +1102,46 @@ def segment_from_arrays(rec: dict, dt: float, source: str = "?") -> Segment:
                          np.asarray(rec["gravity_ay"], dtype=np.float64)], axis=-1)
     if grav is not None and (grav.shape[0] != theta.shape[0] or not np.any(grav != 0.0)):
         grav = None if not np.any(grav != 0.0) else grav
+    # ── ★ 背隙中心 β（在线估计列）──
+    beta = None
+    if rec.get("beta") is not None:
+        beta = np.asarray(rec["beta"], dtype=np.float64)
+    elif rec.get("backlash_center") is not None:
+        beta = np.asarray(rec["backlash_center"], dtype=np.float64)
+    if beta is not None:
+        beta = beta.reshape(-1)
+        if beta.shape[0] != theta.shape[0] or not np.all(np.isfinite(beta)):
+            beta = None
+        elif not np.any(beta != 0.0):
+            beta = None            # 全 0 = 没有可用信息（老数据/实机恒 0）
+    bt = rec.get("backlash_beta_true")
+    beta_true = None if bt is None else np.asarray(bt, dtype=np.float64).reshape(-1)
     dd = rec.get("ddtheta")
     dd = None if dd is None else np.asarray(dd, dtype=np.float64)
+    # ★ 仿真真值状态（[T,3]）: npz 里是打包好的 `theta_true`；CSV 里是 6 个 `*_true_*` 列
+    #   ⇒ 两种都要能拿到（否则 `--state-mode=true` 会在 CSV 数据上**静默失效**）
     th_true = rec.get("theta_true")
+    if th_true is None and rec.get("theta_true_motor") is not None:
+        th_true = np.stack([_col(rec, ["theta_true_motor"]),
+                            _col(rec, ["theta_true_platform"]),
+                            _col(rec, ["theta_true_small"])], axis=-1)
     th_true = None if th_true is None else np.asarray(th_true, dtype=np.float64)
+    if th_true is not None and not np.any(th_true != 0.0):
+        th_true = None                      # 实机数据这 6 列恒 0 = 未知
     dth_true = rec.get("dtheta_true")
+    if dth_true is None and rec.get("dtheta_true_motor") is not None:
+        dth_true = np.stack([_col(rec, ["dtheta_true_motor"]),
+                             _col(rec, ["dtheta_true_platform"]),
+                             _col(rec, ["dtheta_true_small"])], axis=-1)
     dth_true = None if dth_true is None else np.asarray(dth_true, dtype=np.float64)
+    if dth_true is not None and not np.any(dth_true != 0.0):
+        dth_true = None
     dd_true = rec.get("ddtheta_true")
     dd_true = None if dd_true is None else np.asarray(dd_true, dtype=np.float64)
     return Segment(t=t, theta=theta, dtheta=dtheta, tau=tau, axis=axis, held_target=held,
-                   dt=dt, mcu2_seq=seq, gravity=grav, ddtheta=dd, theta_true=th_true,
-                   dtheta_true=dth_true, ddtheta_true=dd_true, source=source)
+                   dt=dt, mcu2_seq=seq, gravity=grav, beta=beta, ddtheta=dd,
+                   theta_true=th_true, dtheta_true=dth_true, ddtheta_true=dd_true,
+                   source=source, beta_true=beta_true)
 
 
 def _read_csv(path: str) -> list:
@@ -934,7 +1347,17 @@ class ParamSpace:
 
 
 def params_from_torch(phi_vec, base: PlanarParams) -> PlanarParams:
-    return base.with_vector(np.asarray([float(v) for v in phi_vec]))
+    """用长度 16 的参数向量构造 PlanarParams。
+
+    参数可以是 numpy 数组**或 torch 张量**（后者保持可导 —— 训练路径就靠它）。
+    """
+    return replace(
+        base,
+        Jbig_eff=phi_vec[0], Js=phi_vec[1], Px=phi_vec[2], Py=phi_vec[3],
+        fc_big=phi_vec[4], fv_big=phi_vec[5], fc_small=phi_vec[6], fv_small=phi_vec[7],
+        backlash_delta=phi_vec[8], backlash_k=phi_vec[9], backlash_c=phi_vec[10],
+        backlash_through=phi_vec[11], Jmotor=phi_vec[12], fc_motor=phi_vec[13],
+        fv_motor=phi_vec[14], backlash_beta=phi_vec[15])
 
 
 # ============================================================================
@@ -960,7 +1383,12 @@ class FitConfig:
     epochs: int = 1000              # ★ 与**原仓库同轮数**（num_epochs=1000）；每 epoch 每段 1 个 Adam 步
     seg_steps: int = 10             # ★ 每个优化步随机截取的片段长度（10 步 = 0.1 s @100 Hz）
     loss_mode: str = "mse"          # mse = 角度(wrap)MSE + 角速度 MSE 等权（原仓库）| huber = 旧配方
-    integrator: str = "euler"       # euler = 半隐式欧拉（原仓库）| rk4 = 旧精细配方
+    integrator: str = "rk4"         # ★ 3-DOF 默认 RK4（与 C++ MPC 的 integrateStepBacklash
+                                    #   同款）: 接触模态 ω≈190 rad/s，10 ms/4 子步下
+                                    #   euler 的**数值**角速度误差可达 0.13 rad/s（与损失里的
+                                    #   角速度项同量级 ⇒ 会去"拟合积分器"）；
+                                    #   rk4 同子步数把该误差降到 4e-3，代价 ×2。
+                                    #   "原仓库同款"消融仍可用 --integrator=euler --substeps=1。
     lr_schedule: str = "none"       # none = 常数 lr（原仓库）| cosine = 旧配方
     # ── 旧配方（显式给 iters>0 才启用；或 --legacy-recipe 一键预设）──
     iters: int = 0                  # >0 ⇒ 旧配方：精确跑 iters 个 Adam 步（分窗 mini-batch）
@@ -968,11 +1396,41 @@ class FitConfig:
     lbfgs_max_iter: int = 5
     lr: float = 3e-4                # ★ 原仓库 lr=3e-4（旧配方默认 5e-3）
     seed: int = 42
-    substeps: int = 1               # 可导仿真每控制步的积分子步
+    substeps: int = 4               # ★ 3-DOF 背隙接触模态 ω=√(k/μ_red)≈190 rad/s（k=200）
+                                    #   ⇒ 10 ms 一步已到显式积分稳定边界; 4 子步（2.5 ms）留余量。
+                                    #   （2-DOF 时代这里是 1；k 更大时按 C++ 的
+                                    #    recommendedBacklashStiffness() 再细分）
     huber_delta: float = 2.0e-3     # rad（~ 量化步长的 3 倍）；仅 loss_mode="huber" 用
     vel_weight: float = 0.0         # 旧配方的角速度项权重（0 = 不用）；mse 模式**固定等权 1.0**
     vel_huber_delta: float = 0.05   # rad/s
     free_init_vel: bool = False     # 是否把各段初始角速度当作自由参数一起优化
+    freeze_params: tuple = ()       # ★ 额外冻结的参数下标（消融/诊断用；空 = 不冻结）
+    # ★★ **默认冻结背隙直通项 γ**（= 参数 11）在 `--backlash-through` 给的初值上（默认 0.002）。
+    #   γ 的定位只是"死区内的梯度引导"（dz 在死区内梯度≈0）；一旦放开拟合，它会被优化器
+    #   拿来**替模型填"刚性接触"的台阶**：实测 10000 epoch 下 γ 从 0.002 涨到 0.27~0.39，
+    #   同时 δ 被撑到 0.25 rad（真值 0.087）——参数失去物理意义，而留出误差几乎不变
+    #   （γ 冻结 vs 自由：1.285 vs 1.285 / 0.198 vs 0.189 / 0.161 vs 0.154）。
+    #   要复现"γ 自由"的消融：`--no-freeze-backlash-through`。
+    freeze_backlash_through: bool = True
+    # ── 背隙中心 β 的来源（**决定 β 是"拟合参数"还是"逐样本外生量"**）──
+    #   auto  : 数据里有非零的 `backlash_center` 列 ⇒ 用它当逐样本外生量（= 运行期做法）；
+    #           否则退回把它当一个全局模型参数拟合
+    #   column: 强制用数据列（没有该列就报错）
+    #   fit   : 强制把 β 当全局模型参数拟合（老数据/消融用）
+    beta_mode: str = "auto"
+    # ★ 状态目标来源: est（默认）= 记录/估计值（控制器看到的）；true = 仿真真值（仅仿真数据，
+    #   上限对照，用来把"模型误差"与"电机状态估计误差"分开）
+    state_mode: str = "est"
+    # ★ 全批加速: 每个 epoch 仍对**每段**随机抽一个 seg_steps 片段，但把 W 段拼成一个
+    #   batch 做**一次** Adam 步（损失 = 各段损失的均值，即原配方 W 个梯度的平均）。
+    #   段数很多（例如 100 段）时这是唯一跑得动的方式：逐段更新要 W× 次小张量调用。
+    batch_segments: bool = False
+    # ★ 每 N 个 epoch 在**留出集**上算一次开环 RMSE（学习曲线用；0 = 关）。
+    #   需要 `eval_segs`（= 留出数据）非空；开销是一次 numpy 前向（几秒/次）。
+    eval_every: int = 0
+    eval_segs: list | None = None
+    # 由 fit_params_torch 回填: 是否用了数据里的 β 列（供 _config_summary/评估复用）
+    use_beta_column: bool = False
     p_bound: float = 0.05           # ★ 已废弃并被忽略：本脚本不再有任何参数限位（仅为字段兼容保留）
     init_vector: np.ndarray | None = None
     truth_vector: np.ndarray | None = None  # 真值/参考值（画收敛曲线虚线用；None ⇒ 用初值）
@@ -995,6 +1453,7 @@ class FitConfig:
         self.loss_mode = str(self.loss_mode).lower()
         self.integrator = str(self.integrator).lower()
         self.lr_schedule = str(self.lr_schedule).lower()
+        self.beta_mode = str(self.beta_mode).lower()
 
     # ── 便捷判断/预设 ──
     @property
@@ -1037,16 +1496,18 @@ class FitResult:
     n_steps: int = 0                # 实际 Adam 步数
     recipe: str = ""                # "原仓库配方(epochs×段数)" 或 "旧配方(iters 步)"
     truth: np.ndarray | None = None  # 真值/参考值（画虚线用；无则 None）
+    eval_hist: list = None           # [(epoch, {电机/云台/小yaw 角度&角速度 RMSE})]（留出集学习曲线）
     config: dict = None             # 配置摘要（打印/画图用）
 
 
-def _pack_windows(segs, cfg: FitConfig, axis_sel, dtype, dev):
+def _pack_windows(segs, cfg: FitConfig, chan_sel, dtype, dev):
     """把数据切成等长**窗口**并打包成张量（Adam 每步随机抽几个窗口 ⇒ 同样的算力下
     迭代次数更多、且能覆盖整段轨迹而不是只截前面一段）。
 
     window_len = 0 时每个数据段就是一个窗口（等价于"整段拟合"）。
-    返回 dict: tau/theta/dtheta [L,W,2], mask [L,W], q0/qd0 [W,2], w_axis [W,2]
-    以及每个窗口的来源信息。
+    ★ 状态是 3-DOF: theta/dtheta [L,W,3] = (电机, 云台, 小 yaw)；tau [L,W,2]。
+    `chan_sel` = 参与损失的状态通道（big ⇒ (0,1)、small ⇒ (2,)、both ⇒ (0,1,2)）。
+    返回 dict: tau/theta/dtheta, mask [L,W], q0/qd0 [W,3], w_axis [W,3] 以及每个窗口的来源信息。
     """
     dt = segs[0].dt
     for s in segs:
@@ -1073,31 +1534,42 @@ def _pack_windows(segs, cfg: FitConfig, axis_sel, dtype, dev):
     W = len(specs)
 
     tau = np.zeros((L, W, 2))
-    theta = np.zeros((L, W, 2))
-    dtheta = np.zeros((L, W, 2))
+    theta = np.zeros((L, W, 3))
+    dtheta = np.zeros((L, W, 3))
     grav = np.zeros((L, W, 2))
+    beta = np.zeros((L, W))
     mask = np.zeros((L, W))
-    q0 = np.zeros((W, 2))
-    qd0 = np.zeros((W, 2))
-    w_axis = np.zeros((W, 2))
+    q0 = np.zeros((W, 3))
+    qd0 = np.zeros((W, 3))
+    w_axis = np.zeros((W, 3))
     for wi, (si, st, l) in enumerate(specs):
         s = segs[si]
         sl = slice(st, st + l)
+        th_s, dth_s = state_arrays(s, cfg.state_mode)
         tau[:l, wi] = s.tau[sl]
-        theta[:l, wi] = s.theta[sl]
-        dtheta[:l, wi] = s.dtheta[sl]
+        theta[:l, wi] = th_s[sl]
+        dtheta[:l, wi] = dth_s[sl]
         if s.gravity is not None:
             grav[:l, wi] = s.gravity[sl]
+        bsrc = None
+        if cfg.beta_mode == "true" and s.beta_true is not None:
+            bsrc = s.beta_true
+        elif s.beta is not None:
+            bsrc = s.beta
+        if bsrc is not None:
+            beta[:l, wi] = bsrc[sl]
         mask[:l, wi] = 1.0
-        q0[wi] = s.theta[st]
-        qd0[wi] = s.dtheta[st]
-        for a in axis_sel:
-            w_axis[wi, a] = 1.0 / len(axis_sel)
+        q0[wi] = th_s[st]
+        qd0[wi] = dth_s[st]
+        for c in chan_sel:
+            w_axis[wi, c] = 1.0 / len(chan_sel)
 
     t = lambda x: torch.tensor(x, dtype=dtype, device=dev)          # noqa: E731
     return {"tau": t(tau), "theta": t(theta), "dtheta": t(dtheta), "mask": t(mask),
             "q0": t(q0), "qd0": t(qd0), "w_axis": t(w_axis), "grav": t(grav),
+            "beta": t(beta),
             "has_gravity": bool(np.any(grav != 0.0)),
+            "has_beta": bool(np.any(beta != 0.0)),
             "dt": dt, "L": L, "W": W,
             "lens": [int(sp[2]) for sp in specs],          # 每个窗口的**有效**长度（未 padding）
             "specs": [("seg%d" % sp[0], sp[1], sp[2]) for sp in specs],
@@ -1114,10 +1586,13 @@ def _config_summary(cfg: FitConfig, space: "ParamSpace", W: int, dt: float,
         recipe += f"，{cfg.loss_mode} 损失，{cfg.integrator.upper()} 积分"
     else:
         recipe = (f"原仓库配方：epochs={cfg.epochs} × 段数{W} 个 Adam 步"
-                  f"（epochs = 原仓库 1000 的 1/5），每次 {cfg.seg_steps} 步(0.1 s)随机片段，"
+                  f"（= 原仓库 num_epochs 同轮数），每次 {cfg.seg_steps} 步(0.1 s)随机片段，"
                   f"lr={cfg.lr:g}（常数），损失 = 角度wrap MSE + 角速度 MSE(等权)，"
-                  f"{cfg.integrator.upper()} 积分，无限位(log 参数化)")
+                  f"3-DOF {cfg.integrator.upper()} 积分(substeps={cfg.substeps})，"
+                  f"无限位(log 参数化)")
     return {"recipe": recipe, "epochs": int(cfg.epochs), "iters": int(cfg.iters),
+            "use_beta_column": bool(cfg.use_beta_column),
+            "freeze_backlash_through": bool(cfg.freeze_backlash_through),
             "seg_steps": int(cfg.seg_steps), "lr": float(cfg.lr), "loss_mode": cfg.loss_mode,
             "integrator": cfg.integrator, "substeps": int(cfg.substeps),
             "lr_schedule": cfg.lr_schedule, "lbfgs_iters": int(cfg.lbfgs_iters),
@@ -1125,8 +1600,8 @@ def _config_summary(cfg: FitConfig, space: "ParamSpace", W: int, dt: float,
             "n_free": int(n_free), "n_sample": int(W), "dt": float(dt),
             "limits": "无（无上下界 / 无 clamp / 无投影 / 无惩罚项）",
             "param_space": space.describe(),
-            "init_source": ("默认 CAD/占位初值 defaultModelParams()" if cfg.init_vector is None
-                            else "用户 --init-vector")}
+            "init_source": ("默认初值 default_param_vector()（= planar_yaw_params.h 当前那组）"
+                            if cfg.init_vector is None else "用户 --init-vector")}
 
 
 def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZERO) -> FitResult:
@@ -1164,10 +1639,18 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
     free = np.ones(NPARAM, dtype=bool)
     if cfg.fit_axis == "big":          # 只拟合大 yaw：小 yaw 摩擦不可辨识 → 冻结
         free[6] = free[7] = False
-    elif cfg.fit_axis == "small":      # 只拟合小 yaw：Jbig_eff 不进小 yaw 方程 → 冻结
+    elif cfg.fit_axis == "small":
+        # 只拟合小 yaw：大 yaw 惯量/摩擦、以及电机侧+背隙那 8 个参数都不进小 yaw 激励的
+        # 可观测量（大 yaw 由 PID 守位 ⇒ Δ 死在死区里、τ_t≈0）⇒ 全部冻结在初值
         free[0] = free[4] = free[5] = False
+        free[8:16] = False
     elif cfg.fit_axis != "both":
         raise ValueError("fit_axis 必须是 both / big / small")
+    if cfg.freeze_params:
+        for j in cfg.freeze_params:
+            free[int(j)] = False
+    if cfg.freeze_backlash_through:
+        free[11] = False            # γ：默认钉在 --backlash-through 的初值上（见 FitConfig 注释）
     mode = str(cfg.p_constraint).replace("-", "_")
     if mode not in ("free", "along_d", "zero"):
         raise ValueError("p_constraint 必须是 free / along_d / zero")
@@ -1185,20 +1668,39 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
     #   也不做任何 clip —— 正参数取对数时若初值非正，只用 1e-6 作对数**起点**（不是限位）。
     phi0 = (default_param_vector() if cfg.init_vector is None
             else np.asarray(cfg.init_vector, dtype=np.float64).copy())
+    # ★ 冻结参数显式打印（否则日志里只看到"没变化"，不知道是冻结还是没动）
+    _frozen = [j for j in range(NPARAM) if not free[j]]
+    if _frozen and cfg.verbose:
+        print("[torch] ★ 冻结参数（不参与优化，恒保持初值）: "
+              + ", ".join(f"{PARAM_NAMES[j]}={phi0[j]:.6g}" for j in _frozen))
 
-    # 只对参与拟合的轴计误差
-    axis_sel = {"big": [0], "small": [1], "both": [0, 1]}[cfg.fit_axis]
+    # 只对参与拟合的状态通道计误差（big ⇒ 电机+云台；small ⇒ 小 yaw；both ⇒ 3 个通道）
+    chan_sel = ((0, 1, 2) if cfg.fit_axis == "both"
+                else AXIS_CHANNELS[AXIS_BIG if cfg.fit_axis == "big" else AXIS_SMALL])
 
     # ★ 新配方 = 每段一个 sample（不分窗、不 mini-batch）；显式给了分窗设置时提示被忽略
     pack_cfg = cfg
     if not cfg.use_legacy_path and (cfg.window_len > 0 or cfg.windows_per_seg > 1
-                                    or cfg.batch_size > 0):
+                                    or (cfg.batch_size > 0 and not cfg.batch_segments)):
         if cfg.verbose:
             print("[torch] ★ 新配方按「整段 = 一个 sample」采样，忽略 "
                   f"window_len={cfg.window_len}, windows_per_seg={cfg.windows_per_seg}, "
                   f"batch_size={cfg.batch_size}（要旧配方请用 --iters>0 或 --legacy-recipe）")
         pack_cfg = replace(cfg, window_len=0, windows_per_seg=1, batch_size=0)
-    batch = _pack_windows(segs, pack_cfg, axis_sel, dtype, dev)
+    batch = _pack_windows(segs, pack_cfg, chan_sel, dtype, dev)
+    # ── ★ β 的来源: 数据列（逐样本，= 运行期在线估计）还是全局模型参数 ──
+    if cfg.beta_mode not in ("auto", "fit", "column", "true"):
+        raise ValueError("beta_mode 必须是 auto / fit / column / true")
+    use_beta_col = (cfg.beta_mode in ("column", "true")
+                    or (cfg.beta_mode == "auto" and batch["has_beta"]))
+    if cfg.beta_mode == "column" and not batch["has_beta"]:
+        raise ValueError("--beta-mode=column 需要数据里有非零的 `backlash_center` 列")
+    if cfg.beta_mode == "true" and not batch["has_beta"]:
+        raise ValueError("--beta-mode=true 需要数据里有非零的 `backlash_beta_true` 列"
+                         "（只有 dry-run 仿真数据才有）")
+    if use_beta_col:
+        free[15] = False        # β 由数据给 ⇒ 不拟合（避免报一个没有梯度的假值）
+    cfg.use_beta_column = bool(use_beta_col)
     tau_t, th_t, dth_t = batch["tau"], batch["theta"], batch["dtheta"]
     mask_t, q0_all, qd0_all, w_axis_all = (batch["mask"], batch["q0"], batch["qd0"],
                                            batch["w_axis"])
@@ -1214,14 +1716,8 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
     loss_mode = cfg.loss_mode
 
     def build_model_params():
-        phi = space.to_physical(raw, phi0)
-        p = PlanarParams(
-            dx=base.dx, dy=base.dy, gravity=base.gravity, m_u_known=base.m_u_known,
-            friction_lambda=base.friction_lambda,
-            tau_offset_big=base.tau_offset_big, tau_offset_small=base.tau_offset_small,
-            Jbig_eff=phi[0], Js=phi[1], Px=phi[2], Py=phi[3],
-            fc_big=phi[4], fv_big=phi[5], fc_small=phi[6], fv_small=phi[7])
-        return p, phi
+        phi = space.to_physical(raw, phi0)          # torch 张量（可导）
+        return params_from_torch(phi, base), phi
 
     def _weighted(term, ax_w, mask):
         """按"轴权重（+可选有效点 mask）"归约成标量。
@@ -1271,8 +1767,10 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
         if v0_free is not None:
             qd0_b = qd0_b + v0_free[w:w + 1]
         grav_b = batch["grav"][sl, w:w + 1] if batch["has_gravity"] else None
-        th_pred, dth_pred = torch_rollout(p, q0_b, qd0_b, tau_b, dt, exo, cfg.substeps,
-                                          grav_seq=grav_b, integrator=integrator)
+        beta_b = batch["beta"][sl, w:w + 1] if use_beta_col else None
+        th_pred, dth_pred = torch_rollout_backlash(p, q0_b, qd0_b, tau_b, dt, exo,
+                                                   cfg.substeps, grav_seq=grav_b,
+                                                   beta_seq=beta_b, integrator=integrator)
         return _pair_loss(th_pred, dth_pred, th_b, dth_b, mask=None,
                           ax_w=w_axis_all[w:w + 1])
 
@@ -1280,6 +1778,7 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
         """旧配方（也用于新配方的全段 val_loss / 画图）: 整窗/整段一起前向仿真。"""
         p, phi = build_model_params()
         grav_all = batch["grav"] if batch["has_gravity"] else None
+        beta_all = batch["beta"] if use_beta_col else None
         if idx is None:
             tau_b, th_b, dth_b, m_b = tau_t, th_t, dth_t, mask_t
             q0_b, qd0_b, wa_b = q0_all, qd0_all, w_axis_all
@@ -1292,14 +1791,38 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
             grav_b = None if grav_all is None else grav_all[:, idx]
             v0_b = None if v0_free is None else v0_free[idx]
         qd_start = qd0_b if v0_b is None else (qd0_b + v0_b)
-        th_pred, dth_pred = torch_rollout(p, q0_b, qd_start, tau_b, dt, exo, cfg.substeps,
-                                          grav_seq=grav_b, integrator=integrator)
+        if beta_all is None:
+            beta_b = None
+        else:
+            beta_b = beta_all if idx is None else beta_all[:, idx]
+        th_pred, dth_pred = torch_rollout_backlash(p, q0_b, qd_start, tau_b, dt, exo,
+                                                   cfg.substeps, grav_seq=grav_b,
+                                                   beta_seq=beta_b, integrator=integrator)
         loss = _pair_loss(th_pred, dth_pred, th_b, dth_b, mask=m_b, ax_w=wa_b)
         return (loss, phi) if record_params else loss
 
     params = [raw] + ([v0_free] if v0_free is not None else [])
     loss_hist, param_hist = [], []
+    eval_hist = []
     n_steps = 0
+
+    def _record_eval(ep_idx: int) -> None:
+        """留出集上的开环 RMSE（学习曲线）——只在 `--eval-every` 打开且有留出数据时调用。"""
+        if cfg.eval_every <= 0 or not cfg.eval_segs:
+            return
+        if (ep_idx + 1) % int(cfg.eval_every) != 0:
+            return
+        with torch.no_grad():
+            _, phi_now = build_model_params()
+        rm = channel_rmse(cfg.eval_segs, np.asarray([float(v) for v in phi_now]), base,
+                          integrator=integrator, substeps=cfg.substeps,
+                          use_beta=bool(cfg.use_beta_column), state_mode=cfg.state_mode)
+        eval_hist.append((int(ep_idx) + 1, rm))
+        if cfg.verbose:
+            print(f"[eval@{ep_idx + 1:6d}] 留出集窗口 RMSE[°] 电机/云台/小yaw = "
+                  f"{rm['motor_deg']:.3f}/{rm['platform_deg']:.3f}/{rm['small_deg']:.3f}"
+                  f"  角速度 = {rm['motor_rate']:.4f}/{rm['platform_rate']:.4f}/"
+                  f"{rm['small_rate']:.4f}")
     n_free = space.nfree
     summary = _config_summary(cfg, space, W, dt, n_free)
 
@@ -1337,31 +1860,108 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
                      if cfg.lr_schedule == "cosine" else None)     # ★ 默认无 scheduler
             rng = np.random.RandomState(cfg.seed)
             print_every = max(1, int(cfg.print_every))
-            for ep in range(epochs):
-                ep_loss, n_used = 0.0, 0
-                for w in valid:                      # ★ 每段各抽 1 个片段做 1 个 Adam 步
-                    s = int(rng.randint(0, lens[w] - seg_steps + 1))
-                    opt.zero_grad(set_to_none=True)
-                    loss = _slice_loss(w, s, seg_steps)
-                    loss.backward()
-                    opt.step()
-                    if sched is not None:
-                        sched.step()
-                    ep_loss += float(loss.detach())
-                    n_used += 1
-                    n_steps += 1
-                if n_used == 0:
-                    continue
-                ep_loss /= n_used
-                loss_hist.append(ep_loss)            # ★ 每 epoch 的平均 loss（原仓库同款）
-                with torch.no_grad():
-                    _, phi_now = build_model_params()
-                param_hist.append([float(v) for v in phi_now])
-                # 前 5 / 后 5 个 epoch 一定打印（其余按 print_every）
-                if cfg.verbose and (ep < 5 or ep >= epochs - 5 or ep == epochs - 1
-                                    or ep % print_every == 0):
-                    print(f"[torch] epoch {ep:5d}/{epochs}  loss={ep_loss:.6e}  "
-                          + _fmt_vec(phi_now))
+            if cfg.batch_segments:
+                # ── ★ 全批: 每 epoch 对每段各抽 1 个 seg_steps 片段 → 拼成一个 batch
+                #    做**一次** Adam 步（损失 = 各段损失的均值 = 原配方 W 个梯度的平均）──
+                vw = torch.as_tensor(np.asarray(valid), dtype=torch.long, device=dev)
+                nv = int(vw.numel())
+                ar = torch.arange(nv, device=dev)
+                off = torch.arange(seg_steps + 1, device=dev)
+                lens_t = torch.as_tensor(np.asarray(lens, dtype=np.int64), device=dev)
+                # `--batch-size=B` ⇒ 每 epoch 把段随机分成 ⌈N/B⌉ 组、每组一次 Adam 步
+                #   （一个 epoch 仍然把**所有段都过一遍**，只是分几次更新；
+                #    B ≤ 0 或不给 ⇒ 退化成"1 次全批步"）。同样的算力下更新次数更多。
+                bs = nv if cfg.batch_size <= 0 else min(nv, int(cfg.batch_size))
+                n_group = int(np.ceil(nv / bs))
+                if cfg.verbose:
+                    print(f"[torch] ★ --batch-segments: 每 epoch {n_group} 次 Adam 步"
+                          f"（每步 batch={bs}/{nv} 段 × {seg_steps} 步；损失 = 组内各段损失均值）")
+                for ep in range(epochs):
+                    ep_loss = 0.0
+                    for _g in range(n_group):
+                        sel = (ar if n_group == 1
+                               else torch.from_numpy(rng.permutation(nv)[:bs]).to(dev))
+                        wid = vw[sel]
+                        # 起点上界: 还要再多取 1 个点当"状态 0" ⇒ lens − seg_steps − 1
+                        hi = (lens_t[wid] - seg_steps - 1).clamp(min=0)
+                        st = torch.floor(torch.rand(int(sel.numel()), device=dev)
+                                         * (hi + 1).double()).long()
+                        ii = (st[:, None] + off[None, :])                 # [nb, ss+1]
+                        csel = sel[:, None]
+                        b_tau = tau_t[ii, csel].permute(1, 0, 2)          # [ss+1, nb, 2]
+                        b_th = th_t[ii, csel].permute(1, 0, 2)
+                        b_dth = dth_t[ii, csel].permute(1, 0, 2)
+                        b_q0 = th_t[st, sel]
+                        b_qd0 = dth_t[st, sel]
+                        if v0_free is not None:
+                            b_qd0 = b_qd0 + v0_free[wid]
+                        b_g = (batch["grav"][ii, csel].permute(1, 0, 2)
+                               if batch["has_gravity"] else None)
+                        b_beta = (batch["beta"][ii, csel].permute(1, 0)
+                                  if use_beta_col else None)
+                        p_m, _phi = build_model_params()
+                        th_pred, dth_pred = torch_rollout_backlash(
+                            p_m, b_q0, b_qd0, b_tau, dt, exo, cfg.substeps,
+                            grav_seq=b_g, beta_seq=b_beta, integrator=integrator)
+                        err = th_pred - b_th
+                        err = torch.atan2(torch.sin(err), torch.cos(err))
+                        verr = dth_pred - b_dth
+                        wa = w_axis_all[wid]                        # [nb,3]
+                        if loss_mode == "mse":
+                            per = ((err ** 2 + verr ** 2) * wa[None]).sum(dim=(0, 2))
+                        else:
+                            pl = huber(err, torch.zeros_like(err), delta=cfg.huber_delta,
+                                       reduction="none")
+                            vl = huber(verr, torch.zeros_like(verr),
+                                       delta=cfg.vel_huber_delta, reduction="none")
+                            per = ((pl + cfg.vel_weight * vl) * wa[None]).sum(dim=(0, 2))
+                        loss = per.mean() / float(seg_steps + 1)
+                        opt.zero_grad(set_to_none=True)
+                        loss.backward()
+                        opt.step()
+                        if sched is not None:
+                            sched.step()
+                        ep_loss += float(loss.detach())
+                        n_steps += 1
+                    ep_loss /= max(1, n_group)
+                    loss_hist.append(ep_loss)
+                    with torch.no_grad():
+                        _, phi_now = build_model_params()
+                    param_hist.append([float(v) for v in phi_now])
+                    if cfg.verbose and (ep < 5 or ep >= epochs - 5 or ep == epochs - 1
+                                        or ep % print_every == 0):
+                        print(f"[torch] epoch {ep:5d}/{epochs}  loss={ep_loss:.6e}  "
+                              + _fmt_vec(phi_now))
+                    _record_eval(ep)          # ★ 留出集学习曲线（--eval-every）
+            # ── 默认路径: 每 epoch 对每段各抽 1 个 seg_steps 片段做 1 个 Adam 步 ──
+            if not cfg.batch_segments:
+                for ep in range(epochs):
+                    ep_loss, n_used = 0.0, 0
+                    for w in valid:
+                        s0 = int(rng.randint(0, lens[w] - seg_steps + 1))
+                        opt.zero_grad(set_to_none=True)
+                        loss = _slice_loss(w, s0, seg_steps)
+                        loss.backward()
+                        opt.step()
+                        if sched is not None:
+                            sched.step()
+                        ep_loss += float(loss.detach())
+                        n_used += 1
+                        n_steps += 1
+                    if n_used == 0:
+                        continue
+                    ep_loss /= n_used
+                    loss_hist.append(ep_loss)        # ★ 每 epoch 的平均 loss（原仓库同款）
+                    with torch.no_grad():
+                        _, phi_now = build_model_params()
+                    param_hist.append([float(v) for v in phi_now])
+                    # 前 5 / 后 5 个 epoch 一定打印（其余按 print_every）
+                    if cfg.verbose and (ep < 5 or ep >= epochs - 5 or ep == epochs - 1
+                                        or ep % print_every == 0):
+                        print(f"[torch] epoch {ep:5d}/{epochs}  loss={ep_loss:.6e}  "
+                              + _fmt_vec(phi_now))
+                    _record_eval(ep)          # ★ 留出集学习曲线（--eval-every）
+
         elif cfg.verbose:
             print("[torch] epochs<=0 ⇒ 不优化，直接输出初值（只做数据/画图冒烟）")
 
@@ -1369,6 +1969,9 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
             final_loss, phi_final = _window_loss(record_params=True)
         recipe = ("原仓库配方(epochs×段数 个单片段 Adam 步)" if epochs > 0
                   else "未优化(epochs<=0)")
+        if cfg.batch_segments and epochs > 0:
+            recipe = (f"★ 全批配方(epochs={epochs} 个**全批** Adam 步, 每步 batch=全部段)"
+                      f"—— 同一损失，只是把原配方的'每段一次更新'合并成'每 epoch 一次'")
     else:
         # ════════════════════════════════════════════════════════════════════
         # 旧精细配方（iters>0 才走这里）: 分窗 mini-batch Adam（+ 可选 LBFGS）
@@ -1435,7 +2038,7 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
                      seconds=time.time() - t_start,
                      param_history=param_hist, epoch_losses=list(loss_hist),
                      n_free=n_free, n_steps=n_steps, recipe=recipe, truth=truth,
-                     config=summary)
+                     config=summary, eval_hist=eval_hist)
 
 
 def _fmt_vec(phi) -> str:
@@ -1461,12 +2064,15 @@ def loss_trend(loss_history) -> dict:
 # 自检（模型一致性）
 # ============================================================================
 def model_self_test(verbose: bool = True) -> bool:
-    """检查: (1) Y·φ == ID(φ)；(2) Y == ∂ID/∂φ（数值偏导）；(3) torch 与 numpy 一致。"""
+    """检查: (1) Y·φ == ID(φ)；(2) Y == ∂ID/∂φ（数值偏导）；(3) torch 与 numpy 一致；
+    (13) 3-DOF 装配与 2-DOF 子块严格一致；(14) 正/逆动力学往返；(15) 3-DOF torch vs numpy；
+    (16) 全部 16 个参数（含背隙那 8 个）的梯度有限且非零；(17) β 确实影响轨迹。"""
     rng = np.random.default_rng(0)
     ok = True
     p = PlanarParams(dx=0.037, dy=-0.011, gravity=9.81, m_u_known=0.25,
                      friction_lambda=10.0).with_vector(
-        np.array([0.0243, 0.0132, 0.0042, -0.0018, 0.092, 0.031, 0.028, 0.0085]))
+        np.array([0.0243, 0.0132, 0.0042, -0.0018, 0.092, 0.031, 0.028, 0.0085,
+                  0.0701, 320.0, 1.7, 0.0031, 0.0075, 0.041, 0.012, 0.0042]))
     exo = Exo(gravity_a=(0.31, -0.17), base_omega=0.42, base_alpha=-0.9)
     q = rng.normal(size=(5, 2)) * 0.6
     qd = rng.normal(size=(5, 2)) * 2.0
@@ -1557,9 +2163,12 @@ def model_self_test(verbose: bool = True) -> bool:
     e10 = float(np.max(np.abs(sp_free.to_physical(sp_free.to_raw_init(p.vector()),
                                                  p.vector()) - p.vector())))
     # (11) log 参数化确实**没有界**: raw 取 ±50 ⇒ φ = exp(±50) 极端但有限，且不出现负值
-    pos_ext = sp_free.to_physical(np.array([50.0, -50.0, 0.0, 0.0, 50.0, -50.0, 50.0, -50.0]),
-                                  p.vector())
-    e11 = 0.0 if (np.all(pos_ext[[0, 1, 4, 5, 6, 7]] > 0.0)
+    raw_ext = np.zeros(NPARAM)
+    raw_ext[list(POSITIVE_IDX)] = 50.0
+    raw_ext[list(FREE_IDX)] = 0.0
+    raw_ext[1] = -50.0          # 再取一个极小值（exp(−50)）
+    pos_ext = sp_free.to_physical(raw_ext, p.vector())
+    e11 = 0.0 if (np.all(pos_ext[list(POSITIVE_IDX)] > 0.0)
                   and np.all(np.isfinite(pos_ext))) else 1.0
     # (12) 新配方积分器 euler: torch 与 numpy 必须逐位一致（同序半隐式欧拉）
     e12 = float("nan")
@@ -1573,6 +2182,75 @@ def model_self_test(verbose: bool = True) -> bool:
                                       0.01, exo, 1, grav_seq=None, integrator="euler")
         e12 = float(np.max(np.abs(th_te[:, 0, :].numpy() - th_e)))
         del gseq2
+    # ══════════════════════════════════════════════════════════════════════
+    # ★ 3-DOF（含背隙）自检
+    # ══════════════════════════════════════════════════════════════════════
+    q3 = rng.normal(size=(5, 3)) * 0.5
+    qd3 = rng.normal(size=(5, 3)) * 1.5
+    qdd3 = rng.normal(size=(5, 3)) * 4.0
+    tau3_in = rng.normal(size=(5, 2)) * 0.4
+    # (13) 3-DOF 装配 == 2-DOF 子块 + τ_t（逐行对照，验证 h[1]=h_b−τ_t / h[2]=h_s / 电机行）
+    tau3 = inverse_dynamics_backlash_np(q3, qd3, qdd3, p, exo)
+    tau2 = inverse_dynamics_np(q3[:, 1:3], qd3[:, 1:3], qdd3[:, 1:3], p, exo)
+    tt = backlash_torque_np(q3[:, 0] - q3[:, 1] - p.backlash_beta, qd3[:, 0] - qd3[:, 1], p)
+    e13 = max(
+        float(np.max(np.abs(tau3[:, 1] - (tau2[:, 0] - tt)))),
+        float(np.max(np.abs(tau3[:, 2] - tau2[:, 1]))),
+        float(np.max(np.abs(tau3[:, 0] - (p.Jmotor * qdd3[:, 0] + tt
+                                          + motor_friction_np(qd3[:, 0], p)
+                                          + p.tau_offset_motor)))))
+    # (14) 正/逆动力学往返: M·(M⁻¹(u−h)) + h == u
+    qdd_f = forward_accel_backlash_np(q3, qd3, tau3_in, p, exo)
+    tau_rt = inverse_dynamics_backlash_np(q3, qd3, qdd_f, p, exo)
+    u_expect = np.stack([tau3_in[:, 0], np.zeros(5), tau3_in[:, 1]], axis=-1)
+    e14 = float(np.max(np.abs(tau_rt - u_expect)))
+    # (15) 3-DOF torch vs numpy（加速度 + 两种积分器的整段 rollout）
+    e15 = float("nan")
+    e15b = float("nan")
+    if torch is not None:
+        e15 = float(torch.max(torch.abs(
+            torch_forward_accel_backlash(torch.tensor(q3, dtype=torch.float64),
+                                         torch.tensor(qd3, dtype=torch.float64),
+                                         torch.tensor(tau3_in, dtype=torch.float64),
+                                         p, exo)
+            - torch.tensor(forward_accel_backlash_np(q3, qd3, tau3_in, p, exo),
+                           dtype=torch.float64))))
+        for integ, tag in (("rk4", "rk4"), ("euler", "euler")):
+            th_n, dth_n = simulate_backlash_np(
+                p, q3[0], qd3[0], tau3_in, 0.01, exo, 4, integrator=integ)
+            th_tt, dth_tt = torch_rollout_backlash(
+                p, torch.tensor(q3[0:1], dtype=torch.float64),
+                torch.tensor(qd3[0:1], dtype=torch.float64),
+                torch.tensor(tau3_in[:, None, :], dtype=torch.float64),
+                0.01, exo, 4, integrator=integ)
+            e15b = max(e15b if np.isfinite(e15b) else 0.0,
+                       float(np.max(np.abs(th_tt[:, 0, :].numpy() - th_n))),
+                       float(np.max(np.abs(dth_tt[:, 0, :].numpy() - dth_n))))
+    # (16) ★ 梯度: 3-DOF rollout 损失对**全部 16 个参数**都必须有有限且非零的梯度
+    #      （背隙死区里 dz 的梯度≈0，靠 γ·Δ 那条直通项引导 ⇒ 这里正是它的验收条件）
+    e16 = float("nan")
+    grad_min = float("nan")
+    grad_max = float("nan")
+    if torch is not None:
+        raw_t = torch.tensor(ParamSpace().to_raw_init(p.vector()), dtype=torch.float64,
+                             requires_grad=True)
+        sp_ = ParamSpace()
+        p_t = params_from_torch(sp_.to_physical(raw_t, p.vector()), p)
+        th_rt, dth_rt = torch_rollout_backlash(
+            p_t, torch.tensor(q3[0:1], dtype=torch.float64),
+            torch.tensor(qd3[0:1], dtype=torch.float64),
+            torch.tensor(tau3_in[:, None, :], dtype=torch.float64),
+            0.01, exo, 4, integrator="euler")
+        loss = (th_rt ** 2).mean() + (dth_rt ** 2).mean()
+        g = torch.autograd.grad(loss, raw_t)[0]
+        gv = np.abs(g.detach().numpy())
+        grad_min, grad_max = float(np.min(gv)), float(np.max(gv))
+        e16 = 0.0 if (np.all(np.isfinite(gv)) and np.all(gv > 1e-12)) else 1.0
+    # (17) β 必须真的影响轨迹（死区中心偏置）
+    th_a, _ = simulate_backlash_np(p, q3[0], qd3[0], tau3_in, 0.01, exo, 4, integrator="euler")
+    th_b, _ = simulate_backlash_np(p.with_vector(p.vector() + np.eye(NPARAM)[15] * 0.02),
+                                   q3[0], qd3[0], tau3_in, 0.01, exo, 4, integrator="euler")
+    e17 = float(np.max(np.abs(th_a - th_b)))
     if verbose:
         print("[selftest] max|Y·φ − ID|          =", f"{e1:.3e}")
         print("[selftest] max|Y_analytic − Y_num|=", f"{e2:.3e}")
@@ -1586,9 +2264,18 @@ def model_self_test(verbose: bool = True) -> bool:
         print("[selftest] log/自由参数化往返 max err =", f"{e10:.3e}", "(无限位)")
         print("[selftest] 无限位检查 raw=±50 ⇒ 正参数仍 >0 且有限 :", "OK" if e11 == 0.0 else "FAIL")
         print("[selftest] euler torch vs numpy 一致 max err =", f"{e12:.3e}")
+        print("[selftest] 3-DOF 装配 vs 2-DOF 子块 + τ_t max err =", f"{e13:.3e}")
+        print("[selftest] 3-DOF 正/逆动力学往返 max err =", f"{e14:.3e}")
+        print("[selftest] 3-DOF 加速度 torch vs numpy =", f"{e15:.3e}")
+        print("[selftest] 3-DOF rollout(rk4/euler) torch vs numpy =", f"{e15b:.3e}")
+        print("[selftest] 16 参梯度 |∂loss/∂raw| ∈ [%.3e, %.3e] :" % (grad_min, grad_max),
+              "OK" if e16 == 0.0 else "FAIL")
+        print("[selftest] β 影响轨迹 max|Δθ| =", f"{e17:.3e}", "(应 > 0)")
     ok = (e1 < 1e-9 and e2 < 1e-5 and e5 > 1e-4 and e6 < 1e-12 and e8 < 1e-12
           and e9 < 1e-12 and e10 < 1e-12 and e11 == 0.0
-          and (torch is None or (e3 < 1e-10 and e4 < 1e-9 and e7 < 1e-9 and e12 < 1e-12)))
+          and e13 < 1e-12 and e14 < 1e-10 and e17 > 1e-6
+          and (torch is None or (e3 < 1e-10 and e4 < 1e-9 and e7 < 1e-9 and e12 < 1e-12
+                                 and e15 < 1e-10 and e15b < 1e-9 and e16 == 0.0)))
     if verbose:
         print("[selftest]", "PASS" if ok else "FAIL")
     return ok
@@ -1663,10 +2350,14 @@ def plot_convergence(res: FitResult, out_path: str, show_plot: bool = False,
     steps = np.arange(hist.shape[0])
     xlabel = "epoch" if not str(res.recipe).startswith("旧") else "Adam/LBFGS 步"
 
-    fig, axes = plt.subplots(3, 3, figsize=(16, 10))
+    n_panel = 1 + NPARAM                     # loss + 16 个参数
+    ncol = 4
+    nrow = int(math.ceil(n_panel / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.4 * ncol, 2.6 * nrow), squeeze=False)
+    axes = axes.reshape(-1)
     fig.suptitle(f"参数辨识收敛曲线 —— {res.recipe}\n{title_note}".strip(), fontsize=11)
 
-    ax = axes[0, 0]
+    ax = axes[0]
     ax.plot(np.arange(losses.size), losses, lw=1.2, color="C3")
     if losses.size:
         ax.plot(np.arange(losses.size), losses, ".", ms=2, color="C3")
@@ -1679,7 +2370,7 @@ def plot_convergence(res: FitResult, out_path: str, show_plot: bool = False,
     ref = res.truth if res.truth is not None else res.phi0
     ref_label = "真值" if res.truth is not None else "初值"
     for j, nm in enumerate(PARAM_NAMES):
-        a = axes[(j + 1) // 3, (j + 1) % 3]
+        a = axes[j + 1]
         a.plot(steps, hist[:, j], lw=1.2, color=f"C{j}")
         a.axhline(float(ref[j]), ls="--", lw=1.0, color="k", alpha=0.7,
                   label=f"{ref_label}={float(ref[j]):.4g}")
@@ -1687,6 +2378,8 @@ def plot_convergence(res: FitResult, out_path: str, show_plot: bool = False,
         a.set_title(f"{nm}  [{PARAM_UNITS[j]}]")
         a.grid(True, alpha=0.3)
         a.legend(fontsize=7, loc="best")
+    for k in range(n_panel, axes.size):      # 关掉多余的子图
+        axes[k].axis("off")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     _save_fig(fig, out_path, show_plot)
     return out_path
@@ -1705,11 +2398,11 @@ def vel_rmse(a, b):
 
 def plot_trajectory(res: FitResult, segs, base: PlanarParams, exo: Exo = EXO_ZERO,
                     out_path: str = "data/sysid/ident_torch_traj.png", show_plot: bool = False,
-                    integrator: str = "euler") -> str:
-    """★ 图 2: 实测 vs 仿真（至少两段: 一段大 yaw 激励、一段小 yaw 激励）。
+                    integrator: str = "rk4", use_beta: bool = False) -> str:
+    """★ 图 2: 实测(仿真环境) vs 模型前向（至少两段: 一段大 yaw 激励、一段小 yaw 激励）。
 
     行 = 数据段（大 yaw 段 / 小 yaw 段），列 = 角度 θ / 角速度 θ̇；
-    每个子图画**两轴**的实测(实线)与仿真(虚线)，标题里标注两轴的 RMSE。
+    每个子图画**三个通道**（电机 / 云台 / 小 yaw）的实测(实线)与仿真(虚线)，标题里标注 RMSE。
     """
     plt = _lazy_pyplot(show_plot)
     phi = np.asarray(res.phi, dtype=np.float64)
@@ -1731,15 +2424,18 @@ def plot_trajectory(res: FitResult, segs, base: PlanarParams, exo: Exo = EXO_ZER
         raise ValueError("没有可画的数据段")
 
     nrow = len(used)
-    fig, axes = plt.subplots(nrow, 2, figsize=(15, 3.6 * nrow), squeeze=False)
-    fig.suptitle("实测 vs 仿真（参数辨识后，同一段力矩输入的前向仿真）", fontsize=11)
+    has_beta = any(s.beta_true is not None for s in used)      # 仿真数据才画 β 那一列
+    ncol = 3 if has_beta else 2
+    fig, axes = plt.subplots(nrow, ncol, figsize=(5.2 * ncol, 3.6 * nrow), squeeze=False)
+    fig.suptitle("实测（仿真环境） vs 模型前向（参数辨识后，同一段力矩输入）", fontsize=11)
 
     for i, seg in enumerate(used):
         # 用记录力矩从**该段实测初值**前向仿真（与辨识/评测一致的积分器）
         q0 = np.asarray(seg.theta[0], dtype=np.float64)
         qd0 = np.asarray(seg.dtheta[0], dtype=np.float64)
-        th_sim, dth_sim = simulate_np(p_model, q0, qd0, seg.tau, seg.dt, exo,
-                                      substeps=1, integrator=integrator)
+        th_sim, dth_sim = simulate_backlash_np(p_model, q0, qd0, seg.tau, seg.dt, exo,
+                                               substeps=4, integrator=integrator,
+                                               beta_seq=(seg.beta if use_beta else None))
         t = np.arange(seg.T) * seg.dt
         axis_name = "大 yaw 激励段" if int(seg.axis) == AXIS_BIG else "小 yaw 激励段"
         for col, (meas, sim, lab, unit) in enumerate((
@@ -1747,7 +2443,8 @@ def plot_trajectory(res: FitResult, segs, base: PlanarParams, exo: Exo = EXO_ZER
                 (seg.dtheta, dth_sim, "θ̇", "rad/s"))):
             a = axes[i][col]
             ann = []
-            for k, (ax_name, ax_c) in enumerate((("big", "C0"), ("small", "C1"))):
+            for k, (ax_name, ax_c) in enumerate((("电机", "C0"), ("云台", "C3"),
+                                                 ("小 yaw", "C1"))):
                 a.plot(t, meas[:, k], color=ax_c, lw=1.1, alpha=0.85,
                        label=f"实测 {ax_name}")
                 a.plot(t, sim[:, k], color=ax_c, lw=1.1, ls="--", alpha=0.9,
@@ -1763,7 +2460,49 @@ def plot_trajectory(res: FitResult, segs, base: PlanarParams, exo: Exo = EXO_ZER
             a.set_ylabel(f"{lab} [{unit}]")
             a.grid(True, alpha=0.3)
             a.legend(fontsize=7, ncol=2, loc="best")
+        # ── 第 3 列: 背隙中心 β（真值 / 在线估计 / 观测极差中心）──
+        if has_beta:
+            a = axes[i][2]
+            tt = t
+            if seg.beta_true is not None:
+                a.plot(tt, seg.beta_true, "k-", lw=1.3, label="β 真值（仿真环境）")
+            if seg.beta is not None:
+                a.plot(tt, seg.beta, "C3--", lw=1.3, label="β 在线估计（控制器用）")
+                D = seg.theta[:, 0] - seg.theta[:, 1]
+                obs = 0.5 * (D.max() + D.min())
+                a.axhline(obs, color="C0", ls=":", lw=1.2,
+                          label=f"本段 Δ 极差中心（观测上限）={obs:+.4f}")
+            a.set_title(f"背隙中心 β（{axis_name}）: 只在穿越死区的段里可观测", fontsize=9)
+            a.set_xlabel("t [s]")
+            a.set_ylabel("β [rad]")
+            a.grid(True, alpha=0.3)
+            a.legend(fontsize=7, loc="best")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
+    _save_fig(fig, out_path, show_plot)
+    return out_path
+
+
+def plot_learning(res: FitResult, out_path: str, show_plot: bool = False) -> str:
+    """★ 图 3: **留出集**开环 RMSE vs epoch（学习曲线）——回答"多训练有没有用"。"""
+    if not res.eval_hist:
+        raise ValueError("没有 eval_hist（要用 --eval-every>0 且给了 --val-data）")
+    plt = _lazy_pyplot(show_plot)
+    ep = np.array([e for e, _ in res.eval_hist], dtype=float)
+    names = (("motor", "电机"), ("platform", "云台"), ("small", "小 yaw"))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.2))
+    fig.suptitle("留出集开环误差 vs epoch（窗口 0.1 s）—— 学习曲线", fontsize=11)
+    for ax, key, unit in ((axes[0], "_deg", "角度 RMSE [°]"),
+                          (axes[1], "_rate", "角速度 RMSE [rad/s]")):
+        for k, (en, cn) in enumerate(names):
+            ax.plot(ep, [rm[en + key] for _, rm in res.eval_hist],
+                    lw=1.4, color=f"C{k}", marker=".", ms=3, label=cn)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("epoch")
+        ax.set_ylabel(unit)
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(fontsize=8)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     _save_fig(fig, out_path, show_plot)
     return out_path
 
@@ -1784,22 +2523,94 @@ def _save_fig(fig, path: str, show_plot: bool):
 # ============================================================================
 # CLI
 # ============================================================================
+def channel_rmse(segs, phi, base: PlanarParams, integrator: str = "rk4",
+                 substeps: int = 4, window: int = 10, use_beta: bool = False,
+                 state_mode: str = "est") -> dict:
+    """用给定参数做开环前向仿真，返回三个通道的角度/角速度 RMSE（两套口径）。
+
+    · ``*_deg`` / ``*_rate``（**窗口口径**）: 每 ``window`` 步（默认 10 步 = 0.1 s，与训练
+      配方同长）从记录初值重新起跑一次，覆盖整段所有起点。这是"模型有多准"的**主指标**，
+      也是"准确参数 vs 拟合参数"该比的口径；
+    · ``*_full_deg`` / ``*_full_rate``（**整段口径**）: 从段首一路开环跑到底。它同时含
+      **模型误差的累积**与**初值偏差**（`theta_big_motor` 是延时补偿估计、不是真值），
+      只能当参考。
+
+    角度 RMSE 用度（更好读）；角速度用 rad/s。
+    """
+    p = base.with_vector(np.asarray(phi, dtype=np.float64))
+    names = ("motor", "platform", "small")
+    se_w = np.zeros(3); sv_w = np.zeros(3); n_w = 0
+    se_f = np.zeros(3); sv_f = np.zeros(3); n_f = 0
+    w = max(1, int(window))
+    for s in segs:
+        th_m, dth_m = state_arrays(s, state_mode)
+        seq = None
+        if s.gravity is not None:
+            seq = [exo_from_gravity(float(s.gravity[i, 0]), float(s.gravity[i, 1]))
+                   for i in range(s.T)]
+        bs = s.beta if (use_beta and s.beta is not None) else None
+        # 窗口口径
+        for st in range(0, max(1, s.T - w), w):
+            sl = slice(st, st + w + 1)
+            th, dth = simulate_backlash_np(
+                p, th_m[st], dth_m[st], s.tau[sl], s.dt, EXO_ZERO, substeps,
+                exo_seq=(None if seq is None else seq[sl]),
+                beta_seq=(None if bs is None else bs[sl]), integrator=integrator)
+            d = np.arctan2(np.sin(th - th_m[sl]), np.cos(th - th_m[sl]))
+            se_w += np.sum(d * d, axis=0)
+            sv_w += np.sum((dth - dth_m[sl]) ** 2, axis=0)
+            n_w += int(th.shape[0])
+        # 整段口径
+        th, dth = simulate_backlash_np(p, th_m[0], dth_m[0], s.tau, s.dt,
+                                       EXO_ZERO, substeps, exo_seq=seq, beta_seq=bs,
+                                       integrator=integrator)
+        d = np.arctan2(np.sin(th - th_m), np.cos(th - th_m))
+        se_f += np.sum(d * d, axis=0)
+        sv_f += np.sum((dth - dth_m) ** 2, axis=0)
+        n_f += int(th.shape[0])
+    out = {}
+    for k, nm in enumerate(names):
+        out[nm + "_deg"] = float(np.degrees(np.sqrt(se_w[k] / max(1, n_w))))
+        out[nm + "_rate"] = float(np.sqrt(sv_w[k] / max(1, n_w)))
+        out[nm + "_full_deg"] = float(np.degrees(np.sqrt(se_f[k] / max(1, n_f))))
+        out[nm + "_full_rate"] = float(np.sqrt(sv_f[k] / max(1, n_f)))
+    return out
+
+
+def _fmt_rmse(rm: dict) -> str:
+    return ("窗口(0.1s) RMSE: 角度[°] 电机/云台/小yaw = "
+            f"{rm['motor_deg']:.3f} / {rm['platform_deg']:.3f} / {rm['small_deg']:.3f}; "
+            "角速度[rad/s] = "
+            f"{rm['motor_rate']:.4f} / {rm['platform_rate']:.4f} / {rm['small_rate']:.4f}")
+
+
+def _fmt_rmse_full(rm: dict) -> str:
+    return ("整段开环 RMSE: 角度[°] 电机/云台/小yaw = "
+            f"{rm['motor_full_deg']:.3f} / {rm['platform_full_deg']:.3f} / "
+            f"{rm['small_full_deg']:.3f}")
+
+
 def _build_argparser():
     ap = argparse.ArgumentParser(
-        description="平面 8 参模型 —— PyTorch 可导前向仿真参数辨识（输出误差法）",
+        description="平面 3-DOF（含大 yaw 背隙）16 参模型 —— PyTorch 可导前向仿真参数辨识（输出误差法）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--data", action="append", default=None,
                     help="数据 glob（可重复/逗号分隔）；默认 data/sysid/*.csv 和 *.npz")
     ap.add_argument("--fit-axis", choices=["both", "big", "small"], default="both",
-                    help="both=两轴一起拟合；big/small=只拟合该轴（另一轴摩擦参数冻结）")
+                    help="both=三个状态通道（电机/云台/小 yaw）一起拟合；"
+                         "big=只算电机+云台通道（小 yaw 摩擦冻结）；"
+                         "small=只算小 yaw 通道（大 yaw 惯量/摩擦 + 电机/背隙 8 参全冻结）")
     g = ap.add_argument_group(
         "★ 默认配方（= 原仓库 TorqueController/python/scripts/param_ident.py 同款）",
-        "epochs=200（= 原仓库 num_epochs=1000 的 1/5）；每 epoch 对**每个数据段**随机截取 "
+        "epochs=1000（= 原仓库 num_epochs 同轮数）；每 epoch 对**每个数据段**随机截取 "
         "seg_steps=10 步（0.1 s）片段做 1 个 Adam 步 ⇒ 总步数 = epochs × 段数；"
         "损失 = 角度误差 MSE（先 wrap 到 (−π,π]）+ 角速度误差 MSE，**两项等权**；"
-        "Adam lr=3e-4 **常数**（无 scheduler）、**无 LBFGS**；积分 = 半隐式欧拉，substeps=1，"
-        "dt 取自数据（100 Hz ⇒ 0.01 s）；**参数无任何限位**（正参数 log 参数化 φ=exp(raw)，"
-        "Px/Py 自由）；初值沿用本仓库 CAD 占位值 defaultModelParams()。")
+        "Adam lr=3e-4 **常数**（无 scheduler）、**无 LBFGS**；积分 = RK4（3-DOF 含背隙），"
+        "substeps=4（背隙接触模态 ≈190 rad/s ⇒ 必须细分；euler 同子步数下数值误差会污染摩擦），"
+        "dt 取自数据（100 Hz ⇒ 0.01 s）；"
+        "**参数无任何限位**（12 个正参数 log 参数化 φ=exp(raw)，Px/Py/γ/β 自由）；"
+        "初值 = planar_yaw_params.h 当前那组 default_param_vector()"
+        "（新 8 个可用 --backlash-* / --j*-motor 覆盖；要从 CAD 占位值重跑用 --init-vector）。")
     g.add_argument("--epochs", type=int, default=FitConfig.epochs,
                    help="★ 训练 epoch 数；**1000 = 与原仓库 num_epochs 相同**"
                         "（每 epoch 的 Adam 步数 = 数据段数；0 = 不优化只画图）")
@@ -1809,7 +2620,8 @@ def _build_argparser():
                    help="★ mse = 角度wrap MSE + 角速度 MSE 等权（原仓库配方，默认）；"
                         "huber = 旧配方（Huber，可用 --vel-weight 加权）")
     g.add_argument("--integrator", choices=["euler", "rk4"], default=FitConfig.integrator,
-                   help="★ euler = 半隐式（symplectic）欧拉（原仓库配方，默认）；rk4 = 旧配方")
+                   help="★ 默认 rk4（3-DOF 背隙接触模态很硬: 同子步数下 euler 的数值角速度"
+                        "误差可达 0.13 rad/s，会污染摩擦/k 的拟合）；euler = 原仓库同款消融")
     g.add_argument("--lr-schedule", choices=["none", "cosine"], default=FitConfig.lr_schedule,
                    help="★ none = 常数学习率（原仓库没有 scheduler，默认）；cosine = 旧配方")
     ap.add_argument("--legacy-recipe", action="store_true",
@@ -1824,7 +2636,8 @@ def _build_argparser():
                     help="Adam 学习率（★ 新配方默认 3e-4，与原仓库一致；旧配方用 5e-3）")
     ap.add_argument("--seed", type=int, default=FitConfig.seed)
     ap.add_argument("--substeps", type=int, default=FitConfig.substeps,
-                    help="可导前向仿真每个控制步的积分子步数（原仓库配方 = 1）")
+                    help="可导前向仿真每个控制步的积分子步数（★ 3-DOF 默认 4: 背隙接触模态 "
+                         "ω=√(k/μ_red)≈190 rad/s，10 ms 一步已到显式稳定边界）")
     ap.add_argument("--huber-delta", type=float, default=FitConfig.huber_delta,
                     help="角度 Huber 阈值 (rad)（仅 --loss-mode=huber 时生效）")
     ap.add_argument("--vel-weight", type=float, default=FitConfig.vel_weight,
@@ -1834,15 +2647,15 @@ def _build_argparser():
     ap.add_argument("--p-bound", type=float, default=FitConfig.p_bound,
                     help="★ 已废弃并被忽略（本脚本不再有任何参数限位；仅为 CLI 兼容保留）")
     ap.add_argument("--init-vector", type=str, default=None,
-                    help="逗号分隔的 8 个初值（默认用 CAD 占位值 defaultModelParams()）")
+                    help=f"逗号分隔的 {NPARAM} 个初值（默认 = planar_yaw_params.h 当前那组）")
     ap.add_argument("--truth-params", type=str, default=None,
-                    help="逗号分隔的 8 个真值/参考值（收敛曲线上的虚线；默认画初值 φ0）")
+                    help=f"逗号分隔的 {NPARAM} 个真值/参考值（收敛曲线上的虚线；默认画初值 φ0）")
     ap.add_argument("--dx", type=float, default=0.0,
                     help="实测几何 dx (m)，默认 0（两轴横向无偏置）")
     ap.add_argument("--dy", type=float, default=0.07,
                     help="实测几何 dy (m)，默认 0.07（小 yaw 轴在大 yaw 轴前方 0.07 m）")
     ap.add_argument("--model-lambda", type=float, default=FRICTION_LAMBDA,
-                    help="★ 辨识模型的摩擦软符号陡度 λ；默认 10 = 本仓库约定（与前向仿真/"
+                    help="★ 辨识模型的摩擦软符号陡度 λ；默认 100 = 本仓库约定（与前向仿真/"
                          "MPC/planar_yaw_model.h 一致）。**原仓库单 yaw 版用 1e4**，本仓库不能"
                          "照搬（原因见文件头 docstring）；想复现 1e4 可传 --model-lambda=1e4 消融")
     ap.add_argument("--dt", type=float, default=None, help="覆盖 dt（默认取数据里的）")
@@ -1862,6 +2675,59 @@ def _build_argparser():
     ap.add_argument("--p-zero-angle", type=float, default=0.0,
                     help="平衡点 θ* 在当前零点坐标系里的读数（度）。0 = 零点恰好设在平衡点上；"
                          "手动挪过零点就填实际读数。仅 --p-constraint=along_d 时有效")
+    # ── ★ 新增（3-DOF 背隙/电机侧）参数的**初值**（全都进模型一起拟合，没有特殊处理）──
+    ap.add_argument("--backlash-delta", type=float, default=0.0873,
+                    help="δ 初值 (rad)。不给默认、也不自动估时就用手动固定值；"
+                         "想用数据粗估可传 --backlash-delta=auto（精估见 calibrate_backlash.py）")
+    ap.add_argument("--backlash-k", type=float, default=200.0,
+                    help="k 初值 (N·m/rad)。注意 10 ms 步长下的显式稳定上限 "
+                         "k_max = μ_red·(2.78/hh)²（substeps=4 ⇒ hh=2.5ms ⇒ ≈6750）")
+    ap.add_argument("--backlash-c", type=float, default=2.0, help="c 初值 (N·m·s/rad)")
+    ap.add_argument("--backlash-through", type=float, default=0.002,
+                    help="γ 初值（死区直通线性项 τ_t += k·γ·Δ；给死区内部提供梯度）")
+    ap.add_argument("--jmotor", type=float, default=0.006, help="J_motor 初值 (kg·m²)")
+    ap.add_argument("--fc-motor", type=float, default=0.030, help="电机侧库仑摩擦初值 (N·m)")
+    ap.add_argument("--fv-motor", type=float, default=0.010, help="电机侧粘滞摩擦初值 (N·m·s/rad)")
+    ap.add_argument("--backlash-beta", type=float, default=0.0,
+                    help="β 初值 (rad)（死区中心偏置；实机由估计器在线给出，离线一并拟合）")
+    ap.add_argument("--freeze-backlash-through", action=argparse.BooleanOptionalAction,
+                    default=FitConfig.freeze_backlash_through,
+                    help="★ **默认开**: 把背隙直通项 γ（参数 11）冻结在 --backlash-through 给的初值"
+                         "（默认 0.002）上、不参与拟合——它的定位只是死区内的梯度引导；"
+                         "放开拟合会让它替模型去'填'刚性接触的台阶（γ→0.3、δ→0.25 rad，"
+                         "参数失去物理意义，而留出误差几乎不变）。"
+                         "要用 --no-freeze-backlash-through 复现'γ 自由'的消融")
+    ap.add_argument("--beta-mode", choices=["auto", "fit", "column", "true"],
+                    default=FitConfig.beta_mode,
+                    help="★ 背隙死区中心 β 的来源: auto（默认）= 数据里有非零 `backlash_center` 列"
+                         "就用它当**逐样本外生量**（= 运行期估计器在线值的做法），否则退回拟合一个"
+                         "全局常数；column = 强制用在线估计列（没有就报错）；"
+                         "fit = 强制拟合全局常数；"
+                         "**true = 用仿真真值列 `backlash_beta_true`（只用于仿真数据，作为"
+                         "'β 完全已知'的上限对照，实机没有这一列）**")
+    ap.add_argument("--batch-segments", action="store_true",
+                    help="★ 全批加速: 每 epoch 仍对每段随机抽 1 个 seg_steps 片段，但把**所有段**"
+                         "拼成一个 batch 做**一次** Adam 步（损失 = 各段损失均值 = 原配方各段梯度"
+                         "的平均）。段数多（几十~上百）时逐段更新慢得跑不动，用它；"
+                         "代价是每 epoch 的更新次数从 N 段变成 1 次")
+    ap.add_argument("--eval-every", type=int, default=FitConfig.eval_every,
+                    help="★ 每 N 个 epoch 在**留出集**（--val-data）上算一次开环 RMSE，"
+                         "最后画成「留出误差 vs epoch」的学习曲线（0 = 关，默认）")
+    ap.add_argument("--state-mode", choices=["est", "true"], default=FitConfig.state_mode,
+                    help="★ 状态目标来源: est（默认）= 记录/估计值（控制器真正看到的）；"
+                         "true = 仿真真值列 `theta_true_*`（**只有 dry-run 数据有**）——"
+                         "上限对照，用来把'模型误差'与'电机状态估计误差'分开")
+    ap.add_argument("--val-data", type=str, default=None,
+                    help="留出（测试）数据 glob: 只用于**评估与画图**，不参与训练。"
+                         "给了它就把 RMSE/轨迹对比图都换成留出集（这才是真正的泛化检查）")
+    ap.add_argument("--freeze-params", type=str, default=None,
+                    help="额外冻结的参数下标（逗号分隔，编号 0..15 见输出表）。"
+                         "典型用法: ① **无倾角且两轴从不同时激励**的数据里 Px/Py 没有可观测量"
+                         "（θ̇s≈0 ⇒ μ 的耦合项全为 0），会被噪声带走 ⇒ --freeze-params=2,3；"
+                         "② **把背隙直通项钉成固定小值**（不参与训练）⇒ "
+                         "--freeze-params=11 --backlash-through=0.002 —— 直通项只是死区内的"
+                         "梯度引导，不该在拟合中长大去替模型「填」刚性接触的台阶"
+                         "（见 docs/backlash_model.md）")
     ap.add_argument("--threads", type=int, default=0,
                     help="torch 线程数（0=默认；小张量下 1 通常最快）")
     ap.add_argument("--print-every", type=int, default=FitConfig.print_every)
@@ -1880,13 +2746,40 @@ def _build_argparser():
     return ap
 
 
-def _parse_vec8(s, what: str) -> np.ndarray:
-    """解析逗号分隔的 8 个数（--init-vector / --truth-params）。"""
+def _parse_vecN(s, what: str, n: int = NPARAM) -> np.ndarray:
+    """解析逗号分隔的 n 个数（--init-vector / --truth-params）。"""
     v = np.array([float(x) for x in str(s).replace(";", ",").split(",") if x.strip() != ""],
                  dtype=np.float64)
-    if v.size != NPARAM:
-        raise SystemExit(f"[error] {what} 需要 {NPARAM} 个数，收到 {v.size} 个")
+    if v.size != n:
+        raise SystemExit(f"[error] {what} 需要 {n} 个数，收到 {v.size} 个")
     return v
+
+
+def _estimate_backlash_delta(patterns) -> float:
+    """从数据里**粗估** δ（所有文件 pooled Δ 的极差中位数）—— 只用来当拟合初值。
+
+    注意这会把"链路保持/延迟"造成的 Δ 抖动一起算进去（实测偏大约 9%）；
+    精确标定用 python/scripts/calibrate_backlash.py（按 big_enc_age/角速度门控）。
+    """
+    import glob as _g
+    Ds = []
+    for pat in patterns:
+        for fp in sorted(_g.glob(pat)):
+            try:
+                _d = np.genfromtxt(fp, delimiter=",", names=True, invalid_raise=False)
+            except Exception:
+                continue
+            if _d is None or _d.dtype.names is None:
+                continue
+            if ("theta_big_motor" not in _d.dtype.names
+                    or "theta_big_platform" not in _d.dtype.names):
+                continue
+            Dd = (np.atleast_1d(_d["theta_big_motor"]).astype(float)
+                  - np.atleast_1d(_d["theta_big_platform"]).astype(float))
+            Dd = Dd[np.isfinite(Dd)]
+            if len(Dd) > 10:
+                Ds.append(np.percentile(Dd, 99.9) - np.percentile(Dd, 0.1))
+    return float(np.median(Ds)) if Ds else 0.0
 
 
 def main(argv=None) -> int:
@@ -1901,11 +2794,67 @@ def main(argv=None) -> int:
         return 2
 
     patterns = args.data or ["data/sysid/*.csv", "data/sysid/*.npz"]
+    # ── 新增参数的初值（全部参与拟合；这里只是**初值**）──
+    phi0 = default_param_vector()
+    d_init = args.backlash_delta
+    if isinstance(d_init, str):
+        if d_init.strip().lower() in ("auto", ""):
+            d_init = _estimate_backlash_delta(patterns)
+            if d_init > 0.0:
+                print(f"[backlash] 从数据粗估 δ 初值 = {d_init:.6f} rad "
+                      f"({math.degrees(d_init):.3f}°)（★ 精确标定用 calibrate_backlash.py）")
+            else:
+                print("[backlash] 数据里没有电机侧/云台侧两列 ⇒ δ 初值用默认 0.0873 rad")
+                d_init = 0.0873
+        else:
+            d_init = float(d_init)
+    phi0[8] = float(d_init)
+    phi0[9] = float(args.backlash_k)
+    phi0[10] = float(args.backlash_c)
+    phi0[11] = float(args.backlash_through)
+    phi0[12] = float(args.jmotor)
+    phi0[13] = float(args.fc_motor)
+    phi0[14] = float(args.fv_motor)
+    phi0[15] = float(args.backlash_beta)
+
     segs = load_segments(patterns, dt_override=args.dt)
     if not segs:
         print("[error] 没有读到数据；请用 --data=<glob> 指定（或先跑采集脚本）",
               file=sys.stderr)
         return 2
+    # ── 留出（测试）数据: 只评估/画图，不训练 ──
+    val_segs = None
+    if args.val_data:
+        val_segs = load_segments([args.val_data], dt_override=args.dt)
+        if not val_segs:
+            print(f"[error] --val-data={args.val_data} 没读到数据", file=sys.stderr)
+            return 2
+    # ── ★ 训练/留出重合检查（防止"留出集"其实是训练集的一部分）──
+    if val_segs:
+        tr_fp = {seg_fingerprint(sg) for sg in segs}
+        dup = sum(1 for sg in val_segs if seg_fingerprint(sg) in tr_fp)
+        if dup:
+            print(f"[warn] ★★ 留出集里有 {dup}/{len(val_segs)} 段与训练集**完全相同**！"
+                  "原因几乎肯定是采集脚本的 `--seed` 相同（默认 42，采集是确定性的）"
+                  "⇒ 这个留出集只能当「拟合误差」看，**不能**当泛化误差；"
+                  "请用不同的 `--seed` 重采留出集（训练与留出的 seed 必须不同）。")
+        else:
+            print(f"[ok] 留出集与训练集无重合（{len(val_segs)} 段，指纹比对）")
+
+    # ── 数据里的背隙中心 β 列（有 ⇒ 当逐样本外生量；与运行期一致）──
+    n_beta = sum(1 for sg in segs if sg.beta is not None)
+    if n_beta:
+        bvals = np.concatenate([sg.beta for sg in segs if sg.beta is not None])
+        btrue = [sg.beta_true for sg in segs if sg.beta_true is not None]
+        print(f"[beta] {n_beta}/{len(segs)} 段带 `backlash_center` 列（在线估计 β）: "
+              f"范围 [{bvals.min():+.4f}, {bvals.max():+.4f}] rad"
+              f"（{math.degrees(bvals.min()):+.2f}°~{math.degrees(bvals.max()):+.2f}°）")
+        if btrue:
+            tv = np.concatenate(btrue)
+            print(f"[beta] 仿真真值 β 范围 [{tv.min():+.4f}, {tv.max():+.4f}] rad；"
+                  f"在线估计误差 RMS = {np.sqrt(np.mean((bvals - tv[:len(bvals)]) ** 2)) * 1e3:.3f} mrad"
+                  if tv.shape[0] == bvals.shape[0] else
+                  f"[beta] 仿真真值 β 范围 [{tv.min():+.4f}, {tv.max():+.4f}] rad")
 
     cfg = FitConfig(fit_axis=args.fit_axis, iters=args.iters, lbfgs_iters=args.lbfgs_iters,
                     lr=args.lr, seed=args.seed, substeps=args.substeps,
@@ -1913,15 +2862,22 @@ def main(argv=None) -> int:
                     free_init_vel=args.free_init_vel, p_bound=args.p_bound,
                     epochs=args.epochs, seg_steps=args.seg_steps, loss_mode=args.loss_mode,
                     integrator=args.integrator, lr_schedule=args.lr_schedule,
-                    init_vector=(None if args.init_vector is None
-                                 else _parse_vec8(args.init_vector, "--init-vector")),
+                    init_vector=(phi0 if args.init_vector is None
+                                 else _parse_vecN(args.init_vector, "--init-vector")),
                     truth_vector=(None if args.truth_params is None
-                                  else _parse_vec8(args.truth_params, "--truth-params")),
+                                  else _parse_vecN(args.truth_params, "--truth-params")),
+                    freeze_params=(() if not args.freeze_params
+                                   else tuple(int(x) for x in
+                                              str(args.freeze_params).split(",") if x != "")),
                     print_every=args.print_every, device=args.device,
                     max_points=args.max_points, window_len=args.window_len,
                     windows_per_seg=args.windows_per_seg, batch_size=args.batch_size,
                     p_constraint=args.p_constraint, fix_p=args.fix_p,
-                    p_zero_angle_deg=args.p_zero_angle)
+                    p_zero_angle_deg=args.p_zero_angle,
+                    beta_mode=args.beta_mode, batch_segments=args.batch_segments,
+                    freeze_backlash_through=args.freeze_backlash_through,
+                    state_mode=args.state_mode, eval_every=args.eval_every,
+                    eval_segs=val_segs)
     if args.legacy_recipe:
         cfg.legacy_recipe()
         print("[cfg] ★ --legacy-recipe: 已切到旧精细配方（iters=400, lr=5e-3, Huber, 分窗, "
@@ -1933,11 +2889,32 @@ def main(argv=None) -> int:
     print("\n" + "=" * 78)
     print(f"辨识结果（输出误差法, 段数={len(segs)}, 轴={cfg.fit_axis}）  用时 {res.seconds:.1f}s")
     print(f"配方: {res.recipe}；Adam/总步数={res.n_steps}；参数限位={res.config['limits']}")
-    print(f"{'#':>2} {'参数':<10} {'初值':>12} {'估计':>12} {'变化':>12}  单位")
-    for j, nm in enumerate(PARAM_NAMES):
-        print(f"{j:>2} {nm:<10} {res.phi0[j]:>12.6f} {res.phi[j]:>12.6f} "
+    print(f"{'#':>2} {'参数':<16} {'初值':>12} {'估计':>12} {'变化':>12}  单位")
+    print(f"{'':>2} ---- 平面 8 参（云台/小 yaw 子块）----")
+    for j in range(NCORE):
+        print(f"{j:>2} {PARAM_NAMES[j]:<16} {res.phi0[j]:>12.6f} {res.phi[j]:>12.6f} "
               f"{res.phi[j] - res.phi0[j]:>+12.6f}  {PARAM_UNITS[j]}")
+    print(f"{'':>2} ---- ★ 新增: 大 yaw 背隙 / 电机侧 ----")
+    for j in range(NCORE, NPARAM):
+        extra = ""
+        if j == 8:
+            extra = f"   (= {math.degrees(res.phi[j]):.3f}°)"
+        print(f"{j:>2} {PARAM_NAMES[j]:<16} {res.phi0[j]:>12.6f} {res.phi[j]:>12.6f} "
+              f"{res.phi[j] - res.phi0[j]:>+12.6f}  {PARAM_UNITS[j]}{extra}")
     print("=" * 78)
+    # ── ★ 全批开环前向仿真误差（比 loss 好读；口径 = 整段、同一起点、同一积分器）──
+    use_beta_eval = bool(res.config.get("use_beta_column"))
+    eval_segs = val_segs if val_segs is not None else segs
+    tag = "留出集" if val_segs is not None else "训练集"
+    rm = channel_rmse(eval_segs, res.phi, base, integrator=cfg.integrator, substeps=cfg.substeps,
+                      use_beta=use_beta_eval, state_mode=cfg.state_mode)
+    rm0 = channel_rmse(eval_segs, res.phi0, base, integrator=cfg.integrator,
+                       substeps=cfg.substeps, use_beta=use_beta_eval,
+                       state_mode=cfg.state_mode)
+    print(f"全批前向仿真 val_loss = {res.val_loss:.6e}")
+    print(f"  ★ 估计参数（{tag}）: {_fmt_rmse(rm)}")
+    print(f"               {_fmt_rmse_full(rm)}")
+    print(f"    （对照）初值: {_fmt_rmse(rm0)}")
 
     # ── 收敛摘要: 前 5 / 后 5 个 loss（用户要求）──
     h = res.loss_history
@@ -1955,6 +2932,22 @@ def main(argv=None) -> int:
     print(f"  p.Px = {res.phi[2]:.6f};  p.Py = {res.phi[3]:.6f};")
     print(f"  p.fcBig = {res.phi[4]:.6f};  p.fvBig = {res.phi[5]:.6f};")
     print(f"  p.fcSmall = {res.phi[6]:.6f};  p.fvSmall = {res.phi[7]:.6f};")
+    print(f"  p.backlash_delta = {res.phi[8]:.6f};  p.backlash_k = {res.phi[9]:.4f};")
+    print(f"  p.backlash_c = {res.phi[10]:.4f};  p.backlash_through = {res.phi[11]:.6f};")
+    print(f"  p.Jmotor = {res.phi[12]:.6f};  p.fcMotor = {res.phi[13]:.6f};")
+    print(f"  p.fvMotor = {res.phi[14]:.6f};  // β 由估计器在线给（离线拟合值 "
+          f"{res.phi[15]:+.6f} 仅供参考）")
+
+    # ── 留出集学习曲线（--eval-every）──
+    if res.eval_hist:
+        print(f"留出集学习曲线（{len(res.eval_hist)} 个点，epoch "
+              f"{res.eval_hist[0][0]}..{res.eval_hist[-1][0]}）:")
+        step = max(1, len(res.eval_hist) // 10)
+        for e, r in res.eval_hist[::step] + ([res.eval_hist[-1]]
+                                             if (len(res.eval_hist) - 1) % step else []):
+            print(f"  epoch {e:6d}: 角度 RMSE[°] {r['motor_deg']:.3f}/{r['platform_deg']:.3f}"
+                  f"/{r['small_deg']:.3f}   角速度 {r['motor_rate']:.4f}/"
+                  f"{r['platform_rate']:.4f}/{r['small_rate']:.4f}")
 
     # ── 收敛曲线 / 轨迹对比（默认写 PNG；无显示环境也不报错）──
     if not args.no_plot:
@@ -1963,8 +2956,12 @@ def main(argv=None) -> int:
                 f"lr={cfg.lr:g}, 损失={cfg.loss_mode}, 积分={cfg.integrator}")
         try:
             plot_convergence(res, conv_png, show_plot=args.show_plot, title_note=note)
-            plot_trajectory(res, segs, base, integrator=cfg.integrator,
-                            out_path=traj_png, show_plot=args.show_plot)
+            plot_trajectory(res, eval_segs, base, integrator=cfg.integrator,
+                            out_path=traj_png, show_plot=args.show_plot,
+                            use_beta=use_beta_eval)
+            if res.eval_hist:
+                learn_png = conv_png[:-4] + "_learning.png"
+                plot_learning(res, learn_png, show_plot=args.show_plot)
         except Exception as exc:                    # 画图失败不应让辨识结果丢失
             print(f"[plot][warn] 画图失败（辨识结果仍然有效）: {type(exc).__name__}: {exc}",
                   file=sys.stderr)

@@ -85,6 +85,13 @@ public:
         double big_joint_angle_meas = 0.0;
         double big_joint_angle = 0.0;
         double big_joint_rate = 0.0;
+        // ── ★ 大 yaw 电机侧 / 云台侧 分离（背隙建模用）──
+        double big_motor_angle = 0.0;      // 电机侧关节角（MCU 编码器）
+        double big_motor_rate = 0.0;       // 电机侧角速度
+        double big_platform_angle = 0.0;   // 云台侧关节角 θ_p
+        double big_platform_rate = 0.0;    // 云台侧角速度
+        double backlash_center = 0.0;      // β（在线估计，加在云台角上）
+        double backlash_width_obs = 0.0;   // 观测到的 Δ 极差
         double big_enc_age = -1.0;          // 大 yaw 值的年龄（上位机计时）
         double big_sample_interval = 0.0;   // 最近两次新样本间隔（s）→ MCU1↔MCU2 链路状况
         double chassis_imu_age = -1.0;      // 底盘 IMU 值的年龄（上位机计时）

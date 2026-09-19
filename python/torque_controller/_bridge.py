@@ -78,7 +78,7 @@ __all__ = [
     "ERR_ABI_MISMATCH",
 ]
 
-API_VERSION = 4   # v4: 平面 2 自由度 8 参模型（ModelParams/MpcConfig 重写；gravity_c → gravity_a）
+API_VERSION = 5   # v5: 大 yaw 电机侧/云台侧分离（big_motor_*/big_platform_*）+ 背隙中心 β
 
 # ── 错误码（与 TcbsRobotCommStatus 一致）──
 ERR_OK = 0
@@ -261,7 +261,13 @@ class TcbsRobotEstimate(Structure):
         # 2) 大 yaw（延迟编码器 + IMU 速率 → 延迟补偿）
         ("big_joint_angle_meas", c_double),
         ("big_joint_angle", c_double),
-        ("big_joint_rate", c_double),
+        ("big_joint_rate", c_double),         # 关节角速度（= 云台侧）
+        ("big_motor_angle", c_double),        # ★ 电机侧关节角（MCU 编码器）
+        ("big_motor_rate", c_double),         # ★ 电机侧角速度
+        ("big_platform_angle", c_double),     # ★ 云台侧关节角 θ_p
+        ("big_platform_rate", c_double),      # ★ 云台侧角速度
+        ("backlash_center", c_double),        # ★ 背隙中心 β（在线估计）
+        ("backlash_width_obs", c_double),     # ★ 观测到的 Δ 极差（≈ δ）
         ("big_enc_age", c_double),            # 大 yaw 值的年龄 s（上位机计时，-1 = 从未收到）
         ("big_sample_interval", c_double),    # 最近两次新样本间隔 s（上位机计时）
         ("chassis_imu_age", c_double),        # 底盘 IMU 值的年龄 s（上位机计时，-1 = 从未收到）
@@ -384,9 +390,9 @@ class TcbsEstimatorConfig(Structure):
         ("max_extrap_s", c_double),
         ("small_rate_lpf_alpha", c_double),   # α=1.0 ⇒ 小 yaw 角速度直通（取自 MCU）
         ("big_rate_lpf_alpha", c_double),     # α=1.0 ⇒ 大 yaw（IMU 陀螺投影）直通
-        ("big_rate_use_encoder", c_uint8),    # 1 = 大 yaw 角速度低频取 MCU 编码器值（互补滤波）
-        ("big_rate_enc_alpha", c_double),     # 编码器支路低通（拿不到采样间隔时的兜底值）
-        ("big_rate_bias_tau_s", c_double),    # 直流校正时间常数 (s)，≤0 = 关闭校正
+        ("big_motor_rate_tau_s", c_double),   # 电机侧角速度低通 (s)
+        ("big_motor_rate_alpha", c_double),   # 拿不到采样间隔时的兜底系数
+        ("backlash_center_tau_s", c_double),  # 背隙中心 β 在线估计的遗忘时间常数 (s)，≤0 = 关闭
         ("pitch_rate_lpf_alpha", c_double),
         ("pitch_acc_lpf_alpha", c_double),
         ("bore", c_double * 3),

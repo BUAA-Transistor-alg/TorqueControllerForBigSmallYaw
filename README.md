@@ -64,13 +64,23 @@
 | `bore[3]` | §3.4：激光/照准器或相机像素反解视轴方向 | 默认 `(0,1,0)`（本工程 x=右/y=前/z=上，pitch 绕 x ⇒ 光轴在 y-z 平面） |
 | `chassis_imu_timeout_s`、`small_rate_lpf_alpha`/`big_rate_lpf_alpha`、`stale_age_s`… | 保持默认，按实测噪声/带宽微调 | 不影响正确性，只影响平滑度 |
 
-### D. 动力学参数（8 个，必须**辨识**，不要手填）
+### D. 动力学参数（16 个，必须**辨识**，不要手填）
 
 | 参数 | 含义 |
 |---|---|
 | `Jbig_eff`, `Js` | 大 yaw 侧惯量（含 `m_u\|d\|²`）、上装绕小 yaw 轴惯量（含 `m_u\|ρ\|²`） |
 | `Px`, `Py` | 上装一阶矩 `m_u·ρ` |
 | `fc_big/fv_big/fc_small/fv_small` | 两轴库仑/粘滞摩擦 |
+| ★ `backlash_delta` | 大 yaw **背隙宽度**（唯一可离线标定的背隙量；每台车都要重标） |
+| ★ `backlash_k`, `backlash_c` | 背隙接触刚度/阻尼（**当前是占位值**，等 3-DOF 拟合给实测值） |
+| ★ `Jmotor`, `fc_motor`, `fv_motor` | 大 yaw 电机侧等效惯量/库仑/粘滞摩擦（同为占位） |
+| ★ `backlash_through` γ | 死区直通线性项（给死区内提供梯度）—— **默认冻结在 0.002、不参与拟合**（`--no-freeze-backlash-through` 可放开） |
+| ★ `backlash_beta` β | 死区**中心**偏置 —— **运行期由估计器在线给**（`Estimate::backlash_center`），不要用离线常数 |
+
+> 全套 16 参的含义、δ 与 β 为什么一个能离线一个不能、底盘 IMU 的延迟补偿、MPC 接线、
+> 以及"哪些是实测值、哪些还是占位"的可信度表，见 **`docs/backlash_model.md`**；
+> 该文还给了**仿真环境 2**（`--sim-rigid`: 接触完全刚性 + 死区完全自由 + β 随机/漂移）与
+> 100 段 × 1000 epoch 的完整验证结果（收敛曲线 / 模型 vs 环境 / 控制 vs 目标三条曲线）。
 
 采集与拟合：
 
@@ -80,7 +90,12 @@ python3 python/scripts/collect_sysid.py --tag=big   --segments=6 --tilted --held
 python3 python/scripts/collect_sysid.py --tag=small --segments=6 --tilted
 # ↑ 默认还会把每个"静止保持段"也落盘（文件名后缀 _hold，首段除外）并参与辨识 ——
 #   它补的是采样轨迹里稀缺的**大角度阶跃**激励；不要就用 --no-record-hold
-# ② 拟合（torch 输出误差法为主，LS 交叉校核；λ 固定 100，不改）
+# ①' 只采**测试数据**（无硬件）: 用"刚性接触 + 死区完全自由 + β 每条数据随机/漂移"的仿真环境
+#    python3 python/scripts/collect_sysid.py --dry-run --sim-rigid --segments=100 \
+#            --duration-sec=3 --no-record-hold --out=/tmp/rigid
+# ② 拟合（torch 输出误差法；λ 固定 100，不改。拟合 **16 参**：平面 8 参 + 背隙/电机侧 8 参）
+#   需要数据里同时有 theta_big_motor（电机侧）与 theta_big_platform（云台侧）两列
+#   δ 的独立校验/初值: python3 python/scripts/calibrate_backlash.py --data='data/sysid/*.csv'
 # ★ 几何已按实测填好（(dx, dy) = (0, 0.07)），实机数据**不需要**再给 --dx/--dy；
 #   只有换机械或跑旧归档数据（用 (0.10, 0) 生成的那批）时才显式覆盖
 python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' \
@@ -385,7 +400,7 @@ pitch 与底盘量作为外生量按步刷新。
 min Σ_k  w_b·|ψ_big(k)   − ψ_big*(k)|_smooth      ← 大 yaw 世界方位角跟踪
        + w_s·|ψ_small(k) − ψ_small*(k)|_smooth    ← 小 yaw 世界方位角跟踪（瞄准）
        + w_c·(θ_small(k) − small_center_angle)²   ← 冗余自由度回中（打破多解；中心 = 行程中心
-                                                     −2.5°，**非对称行程下 ≠ 0**）
+                                                     0°）
        + w_lim·ρ(θ_small(k))                      ← 小 yaw 软限位（**双侧** 4 次幂障碍）
        + r_b·u_b² + r_s·u_s²                      ← 力矩惩罚
        + rd_b·Δu_b² + rd_s·Δu_s²                  ← 力矩变化率惩罚
@@ -400,13 +415,13 @@ s.t.   |u| ≤ max_torque（内部 clamp，硬限位）
 - **两关节的相互影响被显式建模**（非共轴偏置 `d` 与上装一阶矩 `P` 引起的交叉惯量
   `M12(θ_s)=Js+d·R(θ_s)P`、离心/科氏项、底盘转动耦合、重力项），因此"大 yaw 快速展开时
   小 yaw 被带偏"这类现象由 MPC 直接补偿，而不是靠事后调参掩盖；
-- **小 yaw 行程非对称（−25° ~ +20°）**，因此软限位必须**两侧各自**从硬限位向内推导：
+- **小 yaw 行程由 `small.min_angle/max_angle` 给出（当前对称 ±30°）**，软限位**两侧各自**从硬限位向内推导：
   `inset = (1−ratio)·(max−min)` ⇒ `soft_min = min + inset`、`soft_max = max − inset`
   （默认 `ratio=0.75`、`inset=11.25°` ⇒ 软限位区 `[−13.75°, +8.75°]`）。
-  旧的 `soft = ratio·max_angle` 隐含"行程对称 ±max_angle"：在非对称行程下负侧会被算成
+  旧的 `soft = ratio·max_angle` 隐含"行程对称 ±max_angle"：行程一旦非对称，负侧会被算成
   `−0.75·|max| = −15°`、障碍宽度算成 5°（真实的施工余量是 11.25°），负侧行程根本用不满；
 - **回中目标角 `small_center_angle` 是显式配置量**（`defaultMpcConfig()` 取行程中心
-  `0.5·(min_angle+max_angle) = −2.5°`），不是内部隐式平均 —— 非对称行程下 0 不是中心；
+  `0.5·(min_angle+max_angle)`，当前对称行程下 = 0°），不是内部隐式平均 —— 换非对称行程会自动跟着变；
 - **小 yaw 限位是硬性安全约束**: 代价里的双侧障碍项 + 电控侧硬限位（§8）双重保障；
 - **求解器**: Ceres + 动态自动微分（模型模板化，梯度精确）。
   注意: **不要用 Ceres 的参数箱式边界**——边界会强制切换到线搜索，单次求解的函数求值次数
@@ -475,7 +490,7 @@ s.t.   |u| ≤ max_torque（内部 clamp，硬限位）
 协议侧的硬性要求:
 
 1. **每关节力矩限幅与最终电流限幅**（力矩换算常数每关节独立）；
-2. **小 yaw 的硬限位保护（行程非对称 −25°~+20°）**: 目标角先夹到 `[−23°, +18°]`（各留 2° 余量）、
+2. **小 yaw 的硬限位保护（行程 ±30°）**: 目标角先夹到 `[−28°, +28°]`（各留 2° 余量）、
    越限只允许回中方向力矩、接近限位（距任一侧 10° 起）按剩余角度限制速度
    （这是最后一道安全防线）。
    ⚠ **这套限位是以"小 yaw 编码器零点"为基准的，而这个零点必须先由 §8 步骤 3（手动零点捕获）标定**
@@ -554,8 +569,8 @@ docs/
    用 `python/scripts/identify_params_torch.py`（**唯一辨识路径**: torch 可导仿真输出误差法）
    辨识 8 个参数；
 4. 关键: **两轴力矩都必须记录**（被保持轴的力矩就是耦合项 `P` 的传感器，见
-   `docs/calibration.md` §4.2）；小 yaw 应**尽量用满行程**（`[−25°, +20°]`，
-   两侧各留 8° 余量 ⇒ 约 29° 摆幅），摆幅越小 `Px/Py` 与惯量越共线；
+   `docs/calibration.md` §4.2）；小 yaw 应**尽量用满行程**（±30°，
+   两侧各留 8° 余量 ⇒ 约 44° 摆幅），摆幅越小 `Px/Py` 与惯量越共线；
    **强烈建议加静态倾斜段**（底盘静止但静置成 ±10° 左右，`--tilted`），
    否则水平数据下 `Px/Py` 几乎不可辨识（详见 `docs/sysid_data.md` §6.4）；
 5. 辨识完做三项检查: 参数物理合理（`J>0`、`fc/fv ≥ 0`）、`|Px|/σ ≥ 3`、

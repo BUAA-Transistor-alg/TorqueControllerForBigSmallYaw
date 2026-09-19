@@ -65,6 +65,12 @@ RobotController::State RobotController::getState() {
     st.est.big_joint_angle_meas = e.big_joint_angle_meas;
     st.est.big_joint_angle = e.big_joint_angle;
     st.est.big_joint_rate = e.big_joint_rate;
+    st.est.big_motor_angle = e.big_motor_angle;
+    st.est.big_motor_rate = e.big_motor_rate;
+    st.est.big_platform_angle = e.big_platform_angle;
+    st.est.big_platform_rate = e.big_platform_rate;
+    st.est.backlash_center = e.backlash_center;
+    st.est.backlash_width_obs = e.backlash_width_obs;
     st.est.big_enc_age = e.big_enc_age;
     st.est.big_sample_interval = e.big_sample_interval;
     st.est.chassis_imu_age = e.chassis_imu_age;

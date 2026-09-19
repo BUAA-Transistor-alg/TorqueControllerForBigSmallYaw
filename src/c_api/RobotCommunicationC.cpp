@@ -206,6 +206,12 @@ void fillEstimate(const EstT& e, TcbsRobotEstimate_C& d) {
     d.big_joint_angle_meas = e.big_joint_angle_meas;
     d.big_joint_angle = e.big_joint_angle;
     d.big_joint_rate = e.big_joint_rate;
+    d.big_motor_angle = e.big_motor_angle;
+    d.big_motor_rate = e.big_motor_rate;
+    d.big_platform_angle = e.big_platform_angle;
+    d.big_platform_rate = e.big_platform_rate;
+    d.backlash_center = e.backlash_center;
+    d.backlash_width_obs = e.backlash_width_obs;
     d.big_enc_age = e.big_enc_age;              // 值年龄（上位机计时，-1 = 从未收到）
     d.big_sample_interval = e.big_sample_interval;  // 最近两次新样本间隔（上位机计时）
     d.chassis_imu_age = e.chassis_imu_age;      // 底盘 IMU 值的年龄（上位机计时）
@@ -391,9 +397,9 @@ YawStateEstimator::Config toCpp(const TcbsEstimatorConfig_C& c) {
     d.max_extrap_s = c.max_extrap_s;
     d.small_rate_lpf_alpha = c.small_rate_lpf_alpha;
     d.big_rate_lpf_alpha = c.big_rate_lpf_alpha;
-    d.big_rate_use_encoder = u2b(c.big_rate_use_encoder);
-    d.big_rate_enc_alpha = c.big_rate_enc_alpha;
-    d.big_rate_bias_tau_s = c.big_rate_bias_tau_s;
+    d.big_motor_rate_tau_s = c.big_motor_rate_tau_s;
+    d.big_motor_rate_alpha = c.big_motor_rate_alpha;
+    d.backlash_center_tau_s = c.backlash_center_tau_s;
     d.pitch_rate_lpf_alpha = c.pitch_rate_lpf_alpha;
     d.pitch_acc_lpf_alpha = c.pitch_acc_lpf_alpha;
     for (int i = 0; i < 3; ++i) d.bore[i] = c.bore[i];
@@ -419,9 +425,9 @@ void toC(const YawStateEstimator::Config& s, TcbsEstimatorConfig_C& c) {
     c.max_extrap_s = s.max_extrap_s;
     c.small_rate_lpf_alpha = s.small_rate_lpf_alpha;
     c.big_rate_lpf_alpha = s.big_rate_lpf_alpha;
-    c.big_rate_use_encoder = b2u(s.big_rate_use_encoder);
-    c.big_rate_enc_alpha = s.big_rate_enc_alpha;
-    c.big_rate_bias_tau_s = s.big_rate_bias_tau_s;
+    c.big_motor_rate_tau_s = s.big_motor_rate_tau_s;
+    c.big_motor_rate_alpha = s.big_motor_rate_alpha;
+    c.backlash_center_tau_s = s.backlash_center_tau_s;
     c.pitch_rate_lpf_alpha = s.pitch_rate_lpf_alpha;
     c.pitch_acc_lpf_alpha = s.pitch_acc_lpf_alpha;
     for (int i = 0; i < 3; ++i) c.bore[i] = s.bore[i];

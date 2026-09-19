@@ -207,9 +207,10 @@ def test_controller_config_roundtrip() -> None:
 
         default_e = _from_c.default_estimator_config()
         got_e = ctrl.get_estimator_config()
+        # ★ 默认构型已改为 ON_HEAD（IMU 在头上）⇒ 不再写死 ON_BIG_YAW
         check("get_estimator_config() 与默认一致（含 imu_location）",
-              int(got_e.imu_location) == int(default_e.imu_location) == _from_c.IMU_ON_BIG_YAW,
-              f"imu_location={got_e.imu_location}")
+              int(got_e.imu_location) == int(default_e.imu_location) == _from_c.IMU_ON_HEAD,
+              f"imu_location={got_e.imu_location}（默认构型 ON_HEAD）")
 
         # ── 改一个模型参数 → 读回（要求**逐位**一致，不允许任何精度损失）──
         new_js = 0.0130000000000000011      # 需要完整 double 精度才不丢位

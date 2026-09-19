@@ -88,8 +88,9 @@
                           不够则放大输入重试、再换窗口
                         → 叠加随机中心
                           （大 yaw: 现有方位角附近 ±30°；小 yaw: 落在参考包络
-                            [−17°, +12°] 内，中心在可行中心区间内随机，见 §七）
-        · held 目标 = 大 yaw: 现有方位角 ±π 随机；小 yaw: 行程中心 −2.5° ± 10.15°（常量序列）
+                            [−22°, +22°] 内，中心在可行中心区间内随机，见 §七）
+        · held 目标 = 大 yaw: 现有方位角 ±π 随机；小 yaw: 行程中心 ± 0.7×包络半宽
+          （当前行程对称 ±30° ⇒ 中心 0°、范围 ±15.4°；式子按区间运算，非对称行程也对）
     到位: 两个 PID 把 driven 轴拉到 ref[0]、held 轴拉到 held_target，稳定 ~2 s
           （移动参考同样由轨迹规划器整形 —— 直接给阶跃会饱和过冲，把小 yaw 顶到硬限位；
             未收敛最多再等 2 轮；到位后 PID 状态**不清零**，见"与旧脚本差异"）
@@ -97,7 +98,7 @@
           忙等到绝对时间点 → 读 est/mcu → 安全判定（小 yaw 行程界限、温度）
           → 两轴各跑 PID(误差 e = wrap(目标 − 反馈)) → 各轴力矩变化率限幅
           → 仅力矩模式下发 → 记录（含重力 A 系平面分量 gravity_ax/ay）
-    收尾: 主动回到**行程中心 −2.5°** 保持（大 yaw 保持当前方位角）
+    收尾: 主动回到**行程中心**保持（当前行程 ±30° ⇒ 中心 0°；大 yaw 保持当前平台方位角）
     保存: ``data/sysid/sysid_<tag>_<时间戳>_<序号>.npz`` 与同名 ``.csv``（同时写）
           **零力矩只在程序退出时发**（见 safe_shutdown）
 
@@ -108,7 +109,7 @@
 * **静止保持段也落盘**（`--record-hold`，默认开；文件名后缀 `_hold`）: 到位+稳定等待期间
   两轴都在走大角度阶跃，这段数据同样逐样本记录、同样参与辨识（首段除外）。
 * 小 yaw θ 超出**硬限位 [−30°, +30°]** → 立即中止本段（**不保存**被污染的数据）→ PID 回
-  **行程中心 −2.5°** → 零力矩；距界限 < 3° 时只打印告警（见 §七）;
+  **行程中心**（当前 0°）→ 零力矩；距界限 < 3° 时只打印告警（见 §七）;
 * 电机温度 ≥ ``--max-temp`` → 中止本段 → 零力矩 100 Hz 保温等待降温后重试（超时退出）；
 * ``--tilt-rolling`` 段间改倾角时，两轴**保持闭环守位**（倾斜后重力会在小 yaw 上产生力矩，
   撒手会让它自己滑到限位），不撒手、也不做补偿；
@@ -167,7 +168,7 @@
 | ③ 参考包络 | **[−22°, +22°]**（两侧各留 8° 跟踪超调余量） | 激励参考、到位目标、held 保持目标都用它 |
 
 **中心 = 0°**（`SMALL_CENTER_RAD = (min+max)/2`，当前行程对称）。回中心/段尾保持/初始条件都用它；
-式子不假设对称 ⇒ 以后改成非对称行程（例如 [−25°,+20°] ⇒ −2.5°）会自动跟着走。
+式子不假设对称 ⇒ 以后改成非对称行程（例如 [−20°,+25°] ⇒ +2.5°）会自动跟着走。
 
 **所有取值都写成区间运算（不假设对称，对称/非对称行程都能用）**:
   · 参考中心: 从**可行中心区间** `[env_min + 半幅, env_max − 半幅]` 里随机取
@@ -274,12 +275,12 @@ MAX_TX_FAIL = 50                   # 连续 50 帧发不出去 ⇒ 判定链路�
 #   ★ 改行程要**三处一起改**: 这里、C++ 的 defaultMpcConfig().small.min/max_angle、
 #     电控侧 mcu_code_demo 的 YAW_SMALL_MIN_RAD/MAX_RAD。
 #   ★ 下面的取值全部写成基于 [min, max] 的**区间运算**（不假设对称），所以对称/非对称行程
-#     都能直接用；行程若是非对称（例如 [−25°,+20°]，中心 −2.5°），中心/包络会自动跟着走。
+#     都能直接用；行程若是非对称（例如 [−20°,+25°]，中心 +2.5°），中心/包络会自动跟着走。
 SMALL_TRAVEL_MIN = math.radians(-30.0)   # 硬限位下界（机械行程）
 SMALL_TRAVEL_MAX = math.radians(30.0)    # 硬限位上界
 SMALL_CENTER_RAD = 0.5 * (SMALL_TRAVEL_MIN + SMALL_TRAVEL_MAX)   # 0°（当前行程对称）
 #   ↑ 回中/段尾保持/初始条件都用**行程中心**而不是硬编码 0: 当前行程对称 ⇒ 中心就是 0，
-#     但一旦行程改成非对称（例如 [−25°,+20°] 的中心是 −2.5°），这个式子会自动跟着变，
+#     但一旦行程改成非对称（例如 [−20°,+25°] 的中心是 +2.5°），这个式子会自动跟着变，
 #     保证到两端的余量相等。
 SMALL_ABORT_MIN = SMALL_TRAVEL_MIN       # 中止阈值（规格: 触及硬界限即中止本段）
 SMALL_ABORT_MAX = SMALL_TRAVEL_MAX
@@ -361,15 +362,102 @@ AXIS_NAME = {AXIS_BIG: "big", AXIS_SMALL: "small"}
 #   gravity_ax / gravity_ay: 重力在 **A 系（大 yaw 转子系）** 的平面分量 (m/s²)，
 #   水平静置时 ≈ 0。**追加在最后**是为了让按列名取列的读取器
 #   (findCol) 继续工作；只有这两列"有非零值"时，下游才会启用重力项。
-CSV_HEADER = ["t", "theta_big", "theta_small", "dtheta_big", "dtheta_small",
-              "tau_big", "tau_small", "axis", "held_target", "mcu2_seq",
-              "gravity_ax", "gravity_ay"]
+# ════════════════════════════════════════════════════════════════════════════
+# 落盘列（★ 全量: 收到的、下发的、估计出来的全部保存）
+#
+# 前置 12 列沿用旧名，保证老数据与老辨识器继续可用。**注意两个历史列的含义**:
+#   `theta_big`  = 大 yaw **电机侧**角度（MCU 编码器 + 延时补偿）—— 旧语义，未变
+#   `dtheta_big` = 大 yaw **云台侧**角速度（IMU 陀螺投影）—— 旧语义，**与 theta_big 不同源**
+#   （这正是背隙问题的根源；新代码请用下面显式的 `*_motor` / `*_platform` 四列）
+# ════════════════════════════════════════════════════════════════════════════
+CSV_HEADER = [
+    # ── 前置列（旧名; 前 10 列与 docs/sysid_data.md §2 逐字一致）──
+    "t", "theta_big", "theta_small", "dtheta_big", "dtheta_small",
+    "tau_big", "tau_small", "axis", "held_target", "mcu2_seq",
+    "gravity_ax", "gravity_ay",
+    # ── ★ 大 yaw 电机侧 / 云台侧 显式分离（背隙标定的核心列）──
+    "theta_big_motor", "dtheta_big_motor",
+    "theta_big_platform", "dtheta_big_platform",
+    "theta_big_motor_meas",
+    # ── 估计器其余输出与诊断（只记录，拟合不用）──
+    "platform_azimuth", "platform_rate",
+    "small_joint_angle_est", "small_joint_rate_est",
+    "pitch_joint_angle", "pitch_joint_rate", "pitch_acc",
+    "chassis_azimuth", "chassis_yaw_rate",
+    "big_enc_age", "big_sample_interval", "big_enc_innovation", "chassis_imu_age",
+    "gravity_a_x", "gravity_a_y", "gravity_a_z",
+    "base_omega_x", "base_omega_y", "base_omega_z",
+    "los_azimuth", "los_elevation",
+    # ── MCU 反馈（已按 LinearParams 映射；原始值 = 反解映射常量）──
+    "mcu_bullet_velocity", "mcu_pitch_angle",
+    "mcu_yaw_big_angle", "mcu_yaw_big_omega",
+    "mcu_yaw_small_angle", "mcu_yaw_small_omega",
+    "mcu_chassis_imu_yaw", "mcu_chassis_imu_omega",
+    "mcu_mark", "mcu_color", "mcu_auto_aim_switch",
+    "mcu_temp_big", "mcu_temp_small",
+    # ── IMU 反馈（原始值，未滤波）──
+    "imu_gx", "imu_gy", "imu_gz", "imu_ax", "imu_ay", "imu_az",
+    "imu_euler_yaw", "imu_euler_pitch", "imu_euler_roll", "imu_dt_one_tenth_ms",
+    # ── 下发（本拍实际发出的值; 力矩 N·m / 关节角 rad）──
+    "tx_auto_aim_enable", "tx_fire", "tx_pitch_target_angle",
+    "tx_yaw_big_mode", "tx_yaw_big_target_angle", "tx_yaw_big_target_velocity",
+    "tx_yaw_big_torque",
+    "tx_yaw_small_mode", "tx_yaw_small_target_angle", "tx_yaw_small_target_velocity",
+    "tx_yaw_small_torque",
+    # ── 参考（本拍目标的参考序列值）与有效位 ──
+    "target_big", "target_small",
+    "est_valid", "mcu_valid", "imu_valid",
+    # ── ★ 背隙中心 β（死区中心）──
+    #   `backlash_center`    = **运行期**估计器的在线值（滑动 min/max；实机 = est.backlash_center，
+    #                          dry-run 里用同一套规则在 SimRobotLink 内复算）
+    #                          ⇒ 3-DOF 辨识用它当**逐样本外生量**（与 MPC 运行期一致）
+    #   `backlash_beta_true` = 仿真环境的**真值 β**（仅 dry-run 非 0；实机恒 0 = 未知）
+    "backlash_center", "backlash_beta_true",
+    # ── ★ 仿真**真值状态**（仅 dry-run 非 0；实机恒 0 = 未知）──
+    #   用途: ① 量化"电机侧延时补偿估计"的误差（直接对比 theta_big_motor）；
+    #         ② 辨识的**上限对照**（`--state-mode=true`: 用真值当初值与拟合目标，
+    #            把"模型误差"和"状态估计误差"分开）。
+    "theta_true_motor", "theta_true_platform", "theta_true_small",
+    "dtheta_true_motor", "dtheta_true_platform", "dtheta_true_small"]
+
+# 由链路 ``read()`` 提供的列（其余列在 make_row 里按控制步填）
+_SAMPLE_FIELDS = (
+    "platform_azimuth", "platform_rate",
+    "big_joint_angle", "big_joint_rate", "big_joint_angle_meas",
+    "theta_big_motor", "dtheta_big_motor", "theta_big_platform", "dtheta_big_platform",
+    "big_enc_age", "big_sample_interval", "big_enc_innovation",
+    "small_joint_angle", "small_joint_rate",
+    "pitch_joint_angle", "pitch_joint_rate", "pitch_acc",
+    "chassis_yaw", "chassis_omega", "chassis_imu_age",
+    "gravity_ax", "gravity_ay", "gravity_az",
+    "base_omega_x", "base_omega_y", "base_omega_z",
+    "los_azimuth", "los_elevation",
+    "mcu_bullet_velocity", "mcu_pitch_angle",
+    "mcu_yaw_big_angle", "mcu_yaw_big_omega",
+    "mcu_yaw_small_angle", "mcu_yaw_small_omega",
+    "mcu_chassis_imu_yaw", "mcu_chassis_imu_omega",
+    "mcu_mark", "mcu_color", "mcu_auto_aim_switch",
+    "mcu_temp_big", "mcu_temp_small", "mcu2_seq",
+    "backlash_center", "backlash_beta_true",
+    "theta_true_motor", "theta_true_platform", "theta_true_small",
+    "dtheta_true_motor", "dtheta_true_platform", "dtheta_true_small",
+    "imu_gx", "imu_gy", "imu_gz", "imu_ax", "imu_ay", "imu_az",
+    "imu_euler_yaw", "imu_euler_pitch", "imu_euler_roll", "imu_dt_one_tenth_ms",
+    "est_valid", "mcu_valid", "imu_valid")
 
 # ── dry-run 仿真参数（与 mpc/planar_yaw_model.h 的 ModelParams 默认值一致）──
 SIM_INT_STEP = 5e-5          # 0.05 ms 积分步长（RK4 稳定: 摩擦模态时间常数 ~2 ms ≫ 0.05 ms）
 SIM_FRICTION_LAMBDA = 100.0  # ★ 大 λ: 模拟真实库仑摩擦（tanh 软符号很陡）
-SIM_CHASSIS_AZIMUTH = 0.0    # 仿真里底盘静止（底盘数据只记录、不参与拟合）
+SIM_CHASSIS_AZIMUTH = 0.0    # 仿真里底盘的初始方位角（底盘数据只记录、不参与拟合）
+# ★ 底盘 IMU 也在这条链路上（与大 yaw 编码器同一包、同一序号、同样延迟 + 值保持），
+#   所以它的方位角/角速度也从"被保持的样本"里取（见 SimRobotLink）；采集规范要求底盘静止
+#   （倾斜 ≠ 底盘运动），因此这里没有底盘运动学，只有链路语义。
 SIM_TRANSPORT_DELAY = 0.015  # 链路传输时延（s），与估计器默认 transport_delay_s 一致
+# ── ★ 仿真环境 2（--sim-rigid）: "接触完全刚性 + 死区完全自由 + β 随机/漂移" ──
+SIM_BETA_RANDOM_FRAC = 0.30   # 每条数据的 β0 在 ±0.30·δ 内随机
+SIM_BETA_DRIFT_FRAC = 0.05    # 漂移幅值 = 0.05·δ
+SIM_BETA_DRIFT_PERIOD = 30.0  # 漂移周期 (s)
+SIM_BETA_TAU_S = 3.0          # β 在线估计的遗忘时间常数（= 估计器默认 backlash_center_tau_s）
 SIM_ENC_NOISE = 2e-5         # 编码器噪声标准差（rad），仅让 PID 微分项有真实感
 
 
@@ -601,7 +689,7 @@ def fit_into_band(seq: np.ndarray, limit: float) -> np.ndarray:
 def fit_into_interval(seq: np.ndarray, lo: float, hi: float):
     """**整体等比缩放 + 平移**，把 ``seq`` 放进非对称区间 ``[lo, hi]``（保形状、绝不截断）。
 
-    为什么不是 ``fit_into_band`` 那种"绕 0 缩放": 小 yaw 行程可能是**非对称**区间（例如 −25° … +20°），
+    为什么不是 ``fit_into_band`` 那种"绕 0 缩放": 小 yaw 行程可能是**非对称**区间（例如 −20° … +25°），
     绕 0 缩放会把轨迹推向一侧、白吃余量。这里:
       1) 先按区间**宽度**统一等比缩放（形状不变）: ``k = min(1, (hi−lo)/峰峰值)``；
       2) 再把缩放后序列的**中点平移到区间中点**（此时必定落在区间内，因为峰峰值 ≤ 宽度）；
@@ -676,12 +764,7 @@ class RobotSample:
     """一次读数。两种链路（真实/仿真）的 ``read()`` 返回同一种对象，
     采集逻辑因此与硬件完全解耦 —— dry-run 与实机走同一条代码路径。"""
 
-    __slots__ = ("platform_azimuth", "big_joint_angle", "big_joint_rate",
-                 "small_joint_angle", "small_joint_rate", "chassis_yaw",
-                 "chassis_omega", "big_enc_age", "mcu2_seq", "temp_big",
-                 "temp_small", "est_valid", "mcu_valid",
-                 # 重力在 A 系的平面分量（m/s²）；水平静置 ≈ 0；倾斜静置时 ≠ 0
-                 "gravity_ax", "gravity_ay")
+    __slots__ = _SAMPLE_FIELDS
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -708,37 +791,28 @@ class SegmentPlan:
     src_scale: float = 0.0    # 随机缩放系数
 
 
-@dataclass
 class SegmentRecord:
     """一段采集的落盘数据（各列等长，长度 = 段点数）。"""
 
-    t: list = field(default_factory=list)
-    theta_big: list = field(default_factory=list)
-    theta_small: list = field(default_factory=list)
-    dtheta_big: list = field(default_factory=list)
-    dtheta_small: list = field(default_factory=list)
-    tau_big: list = field(default_factory=list)
-    tau_small: list = field(default_factory=list)
-    axis: list = field(default_factory=list)
-    held_target: list = field(default_factory=list)
-    mcu2_seq: list = field(default_factory=list)
-    # ── 只进 npz（用户: "可以记录但拟合不用"）──
-    chassis_yaw: list = field(default_factory=list)
-    chassis_omega: list = field(default_factory=list)
-    big_enc_age: list = field(default_factory=list)
-    # ── 重力平面分量（m/s²）: 逐样本记录；倾斜静置时 ≠ 0，下游据此启用重力项 ──
-    gravity_ax: list = field(default_factory=list)
-    gravity_ay: list = field(default_factory=list)
-    # ── 参考序列（便于复核/画图；拟合不需要）──
-    target_big: list = field(default_factory=list)
-    target_small: list = field(default_factory=list)
+    def __init__(self):
+        # 按列名存列表（列集 = CSV_HEADER）⇒ 新增记录列不用改这个类
+        self.cols: dict = {name: [] for name in CSV_HEADER}
 
     def append(self, row: dict) -> None:
+        for key in row:
+            if key not in self.cols:
+                raise KeyError(f"未知记录列 {key!r}（请加进 collect_sysid.CSV_HEADER）")
+        miss = [k for k in self.cols if k not in row]
+        if miss:
+            raise KeyError(f"本拍缺少这些记录列: {miss}（make_row 里没填）")
         for key, value in row.items():
-            getattr(self, key).append(value)
+            self.cols[key].append(value)
+
+    def col(self, name: str) -> list:
+        return self.cols[name]
 
     def __len__(self) -> int:
-        return len(self.t)
+        return len(self.cols["t"])
 
 
 # ============================================================================
@@ -804,6 +878,10 @@ class HwRobotLink:
         self.comm = TcbsRobotCommunication()
         self.tx_fail = 0
 
+    def begin_segment(self, index: int = 0) -> None:
+        """实机没有"每段随机 β"这件事（β 由估计器在线给）⇒ 空操作。"""
+        pass
+
     def wait_ready(self, timeout_s: float = 10.0) -> bool:
         t0 = time.perf_counter()
         while time.perf_counter() - t0 < timeout_s:
@@ -814,30 +892,83 @@ class HwRobotLink:
         return False
 
     def read(self) -> RobotSample:
+        """读一帧，**把收到的所有量都填进 RobotSample**（由 make_row 全部落盘）。
+
+        大 yaw 的三个角度在这里被显式分开:
+          * ``theta_big_motor``    = 电机侧（MCU 编码器 + 延时补偿）—— 控制/辨识的"电机角"
+          * ``theta_big_motor_meas`` = 同上但**未做延时补偿**（原始滞后测量）
+          * ``theta_big_platform`` = 云台侧（IMU 反解）: θ_p = platform_azimuth − chassis_azimuth
+        两者之差就是传动形变 Δ（背隙建模要用的量）。
+        """
         data = self.comm.get_latest_data()
         est = self.comm.get_estimate()
+        imu = data.imu
         mcu = data.mcu
         gx, gy = _gravity_a_plane(est)
+        # 云台侧关节角 = 平台世界方位角 − 底盘方位角（两者都是解卷绕后的连续量）
+        big_platform = float(est.platform_azimuth) - float(est.chassis_azimuth)
+        big_motor = float(est.big_joint_angle)
+        # 云台侧角速度: 估计器的 platform_rate 就是"相对底盘的关节角速度"（IMU 陀螺投影）
+        big_platform_rate = float(est.platform_rate)
+        bw = est.base_omega
+        ga = est.gravity_a
         return RobotSample(
-            # 反馈: 大 yaw 用 IMU 直测平台世界方位角（实时、无延迟、多圈解卷绕）
+            # ── 大 yaw: 电机侧 / 云台侧 显式分离 ──
+            big_joint_angle=big_motor,                        # 兼容旧语义
+            big_joint_angle_meas=float(est.big_joint_angle_meas),
+            big_joint_rate=big_platform_rate,                 # 兼容旧语义（= 云台侧）
+            theta_big_motor=big_motor,
+            dtheta_big_motor=float(mcu.yaw_big_omega),        # 电机侧角速度来自 MCU 编码器
+            theta_big_platform=big_platform,
+            dtheta_big_platform=big_platform_rate,
+            # ── 平台/关节角度与角速度（估计器输出）──
             platform_azimuth=float(est.platform_azimuth),
-            # 记录用: 大 yaw **延迟补偿后的关节角** + 角速度估计
-            big_joint_angle=float(est.big_joint_angle),
-            big_joint_rate=float(est.big_joint_rate),
-            # 反馈: 小 yaw 编码器（实时可信）
+            platform_rate=float(est.platform_rate),
             small_joint_angle=float(est.small_joint_angle),
             small_joint_rate=float(est.small_joint_rate),
-            # 底盘数据（只记录，不参与拟合）
+            small_joint_angle_est=float(est.small_joint_angle),
+            small_joint_rate_est=float(est.small_joint_rate),
+            pitch_joint_angle=float(est.pitch_joint_angle),
+            pitch_joint_rate=float(est.pitch_joint_rate),
+            pitch_acc=float(est.pitch_acc),
             chassis_yaw=float(est.chassis_azimuth),
             chassis_omega=float(est.chassis_yaw_rate),
+            chassis_azimuth=float(est.chassis_azimuth),
+            chassis_yaw_rate=float(est.chassis_yaw_rate),
+            # ── 链路诊断（值年龄/间隔/新样本统计）──
             big_enc_age=float(est.big_enc_age),
+            big_sample_interval=float(est.big_sample_interval),
+            big_enc_innovation=float(est.big_enc_innovation),
+            chassis_imu_age=float(est.chassis_imu_age),
+            # ── 模型外生量 ──
+            gravity_ax=gx, gravity_ay=gy, gravity_az=float(ga[2]),
+            base_omega_x=float(bw[0]), base_omega_y=float(bw[1]), base_omega_z=float(bw[2]),
+            # ★ 背隙中心: 实机直接用估计器的**在线**值（真值未知 ⇒ 恒 0）
+            backlash_center=float(est.backlash_center), backlash_beta_true=0.0,
+            los_azimuth=float(est.los_azimuth), los_elevation=float(est.los_elevation),
+            # ── MCU 反馈（全部字段；已按 LinearParams 映射）──
+            mcu_bullet_velocity=float(mcu.bullet_velocity),
+            mcu_pitch_angle=float(mcu.pitch_angle),
+            mcu_yaw_big_angle=float(mcu.yaw_big_angle),
+            mcu_yaw_big_omega=float(mcu.yaw_big_omega),
+            mcu_yaw_small_angle=float(mcu.yaw_small_angle),
+            mcu_yaw_small_omega=float(mcu.yaw_small_omega),
+            mcu_chassis_imu_yaw=float(mcu.chassis_imu_yaw),
+            mcu_chassis_imu_omega=float(mcu.chassis_imu_omega),
+            mcu_mark=int(mcu.mark), mcu_color=int(mcu.color),
+            mcu_auto_aim_switch=int(mcu.auto_aim_switch),
+            mcu_temp_big=int(mcu.yaw_big_temperature),
+            mcu_temp_small=int(mcu.yaw_small_temperature),
             mcu2_seq=int(mcu.mcu2_seq),
-            temp_big=int(mcu.yaw_big_temperature),
-            temp_small=int(mcu.yaw_small_temperature),
-            est_valid=int(est.valid),
-            mcu_valid=int(mcu.valid),
-            # 重力在 A 系的平面分量（水平静置 ≈ 0；倾斜静置 ≠ 0）
-            gravity_ax=gx, gravity_ay=gy)
+            # ── IMU 反馈（原始 6 轴 + 欧拉 + 帧间隔）──
+            imu_gx=float(imu.gx), imu_gy=float(imu.gy), imu_gz=float(imu.gz),
+            imu_ax=float(imu.ax), imu_ay=float(imu.ay), imu_az=float(imu.az),
+            imu_euler_yaw=float(imu.euler_yaw),
+            imu_euler_pitch=float(imu.euler_pitch),
+            imu_euler_roll=float(imu.euler_roll),
+            imu_dt_one_tenth_ms=int(imu.dt_one_tenth_ms),
+            # ── 有效位 ──
+            est_valid=int(est.valid), mcu_valid=int(mcu.valid), imu_valid=int(imu.valid))
 
     def send(self, tau_big, tau_small, big_joint_target, small_joint_target) -> bool:
         # 仅力矩模式（yaw_*_mode = 0）: 电控直接施加 yaw_*_torque。
@@ -901,9 +1032,23 @@ class PlanarYawPlant:
             tau_offset_big=0.0, tau_offset_small=0.0)
         p.update(overrides)
         self.p = p
+        # ★ 背隙参数（默认 = C++ defaultModelParams() 同一组）:
+        #   τ_t = k·[dz(Δ) + γ·Δ] + c·Δ̇,  Δ = θ_motor − θ_platform（仿真里 β=0）
+        p.setdefault("backlash_delta", 0.0873)
+        p.setdefault("backlash_k", 200.0)
+        p.setdefault("backlash_c", 2.0)
+        p.setdefault("backlash_through", 0.002)
+        p.setdefault("backlash_smooth_eps", 1.0e-4)
+        p.setdefault("Jmotor", 0.006)
+        p.setdefault("fcMotor", 0.030)
+        p.setdefault("fvMotor", 0.010)
+        p.setdefault("tau_offset_motor", 0.0)
+        # 刚性环境的"每条数据随机 β"幅度（占 δ 的比例）；平滑环境不用
+        p.setdefault("beta_random_frac", 0.0)
         self.int_step = float(int_step)
-        self.q = [0.0, 0.0]        # [θ_big, θ_small]
-        self.qd = [0.0, 0.0]
+        # ★ 3-DOF: [θ_motor, θ_platform, θ_small]
+        self.q = [0.0, 0.0, 0.0]
+        self.qd = [0.0, 0.0, 0.0]
         # 外生量 (g_x, g_y, ω_c, α_c)。默认底盘**水平静止** ⇒ 重力平面分量为 0、
         # 底盘角速度/角加速度为 0。两种给重力的方式（这**不是**底盘运动，只是静置姿态不同，
         # base_omega/base_alpha 仍为 0）:
@@ -931,54 +1076,316 @@ class PlanarYawPlant:
     def _fric(self, w, fc, fv):
         return fc * math.tanh(self.p["frictionLambda"] * w) + fv * w
 
+    def _backlash_torque(self, D, Dd):
+        """τ_t = k·[dz(Δ) + γ·Δ] + c·Δ̇（dz 与 C++ 的平滑死区同式）"""
+        p = self.p
+        h = 0.5 * p["backlash_delta"]
+        eps = p["backlash_smooth_eps"]
+
+        def relu(x):
+            return 0.5 * (x + math.sqrt(x * x + eps * eps))
+
+        return (p["backlash_k"] * (relu(D - h) - relu(-D - h) + p["backlash_through"] * D)
+                + p["backlash_c"] * Dd)
+
     def _h(self, q, qd):
+        """云台+小 yaw 子块（与 C++ `eomBacklash` 内 `eom(qb, qdb, ...)` 同式）。
+
+        ★ 3-DOF 下 q/qd 是 (电机, 云台, 小 yaw) ⇒ 子块的自变量是
+        ``q_b = q[1]``（云台角）、``qd_b = (qd[1], qd[2])``（云台/小 yaw 角速度）。
+        （早期版本误写成 ``qd[0], qd[1]``——把**电机**角速度当成了云台角速度，
+         相当于给云台行了电机摩擦/耦合项，必须用 `_accel` 与 C++ 对照才能发现。）
+        """
         p = self.p
         Qx, Qy, M11, M12, mu = self._derived(q[1])
         gx, gy, wc, ac = self.exo
         Gs = Qx * gy - Qy * gx
         Gb = p["m_u_known"] * (p["dx"] * gy - p["dy"] * gx) + Gs
-        tb, ts = qd[0], qd[1]
+        tb, ts = qd[1], qd[2]          # ★ 云台 / 小 yaw 角速度（不是电机/云台）
         h0 = (mu * tb * ts + 0.5 * mu * ts * ts - Gb + mu * ts * wc + M11 * ac
               + self._fric(tb, p["fcBig"], p["fvBig"]) + p["tau_offset_big"])
         h1 = (-0.5 * mu * tb * tb - Gs - mu * tb * wc - 0.5 * mu * wc * wc + M12 * ac
               + self._fric(ts, p["fcSmall"], p["fvSmall"]) + p["tau_offset_small"])
         return M11, M12, h0, h1
 
-    def _accel(self, q, qd, tau):
+    def _accel(self, q, qd, u):
+        """3-DOF: u = (τ_cmd_motor, 0, τ_small)。电机行与云台行只通过 τ_t 耦合。"""
+        p = self.p
         M11, M12, h0, h1 = self._h(q, qd)
-        M22 = self.p["Js"]
+        tt = self._backlash_torque(q[0] - q[1], qd[0] - qd[1])
+        hM = tt + self._fric(qd[0], p["fcMotor"], p["fvMotor"]) + p["tau_offset_motor"]
+        hp = h0 - tt
+        M22 = p["Js"]
         det = M11 * M22 - M12 * M12
-        if abs(det) <= 1e-12:
-            return 0.0, 0.0
+        if abs(det) <= 1e-12 or abs(p["Jmotor"]) <= 1e-12:
+            return 0.0, 0.0, 0.0
         inv = 1.0 / det
-        r0 = tau[0] - h0
-        r1 = tau[1] - h1
-        return ((M22 * r0 - M12 * r1) * inv, (-M12 * r0 + M11 * r1) * inv)
+        r1 = u[1] - hp
+        r2 = u[2] - h1
+        return ((u[0] - hM) / p["Jmotor"],
+                (M22 * r1 - M12 * r2) * inv,
+                (-M12 * r1 + M11 * r2) * inv)
 
-    def _rk4(self, hh, tau):
+    def _rk4(self, hh, u):
         q, qd = self.q, self.qd
-        k1 = self._accel(q, qd, tau)
-        q2 = [q[0] + 0.5 * hh * qd[0], q[1] + 0.5 * hh * qd[1]]
-        qd2 = [qd[0] + 0.5 * hh * k1[0], qd[1] + 0.5 * hh * k1[1]]
-        k2 = self._accel(q2, qd2, tau)
-        q3 = [q[0] + 0.5 * hh * qd2[0], q[1] + 0.5 * hh * qd2[1]]
-        qd3 = [qd[0] + 0.5 * hh * k2[0], qd[1] + 0.5 * hh * k2[1]]
-        k3 = self._accel(q3, qd3, tau)
-        q4 = [q[0] + hh * qd3[0], q[1] + hh * qd3[1]]
-        qd4 = [qd[0] + hh * k3[0], qd[1] + hh * k3[1]]
-        k4 = self._accel(q4, qd4, tau)
+        k1 = self._accel(q, qd, u)
+        q2 = [q[i] + 0.5 * hh * qd[i] for i in range(3)]
+        qd2 = [qd[i] + 0.5 * hh * k1[i] for i in range(3)]
+        k2 = self._accel(q2, qd2, u)
+        q3 = [q[i] + 0.5 * hh * qd2[i] for i in range(3)]
+        qd3 = [qd[i] + 0.5 * hh * k2[i] for i in range(3)]
+        k3 = self._accel(q3, qd3, u)
+        q4 = [q[i] + hh * qd3[i] for i in range(3)]
+        qd4 = [qd[i] + hh * k3[i] for i in range(3)]
+        k4 = self._accel(q4, qd4, u)
         h6 = hh / 6.0
-        self.q = [q[0] + h6 * (qd[0] + 2.0 * qd2[0] + 2.0 * qd3[0] + qd4[0]),
-                  q[1] + h6 * (qd[1] + 2.0 * qd2[1] + 2.0 * qd3[1] + qd4[1])]
-        self.qd = [qd[0] + h6 * (k1[0] + 2.0 * k2[0] + 2.0 * k3[0] + k4[0]),
-                   qd[1] + h6 * (k1[1] + 2.0 * k2[1] + 2.0 * k3[1] + k4[1])]
+        self.q = [q[i] + h6 * (qd[i] + 2.0 * qd2[i] + 2.0 * qd3[i] + qd4[i]) for i in range(3)]
+        self.qd = [qd[i] + h6 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]) for i in range(3)]
 
     def step(self, tau, dt: float) -> None:
-        """积分一个控制周期（力矩零阶保持），内部按 int_step 细分（默认 0.05 ms）。"""
+        """积分一个控制周期（力矩零阶保持）；``tau`` = (τ_big, τ_small)。
+
+        3-DOF: τ_big 作用在**电机**（q[0]），经背隙传到云台（q[1]）；小 yaw 直接驱动。
+        """
+        u = (float(tau[0]), 0.0, float(tau[1]))
         n = max(1, int(round(dt / self.int_step)))
         hh = dt / float(n)
         for _ in range(n):
-            self._rk4(hh, tau)
+            self._rk4(hh, u)
+
+
+# ============================================================================
+# ★ 仿真环境 2: 背隙"完全刚性 + 中间完全自由"（**仅用于采集测试数据**）
+# ============================================================================
+class RigidBacklashPlant(PlanarYawPlant):
+    """背隙**接触面完全刚性**、死区内**完全自由**、且 β 随机 + 微弱漂移的仿真环境。
+
+    与 ``PlanarYawPlant``（平滑死区 + 弹簧接触，`τ_t = k[dz(Δ)+γΔ] + cΔ̇`）的区别 —— 这里
+    **没有 k/c/γ**，背隙是纯几何间隙 + 单向刚性约束:
+
+      · **死区内完全自由**（|Δ_raw − β| < δ/2，Δ_raw = θ_motor − θ_platform）: ``τ_t ≡ 0``，
+        电机与云台互不传力（连阻尼都没有）；
+      · **接触后完全刚性**（Δ_raw − β = ±δ/2）: 电机与云台被**刚性锁定**（相对角、相对角速度
+        都恒为常数/0），动力学退化成"电机+云台合并惯量"的 2-DOF 系统
+        （``M11 ← M11 + Jmotor``、``h_b ← h_b + 电机摩擦``），接触力矩由电机行反解:
+        ``τ_t = τ_cmd − h_motor − Jmotor·θ̈``；
+      · **约束单向**: 若反解出的 ``τ_t`` 与接触侧符号相反（说明需要"拉"而不是"推"）⇒ 约束释放，
+        回到自由段；
+      · **撞击 = 完全非弹性冲击**: 自由段撞到边界时，用广义动量守恒 + 冲击后相对速度 = 0
+        求解冲击（等价于沿约束方向施加脉冲），然后转入刚性锁定；
+      · ★ **β 每条数据随机、并随时间微弱漂移**: ``β(t) = β0 + A·sin(2πt/T)``，
+        ``β0 ~ U(−f_rand·δ, +f_rand·δ)``（每条数据重新抽），``A = f_drift·δ``。
+        β 在**每个控制周期内视为常数**（漂移率 ≲1e-3 rad/s，10 ms 内的变化 <1e-5 rad，
+        远小于 δ），这样边界不随时间瞬变、事件检测简单且准确。
+
+    为什么要有这个环境（用户要求）: 它把"背隙建模"逼到**最不利**的情形 ——
+      · 死区内零刚度 ⇒ 损失对 δ/k/c 的梯度在死区内**几乎为零**（这正是模型里 γ 的用武之地）；
+      · 接触完全刚性 ⇒ 真实 k = ∞，而模型只能用有限 k 去近似（`k·δ/2 ≫ τ_max` 时才"看起来刚性"）；
+      · β 每条数据随机 + 漂移 ⇒ **单个全局 β 不可能对**，必须靠估计器的在线值（`backlash_center`），
+        离线拟合只能拟合 δ/k/c/γ/电机侧那部分。
+
+    接口与 ``PlanarYawPlant`` 完全一致（``q``/``qd``/``exo``/``step``/``new_segment``）。
+    """
+
+    def __init__(self, int_step: float = SIM_INT_STEP, tilt_deg: float = 0.0,
+                 gravity_a=None, beta0: float = 0.0, beta_drift: float = 0.0,
+                 beta_period: float = 30.0, **overrides):
+        super().__init__(int_step=int_step, tilt_deg=tilt_deg, gravity_a=gravity_a,
+                         **overrides)
+        # 这个环境里 k/c/γ 无效（保留字段只为与 PlanarYawPlant 同接口/元数据）
+        self.rigid = True
+        self.t = 0.0                      # 仿真时间（β 漂移用）
+        self.beta0 = float(beta0)
+        self.beta_drift = float(beta_drift)      # 漂移幅值 A
+        self.beta_period = max(1e-3, float(beta_period))
+        self.beta = self._beta(0.0)              # 当前控制周期内保持常数
+        self.contact = 0                          # 0 = 自由(死区内), +1/-1 = 贴在一侧
+        self.n_impact = 0
+        self.n_release = 0
+
+    # ── β(t) 与接触半宽 ──
+    def _beta(self, t: float) -> float:
+        if self.beta_drift <= 0.0:
+            return self.beta0
+        return self.beta0 + self.beta_drift * math.sin(TWO_PI * t / self.beta_period)
+
+    def _half(self) -> float:
+        return 0.5 * self.p["backlash_delta"]
+
+    def new_segment(self, rng, index: int = 0) -> None:
+        """每条数据开始时重新抽 β0（用户要求: 背隙中心位置**每条数据随机**）。"""
+        frac = float(self.p.get("beta_random_frac", 0.0))
+        self.beta0 = (float(rng.uniform(-frac, frac)) * self.p["backlash_delta"]
+                      if frac > 0.0 else self.beta0)
+        self.t = 0.0
+        self.beta = self._beta(0.0)
+        # 抽完 β0 后把状态放到死区内（否则可能一上来就"穿模"）
+        d = self.q[0] - self.q[1] - self.beta
+        h = self._half()
+        if abs(d) > h:
+            self.q[1] = self.q[0] - self.beta
+            self.contact = 0
+
+    # ── 两种模式的加速度 ──
+    def _open_accel(self, q, qd, u):
+        """自由段: τ_t ≡ 0（死区内完全自由，连阻尼都没有）。"""
+        p = self.p
+        M11, M12, h0, h1 = self._h(q, qd)
+        hM = self._fric(qd[0], p["fcMotor"], p["fvMotor"]) + p["tau_offset_motor"]
+        det = M11 * p["Js"] - M12 * M12
+        if abs(det) <= 1e-12 or abs(p["Jmotor"]) <= 1e-12:
+            return 0.0, 0.0, 0.0
+        r1 = u[1] - h0
+        r2 = u[2] - h1
+        return ((u[0] - hM) / p["Jmotor"],
+                (p["Js"] * r1 - M12 * r2) / det,
+                (-M12 * r1 + M11 * r2) / det)
+
+    def _closed_accel(self, q, qd, u):
+        """刚性锁定段: Δ_raw ≡ β + s·h（⇒ θ̈_motor = θ̈_platform），电机与云台合并。
+
+        返回 ``(θ̈_common, θ̈_small, τ_t)``；``τ_t`` 是维持该约束所需的接触力矩（电机行反解）。
+        """
+        p = self.p
+        M11, M12, h0, h1 = self._h(q, qd)
+        hM = self._fric(qd[0], p["fcMotor"], p["fvMotor"]) + p["tau_offset_motor"]
+        M11c = M11 + p["Jmotor"]
+        h0c = h0 + hM
+        det = M11c * p["Js"] - M12 * M12
+        if abs(det) <= 1e-12:
+            return 0.0, 0.0, 0.0
+        r1 = u[0] - h0c
+        r2 = u[2] - h1
+        qdd = (p["Js"] * r1 - M12 * r2) / det
+        qdds = (-M12 * r1 + M11c * r2) / det
+        tt = u[0] - hM - p["Jmotor"] * qdd     # 电机行反解 ⇒ 约束力
+        return qdd, qdds, tt
+
+    def _rk4_open(self, hh, u, q0, qd0):
+        k1 = self._open_accel(q0, qd0, u)
+        q2 = [q0[i] + 0.5 * hh * qd0[i] for i in range(3)]
+        qd2 = [qd0[i] + 0.5 * hh * k1[i] for i in range(3)]
+        k2 = self._open_accel(q2, qd2, u)
+        q3 = [q0[i] + 0.5 * hh * qd2[i] for i in range(3)]
+        qd3 = [qd0[i] + 0.5 * hh * k2[i] for i in range(3)]
+        k3 = self._open_accel(q3, qd3, u)
+        q4 = [q0[i] + hh * qd3[i] for i in range(3)]
+        qd4 = [qd0[i] + hh * k3[i] for i in range(3)]
+        k4 = self._open_accel(q4, qd4, u)
+        h6 = hh / 6.0
+        qn = [q0[i] + h6 * (qd0[i] + 2.0 * qd2[i] + 2.0 * qd3[i] + qd4[i]) for i in range(3)]
+        qdn = [qd0[i] + h6 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]) for i in range(3)]
+        return qn, qdn
+
+    def _impact(self, s: int) -> None:
+        """完全非弹性冲击: 沿约束方向 (1,−1,0) 施加脉冲，使冲击后 Δ̇ = 0（广义动量守恒）。"""
+        p = self.p
+        q, qd = self.q, self.qd
+        M11, M12, _h0, _h1 = self._h(q, qd)
+        Js = p["Js"]
+        det = M11 * Js - M12 * M12
+        inv_bb = Js / det
+        inv_sb = -M12 / det
+        jmj = 1.0 / p["Jmotor"] + inv_bb
+        lam = -(qd[0] - qd[1]) / jmj
+        qd[0] += lam / p["Jmotor"]
+        qd[1] += -inv_bb * lam
+        qd[2] += -inv_sb * lam
+        qd[1] = qd[0]                       # 数值上强制相对速度 = 0
+        # 位置夹到接触面（消除插值残差）
+        q[1] = q[0] - self.beta - s * self._half()
+        self.contact = s
+        self.n_impact += 1
+
+    def _free_advance(self, hh, u) -> float:
+        """自由段推进 ``hh``；若中途撞到边界则只走到边界 + 冲击 + 转闭锁。
+
+        返回**尚未使用**的时间（用于让调用方把剩下的一小段按新接触状态走完）。
+        """
+        q, qd = self.q, self.qd
+        h = self._half()
+        qn, qdn = self._rk4_open(hh, u, q, qd)
+        d_new = qn[0] - qn[1] - self.beta
+        if abs(d_new) <= h:
+            self.q, self.qd = qn, qdn
+            return 0.0
+        # 二分定位穿越时刻（始终从本步起点积分 ⇒ 状态可复现）
+        lo, hi = 0.0, hh
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            qm, qdm = self._rk4_open(mid, u, q, qd)
+            if abs(qm[0] - qm[1] - self.beta) <= h:
+                lo = mid
+            else:
+                hi = mid
+        qs, qds = self._rk4_open(lo, u, q, qd)
+        self.q, self.qd = qs, qds
+        s = 1 if (self.q[0] - self.q[1] - self.beta) > 0.0 else -1
+        self._impact(s)
+        return hh - lo
+
+    def _closed_advance(self, hh, u) -> bool:
+        """刚性锁定推进 ``hh``。返回 False = 约束释放（本步转为自由段，调用方重跑）。"""
+        p = self.p
+        q, qd = self.q, self.qd
+        s = self.contact
+        # 先判约束是否还需要（贴 +侧需要把电机往回推 ⇒ τ_t > 0）
+        _a, _b, tt = self._closed_accel(q, qd, u)
+        if s * tt <= 0.0:
+            self.contact = 0
+            self.n_release += 1
+            return False
+
+        # 2-DOF 刚性锁定积分: 状态 (θ_平台, θ_小yaw)，θ_电机 = θ_平台（+常数间隙）
+        #   质量阵 [[Jmotor + M11, M12], [M12, Js]]，h_b ← h_b + 电机摩擦（τ_t 变成内力）
+        def acc2(xb, xs, vb, vs):
+            qq = [xb, xb, xs]              # θ_motor = θ_platform（锁定）
+            qdd_ = [vb, vb, vs]
+            Ma, Mb, ha, hb = self._h(qq, qdd_)
+            hm = self._fric(vb, p["fcMotor"], p["fvMotor"]) + p["tau_offset_motor"]
+            A, B, C = Ma + p["Jmotor"], Mb, p["Js"]
+            d = A * C - B * B
+            r1 = u[0] - (ha + hm)
+            r2 = u[2] - hb
+            return (C * r1 - B * r2) / d, (-B * r1 + A * r2) / d
+
+        xb, xs, vb, vs = q[1], q[2], qd[1], qd[2]
+        k1b, k1s = acc2(xb, xs, vb, vs)
+        k2b, k2s = acc2(xb + 0.5 * hh * vb, xs + 0.5 * hh * vs,
+                        vb + 0.5 * hh * k1b, vs + 0.5 * hh * k1s)
+        k3b, k3s = acc2(xb + 0.5 * hh * (vb + 0.5 * hh * k1b),
+                        xs + 0.5 * hh * (vs + 0.5 * hh * k1s),
+                        vb + 0.5 * hh * k2b, vs + 0.5 * hh * k2s)
+        k4b, k4s = acc2(xb + hh * (vb + 0.5 * hh * k2b), xs + hh * (vs + 0.5 * hh * k2s),
+                        vb + hh * k3b, vs + hh * k3s)
+        h6 = hh / 6.0
+        xb_n = xb + h6 * (vb + 2.0 * (vb + 0.5 * hh * k1b) + 2.0 * (vb + 0.5 * hh * k2b)
+                          + (vb + hh * k3b))
+        vb_n = vb + h6 * (k1b + 2.0 * k2b + 2.0 * k3b + k4b)
+        xs_n = xs + h6 * (vs + 2.0 * (vs + 0.5 * hh * k1s) + 2.0 * (vs + 0.5 * hh * k2s)
+                          + (vs + hh * k3s))
+        vs_n = vs + h6 * (k1s + 2.0 * k2s + 2.0 * k3s + k4s)
+        self.q = [xb_n + self.beta + s * self._half(), xb_n, xs_n]
+        self.qd = [vb_n, vb_n, vs_n]
+        return True
+
+    def step(self, tau, dt: float) -> None:
+        u = (float(tau[0]), 0.0, float(tau[1]))
+        n = max(1, int(round(dt / self.int_step)))
+        hh = dt / float(n)
+        self.beta = self._beta(self.t)          # β 在一个控制周期内视为常数（漂移很慢）
+        for _ in range(n):
+            remaining = hh
+            guard = 0
+            while remaining > 1e-12 and guard < 64:
+                guard += 1
+                if self.contact != 0:
+                    if self._closed_advance(remaining, u):
+                        remaining = 0.0
+                    # 释放 ⇒ 不消耗时间，下一轮走自由段
+                else:
+                    remaining = self._free_advance(remaining, u)
+            self.t += hh
 
 
 class SimRobotLink:
@@ -988,22 +1395,78 @@ class SimRobotLink:
       · ``platform_azimuth`` = 真值平台世界方位角（IMU 直测、实时）
       · ``small_joint_angle`` = 真值小 yaw 关节角（编码器，加微小噪声）
       · ``big_joint_angle``   = **延迟补偿**估计 = 最近一次链路新样本值 + 平台角速度×年龄
-      · ``mcu2_seq``/``big_enc_age`` = 模拟 ~10 Hz、间隔不规则、值被保持的 MCU2 链路
-        （年龄从"上位机首次看到该新样本"起算，与估计器语义一致）
+      · ``chassis_azimuth``   = **延迟补偿**后的底盘方位角（与大 yaw 编码器同一包、同一序号）
+      · ``mcu2_seq``/``big_enc_age``/``chassis_imu_age`` = 模拟 ~10 Hz、间隔不规则、
+        值被保持的 MCU2 链路（年龄从"上位机首次看到该新样本"起算，与估计器语义一致）
+    ★ 底盘 IMU **与大 yaw 编码器在同一条 MCU2 链路上**（同一序号、同一刷新时刻、同样被保持）
+      ⇒ 这里也用同一套"延迟 + 值保持"取样，而不是直接给真值。采集规范要求底盘静止，
+      所以链路语义在数值上表现为常数；它对 θ_p = ψ_platform − ψ_chassis 的影响
+      （以及估计器的一阶延时补偿）由 tests/test_yaw_state_estimator.cpp 的 [1]/[3] 场景验证。
     """
 
-    def __init__(self, rng, int_step: float = SIM_INT_STEP, tilt_deg: float = 0.0):
+    def __init__(self, rng, int_step: float = SIM_INT_STEP, tilt_deg: float = 0.0,
+                 rigid: bool = False, beta_random_frac: float = SIM_BETA_RANDOM_FRAC,
+                 beta_drift_frac: float = SIM_BETA_DRIFT_FRAC,
+                 beta_drift_period: float = SIM_BETA_DRIFT_PERIOD):
+        """``rigid=True`` ⇒ 用 **RigidBacklashPlant**（接触完全刚性 + 死区完全自由 +
+        每条数据随机 β + 微弱漂移）替代平滑背隙被控对象，仅用于采集测试数据。"""
         self.rng = rng
-        self.plant = PlanarYawPlant(int_step=int_step, tilt_deg=tilt_deg)
+        self.rigid = bool(rigid)
+        if self.rigid:
+            self.plant = RigidBacklashPlant(
+                int_step=int_step, tilt_deg=tilt_deg,
+                beta_drift=float(beta_drift_frac) * 0.0873,
+                beta_period=float(beta_drift_period),
+                beta_random_frac=float(beta_random_frac))
+        else:
+            self.plant = PlanarYawPlant(int_step=int_step, tilt_deg=tilt_deg)
         self.t = 0.0                 # 仿真时钟（每个控制周期 +DT）
         self.frames = 0              # 已下发的帧数
         self._hist = deque(maxlen=128)
-        self._meas = {"q0": 0.0, "t": 0.0, "seq": 0}
+        self._meas = {"q0": 0.0, "t": 0.0, "seq": 0, "psi_c": SIM_CHASSIS_AZIMUTH, "w_c": 0.0}
         self._since = 1
         self._next = 1               # 首帧即视为一次新样本
+        # ★ 背隙中心 β 的**在线**估计（与 C++ YawStateEstimator 同一套带遗忘滑动 min/max）
+        self._bl_min = 0.0
+        self._bl_max = 0.0
+        self._bl_seen = False
+        self._bl_t = -1.0
+
+    def begin_segment(self, index: int = 0) -> None:
+        """每段开始时调用: 刚性环境重新抽 β0（"每条数据的背隙中心随机"）。
+
+        ★ β 的**在线估计器状态不重置**（只重抽 β0）—— 运行期的估计器是连续跑的，
+        不会每段清零；靠它自己的遗忘（τ=3 s）+ 段前 5 s 到位/稳定过程把新的两侧极值
+        采到，采样开始时已经收敛。第一段会有一次预热，与实机一致。
+        """
+        if self.rigid:
+            self.plant.new_segment(self.rng, index)
 
     def wait_ready(self, timeout_s: float = 10.0) -> bool:
         return True
+
+    def _beta_online(self, draw: float, fresh: bool = True) -> float:
+        """β 的在线估计（= C++ `YawStateEstimator::estimate()` 里那段滑动 min/max）。
+
+        ★ 只在**刚刷新的样本**上更新极值（``fresh``）: `theta_big_motor` 在两次样本之间是
+        按角速度外推的，年龄越大外推误差越大（½α·age²），拿它撑极值会把 Δ 的极差撑开、
+        把 β 中心带偏。C++ 侧同一个门限 (`kBacklashFreshS = 20 ms`)。
+        """
+        if not fresh:
+            return 0.5 * (self._bl_max + self._bl_min)
+        tau = SIM_BETA_TAU_S
+        if not self._bl_seen:
+            self._bl_min = self._bl_max = draw
+            self._bl_seen = True
+            self._bl_t = self.t
+            return 0.5 * (self._bl_max + self._bl_min)
+        dtb = self.t - self._bl_t
+        if dtb > 1e-6:
+            a = 1.0 - math.exp(-dtb / tau)
+            self._bl_min = draw if draw < self._bl_min else self._bl_min + a * (draw - self._bl_min)
+            self._bl_max = draw if draw > self._bl_max else self._bl_max + a * (draw - self._bl_max)
+            self._bl_t = self.t
+        return 0.5 * (self._bl_max + self._bl_min)
 
     def _lookup(self, t_target: float) -> float:
         """取 (t_target − 传输时延) 时刻的真值（模拟链路里的采样时刻）。"""
@@ -1015,25 +1478,73 @@ class SimRobotLink:
                 break
         return float(best)
 
+    def _lookup_rate(self, t_target: float) -> float:
+        """同 ``_lookup``，但取电机侧**角速度**真值（`_hist` 的第三项）。"""
+        best = self._hist[0][2] if self._hist else 0.0
+        for ts, _q0, qd0 in self._hist:
+            if ts <= t_target:
+                best = qd0
+            else:
+                break
+        return float(best)
+
     def read(self) -> RobotSample:
         q, qd = self.plant.q, self.plant.qd
         age = max(0.0, self.t - self._meas["t"])
-        platform_rate = qd[0]
-        # 延迟补偿: 一阶（速度）外推 —— 与 YawStateEstimator 的做法一致
-        big_est = self._meas["q0"] + platform_rate * age
+        psi_c_true, w_c_true = SIM_CHASSIS_AZIMUTH, 0.0     # 底盘静止（采集规范）
+        # ★ 电机侧（q[0]）走 MCU2 链路: 延迟 + 值保持 + 传输时延
+        #   云台侧（q[1]）由"头上 IMU 反解"给出 ⇒ **无延迟、实时**
+        motor_rate = float(self._meas.get("qd0", 0.0))
+        big_est = self._meas["q0"] + motor_rate * age      # 估计器的延时补偿（一阶）
+        # ★ 底盘侧同样走 MCU2 链路（与大 yaw 同一包、同一序号）:
+        #   原始被保持值记进 mcu_chassis_imu_*；估计器输出 = 一阶延时补偿后的底盘方位角
+        #   （补偿用被保持的底盘角速度，与估计器实现一致 ⇒ 真值是一阶准确解）
+        psi_c_held = float(self._meas.get("psi_c", SIM_CHASSIS_AZIMUTH))
+        w_c_held = float(self._meas.get("w_c", 0.0))
+        # ★ 背隙中心 β: 用**在线估计器**（与运行期同一套规则），输入 = Δ_raw = θ_motor − θ_platform
+        # "新鲜样本" = 首次看到该新样本后的 20 ms 内（与 C++ kBacklashFreshS 一致）
+        beta_est = self._beta_online(big_est - q[1], fresh=(age <= 0.02))
+        beta_true = float(self.plant.beta) if self.rigid else 0.0
         return RobotSample(
-            platform_azimuth=q[0] + SIM_CHASSIS_AZIMUTH,
-            big_joint_angle=big_est,
-            big_joint_rate=platform_rate,
-            small_joint_angle=q[1] + float(self.rng.normal(0.0, SIM_ENC_NOISE)),
-            small_joint_rate=qd[1],
-            chassis_yaw=SIM_CHASSIS_AZIMUTH,
-            chassis_omega=0.0,
-            big_enc_age=age,
+            big_joint_angle=big_est, big_joint_angle_meas=float(self._meas["q0"]),
+            big_joint_rate=qd[1],                          # 云台侧（旧语义）
+            theta_big_motor=big_est,
+            dtheta_big_motor=motor_rate * float(self.rng.normal(1.0, 0.01)),
+            theta_big_platform=q[1],                       # ★ 云台侧真值
+            dtheta_big_platform=qd[1],
+            platform_azimuth=q[1] + psi_c_true,            # 平台世界方位角 = 关节角 + 底盘方位角
+            platform_rate=qd[1],
+            small_joint_angle=q[2] + float(self.rng.normal(0.0, SIM_ENC_NOISE)),
+            small_joint_rate=qd[2],
+            small_joint_angle_est=q[2], small_joint_rate_est=qd[2],
+            chassis_yaw=psi_c_true, chassis_omega=w_c_held,   # 估计器输出（方位角已补偿）
+            chassis_azimuth=psi_c_true, chassis_yaw_rate=w_c_held,
+            big_enc_age=age, big_sample_interval=float(self._next) * DT,
+            big_enc_innovation=0.0, chassis_imu_age=age,
             mcu2_seq=int(self._meas["seq"]),
-            temp_big=30, temp_small=30,
-            est_valid=1, mcu_valid=1,
-            gravity_ax=float(self.plant.exo[0]), gravity_ay=float(self.plant.exo[1]))
+            mcu_temp_big=30, mcu_temp_small=30,
+            # 仿真里把估计器输出直接当"收到的 MCU 量"填（用于验证记录列非空）；
+            # 底盘那一对是**原始被保持值**（未补偿），供下游复核链路语义
+            mcu_bullet_velocity=0.0, mcu_pitch_angle=0.0,
+            mcu_yaw_big_angle=float(self._meas["q0"]), mcu_yaw_big_omega=motor_rate,
+            mcu_yaw_small_angle=q[2], mcu_yaw_small_omega=qd[2],
+            mcu_chassis_imu_yaw=psi_c_held, mcu_chassis_imu_omega=w_c_held,
+            mcu_mark=0, mcu_color=0, mcu_auto_aim_switch=1,
+            imu_gx=0.0, imu_gy=0.0, imu_gz=qd[1] + w_c_true,
+            imu_ax=0.0, imu_ay=0.0, imu_az=9.81,
+            imu_euler_yaw=q[1] + psi_c_true, imu_euler_pitch=0.0, imu_euler_roll=0.0,
+            imu_dt_one_tenth_ms=100,
+            est_valid=1, mcu_valid=1, imu_valid=1,
+            gravity_ax=float(self.plant.exo[0]), gravity_ay=float(self.plant.exo[1]),
+            gravity_az=-9.81,
+            # 估计器的 base_omega_z = 被保持的底盘角速度（角速度不做延时候补偿）
+            base_omega_x=0.0, base_omega_y=0.0, base_omega_z=w_c_held,
+            los_azimuth=q[1] + psi_c_true, los_elevation=0.0,
+            pitch_joint_angle=0.0, pitch_joint_rate=0.0, pitch_acc=0.0,
+            backlash_center=beta_est, backlash_beta_true=beta_true,
+            # ★ 仿真真值状态（仅用于诊断/上限对照；实机这 6 列恒 0）
+            theta_true_motor=q[0], theta_true_platform=q[1], theta_true_small=q[2],
+            dtheta_true_motor=qd[0], dtheta_true_platform=qd[1], dtheta_true_small=qd[2])
 
     def send(self, tau_big, tau_small, big_joint_target, small_joint_target) -> bool:
         self.frames += 1
@@ -1044,7 +1555,11 @@ class SimRobotLink:
         if self._since >= self._next:
             self._since = 0
             self._next = int(self.rng.integers(8, 13))
-            self._meas = {"q0": self._lookup(t_new - SIM_TRANSPORT_DELAY),
+            t_smp = t_new - SIM_TRANSPORT_DELAY
+            self._meas = {"q0": self._lookup(t_smp),
+                          "qd0": self._lookup_rate(t_smp),
+                          # ★ 底盘 IMU 与编码器**同一包** ⇒ 同一采样时刻、同一序号、同样被保持
+                          "psi_c": SIM_CHASSIS_AZIMUTH, "w_c": 0.0,
                           "t": t_new,
                           "seq": (self._meas["seq"] + 1) % 256}
         self.t = t_new
@@ -1059,6 +1574,60 @@ class SimRobotLink:
 # ============================================================================
 # 控制相位驱动（到位 / 采样 / 回中 共用同一段代码）
 # ============================================================================
+def make_row(st: "RobotSample", t: float, tau_big: float, tau_small: float, axis: int,
+             held_target: float, tgt_big: float, tgt_small: float) -> dict:
+    """构造一条记录（覆盖全部列）。
+
+    * 链路侧（收到的 MCU/IMU、估计器输出）直接取自 ``st``；
+    * 下发侧按**本拍实际发出**的内容填（仅力矩模式、目标速度 0）；
+    * 前置历史列 ``theta_big`` = **电机侧**角度、``dtheta_big`` = **云台侧**角速度
+      （旧语义未变）；新列 ``*_motor`` / ``*_platform`` 是显式分离后的值。
+    """
+    row = {"t": t, "tau_big": tau_big, "tau_small": tau_small,
+           "axis": axis, "held_target": held_target,
+           "target_big": tgt_big, "target_small": tgt_small}
+    colset = set(CSV_HEADER)
+    for name in _SAMPLE_FIELDS:
+        if name in colset:                 # 同名列直接搬
+            row[name] = getattr(st, name)
+    # 需要改名的两处: gravity_ax/ay/az → gravity_a_x/y/z
+    row["theta_big_motor_meas"] = st.big_joint_angle_meas
+    row["small_joint_angle_est"] = st.small_joint_angle
+    row["small_joint_rate_est"] = st.small_joint_rate
+    row["chassis_azimuth"] = st.chassis_yaw
+    row["chassis_yaw_rate"] = st.chassis_omega
+    row["gravity_a_x"] = st.gravity_ax
+    row["gravity_a_y"] = st.gravity_ay
+    row["gravity_a_z"] = st.gravity_az
+    row["theta_big"] = st.big_joint_angle          # 电机侧（旧语义）
+    row["dtheta_big"] = st.dtheta_big_platform     # 云台侧（旧语义）
+    row["theta_small"] = st.small_joint_angle
+    row["dtheta_small"] = st.small_joint_rate
+    row["mcu2_seq"] = st.mcu2_seq
+    row["gravity_ax"] = st.gravity_ax
+    row["gravity_ay"] = st.gravity_ay
+    row["backlash_center"] = st.backlash_center
+    row["backlash_beta_true"] = st.backlash_beta_true
+    row["theta_true_motor"] = st.theta_true_motor
+    row["theta_true_platform"] = st.theta_true_platform
+    row["theta_true_small"] = st.theta_true_small
+    row["dtheta_true_motor"] = st.dtheta_true_motor
+    row["dtheta_true_platform"] = st.dtheta_true_platform
+    row["dtheta_true_small"] = st.dtheta_true_small
+    row["tx_auto_aim_enable"] = AUTO_AIM_ENABLE
+    row["tx_fire"] = 0
+    row["tx_pitch_target_angle"] = PITCH_TARGET_ANGLE
+    row["tx_yaw_big_mode"] = YAW_MODE_TORQUE_ONLY
+    row["tx_yaw_big_target_angle"] = tgt_big
+    row["tx_yaw_big_target_velocity"] = 0.0
+    row["tx_yaw_big_torque"] = tau_big
+    row["tx_yaw_small_mode"] = YAW_MODE_TORQUE_ONLY
+    row["tx_yaw_small_target_angle"] = tgt_small
+    row["tx_yaw_small_target_velocity"] = 0.0
+    row["tx_yaw_small_torque"] = tau_small
+    return row
+
+
 def drive_steps(link, ref_big: np.ndarray, ref_small: np.ndarray, pids, limiters,
                 max_temp: float, small_guard: bool = True,
                 record: SegmentRecord | None = None, axis: int = AXIS_BIG,
@@ -1074,7 +1643,7 @@ def drive_steps(link, ref_big: np.ndarray, ref_small: np.ndarray, pids, limiters
         busy_wait_until(t0_ns + k * DT_NS)
         st = link.read()
 
-        # ── 安全 1: 小 yaw 硬限位（**非对称** −25°/+20°; 规格: 触及即中止本段）──
+        # ── 安全 1: 小 yaw 硬限位（当前行程对称 ±30°，但判据按 [min,max] 写，非对称也对）──
         if small_guard:
             th_s = float(st.small_joint_angle)
             if th_s > SMALL_ABORT_MAX or th_s < SMALL_ABORT_MIN:
@@ -1087,7 +1656,7 @@ def drive_steps(link, ref_big: np.ndarray, ref_small: np.ndarray, pids, limiters
                 log(f"  [WARN] 小 yaw θ={_deg(th_s):+.1f}° 已接近行程界限"
                     f"（余量 < {_deg(SMALL_WARN_MARGIN):.0f}°）")
         # ── 安全 2: 电机温度 ──
-        if max(st.temp_big, st.temp_small) >= max_temp:
+        if max(st.mcu_temp_big, st.mcu_temp_small) >= max_temp:
             return "overheat", k
 
         tgt_big = float(ref_big[k])
@@ -1103,24 +1672,9 @@ def drive_steps(link, ref_big: np.ndarray, ref_small: np.ndarray, pids, limiters
         link.send(tau_big, tau_small, big_joint_target, tgt_small)
 
         if record is not None:
-            record.append(dict(
-                t=(time.perf_counter_ns() - t0_ns) * 1e-9,       # 段内秒（perf_counter 之差）
-                theta_big=st.big_joint_angle,                    # 延迟补偿估计的关节角
-                theta_small=st.small_joint_angle,                # 编码器（可信）
-                dtheta_big=st.big_joint_rate,
-                dtheta_small=st.small_joint_rate,
-                tau_big=tau_big,                                 # 限幅后真正下发的力矩
-                tau_small=tau_small,
-                axis=axis,
-                held_target=held_target,
-                mcu2_seq=st.mcu2_seq,
-                chassis_yaw=st.chassis_yaw,
-                chassis_omega=st.chassis_omega,
-                big_enc_age=st.big_enc_age,
-                gravity_ax=st.gravity_ax,       # 重力 A 系平面分量（水平≈0; 倾斜≠0）
-                gravity_ay=st.gravity_ay,
-                target_big=tgt_big,
-                target_small=tgt_small))
+            record.append(make_row(st, (time.perf_counter_ns() - t0_ns) * 1e-9,
+                                   tau_big, tau_small, axis, held_target,
+                                   tgt_big, tgt_small))
     return None, n
 
 
@@ -1156,7 +1710,7 @@ def hold_until_stable(link, pids, limiters, max_temp, tgt_big: float, tgt_small:
         if th_s > SMALL_ABORT_MAX or th_s < SMALL_ABORT_MIN:
             log(f"  [SAFETY] 稳定等待期间小 yaw θ={_deg(th_s):+.1f}° 触及行程界限 → 中止本段")
             return "small_limit", k * DT
-        if max(st.temp_big, st.temp_small) >= max_temp:
+        if max(st.mcu_temp_big, st.mcu_temp_small) >= max_temp:
             return "overheat", k * DT
 
         # ── 继续 PID 控制（保持稳定）, 目标固定不动 ──
@@ -1167,24 +1721,9 @@ def hold_until_stable(link, pids, limiters, max_temp, tgt_big: float, tgt_small:
         link.send(tau_big, tau_small, st.big_joint_angle + e_big, tgt_small)
 
         if record is not None:
-            record.append(dict(
-                t=t_offset + (time.perf_counter_ns() - t0_ns) * 1e-9,
-                theta_big=st.big_joint_angle,
-                theta_small=st.small_joint_angle,
-                dtheta_big=st.big_joint_rate,
-                dtheta_small=st.small_joint_rate,
-                tau_big=tau_big,
-                tau_small=tau_small,
-                axis=axis,
-                held_target=held_target,
-                mcu2_seq=st.mcu2_seq,
-                chassis_yaw=st.chassis_yaw,
-                chassis_omega=st.chassis_omega,
-                big_enc_age=st.big_enc_age,
-                gravity_ax=st.gravity_ax,
-                gravity_ay=st.gravity_ay,
-                target_big=tgt_big,
-                target_small=tgt_small))
+            record.append(make_row(st, t_offset + (time.perf_counter_ns() - t0_ns) * 1e-9,
+                                   tau_big, tau_small, axis, held_target,
+                                   tgt_big, tgt_small))
 
         # ── 稳定判据: 四个量全满足才累加, 否则归零 ──
         v_big = abs(float(st.big_joint_rate))       # ★ RobotSample 没有 platform_rate; 与记录口径一致
@@ -1225,8 +1764,8 @@ def run_zero_torque(link, limiters, seconds: float, stop_temp: float | None = No
         if stop_temp is not None and k % 100 == 99:
             st = link.read()
             if k % 1000 == 999:
-                log(f"    降温中… temp=({st.temp_big},{st.temp_small})℃")
-            if max(st.temp_big, st.temp_small) < stop_temp:
+                log(f"    降温中… temp=({st.mcu_temp_big},{st.mcu_temp_small})℃")
+            if max(st.mcu_temp_big, st.mcu_temp_small) < stop_temp:
                 cooled = True
                 break
     return True, cooled
@@ -1246,11 +1785,11 @@ def cooldown(link, limiters, max_temp: float, reason: str) -> bool:
 
 
 def recenter(link, pids, limiters, max_temp: float, seconds: float = RECENTER_SEC) -> None:
-    """回中心/守位: 小 yaw 回到**行程中心 −2.5°**，大 yaw 保持在当前平台方位角。
+    """回中心/守位: 小 yaw 回到**行程中心**（当前行程对称 ±30° ⇒ 0°），大 yaw 保持当前平台方位角。
 
-    为什么是行程中心而不是 0: 小 yaw 行程是**非对称**的 [−25°, +20°]，0 并不在几何中心 ——
-    停在 −2.5° 时到两端的余量相等（各 22.5°），这是"段间静置/初始条件"最安全的位置；
-    若停在 0，则朝 +20° 一侧只剩 20° 余量、朝 −25° 一侧有 25°，偏置一侧更容易先撞界。
+    为什么写"行程中心"而不是硬编码 0: 行程由 `SMALL_TRAVEL_MIN/MAX` 决定，式子按
+    `(min+max)/2` 算 ⇒ 以后改成非对称行程（例如 [−20°, +25°] ⇒ +2.5°）会自动跟着走；
+    停在中心时到两端的余量相等，这是"段间静置/初始条件"最安全的位置。
 
     用在小 yaw 触碰行程界限之后、每段结束、以及 `--tilt-rolling` 段间改倾角的等待
     （倾斜后重力会在小 yaw 上产生力矩，"撒手"会让它自己滑到限位，所以这里保持闭环）。
@@ -1293,7 +1832,7 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
     axis = int(plan.axis)
 
     def arr(name):
-        return np.asarray(getattr(rec, name), dtype=np.float64)
+        return np.asarray(rec.col(name), dtype=np.float64)
 
     np.savez(
         npz_path,
@@ -1301,10 +1840,30 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
         t=arr("t"), theta_big=arr("theta_big"), theta_small=arr("theta_small"),
         dtheta_big=arr("dtheta_big"), dtheta_small=arr("dtheta_small"),
         tau_big=arr("tau_big"), tau_small=arr("tau_small"),
-        mcu2_seq=np.asarray(rec.mcu2_seq, dtype=np.int64),
+        mcu2_seq=np.asarray(rec.col("mcu2_seq"), dtype=np.float64),
         # ── 底盘/诊断（用户: 可以记录但拟合不用）──
-        chassis_yaw=arr("chassis_yaw"), chassis_omega=arr("chassis_omega"),
+        chassis_yaw=arr("chassis_azimuth"), chassis_yaw_rate=arr("chassis_yaw_rate"),
         big_enc_age=arr("big_enc_age"),
+        chassis_imu_age=arr("chassis_imu_age"),
+        base_omega_x=arr("base_omega_x"), base_omega_y=arr("base_omega_y"),
+        base_omega_z=arr("base_omega_z"),
+        # ── ★ 大 yaw 电机侧 / 云台侧 显式分离（3-DOF 背隙辨识的核心列）──
+        #   旧列 `theta_big` = 电机侧（延时补偿后）；这里再给**原始滞后**值与云台侧值
+        theta_big_motor=arr("theta_big_motor"),
+        theta_big_motor_meas=arr("theta_big_motor_meas"),
+        theta_big_platform=arr("theta_big_platform"),
+        dtheta_big_motor=arr("dtheta_big_motor"),
+        dtheta_big_platform=arr("dtheta_big_platform"),
+        small_joint_angle_est=arr("small_joint_angle_est"),
+        small_joint_rate_est=arr("small_joint_rate_est"),
+        # ── ★ 背隙中心 β（在线值 / 仿真真值）──
+        backlash_center=arr("backlash_center"),
+        backlash_beta_true=arr("backlash_beta_true"),
+        # ── ★ 仿真真值状态（[T,3] 打包；实机全 0）──
+        theta_true=np.stack([arr("theta_true_motor"), arr("theta_true_platform"),
+                             arr("theta_true_small")], axis=-1),
+        dtheta_true=np.stack([arr("dtheta_true_motor"), arr("dtheta_true_platform"),
+                              arr("dtheta_true_small")], axis=-1),
         # ── 重力 A 系平面分量（m/s²）: 水平静置全 0；倾斜静置非 0 ⇒ 下游启用重力项 ──
         gravity_ax=arr("gravity_ax"), gravity_ay=arr("gravity_ay"),
         # ── 下发的参考（便于复核/画图）──
@@ -1340,25 +1899,20 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
         small_env_max=np.float64(SMALL_ENV_MAX),
         small_center=np.float64(SMALL_CENTER_RAD))
 
+    _INT_COLS = {"axis", "mcu_mark", "mcu_color", "mcu_auto_aim_switch",
+                 "mcu_temp_big", "mcu_temp_small", "tx_auto_aim_enable", "tx_fire",
+                 "tx_yaw_big_mode", "tx_yaw_small_mode",
+                 "est_valid", "mcu_valid", "imu_valid", "mcu2_seq",
+                 "mcu_dt_one_tenth_ms", "imu_dt_one_tenth_ms"}
     with open(csv_path, "w", newline="") as fh:
         writer = csv.writer(fh, lineterminator="\n")
         writer.writerow(CSV_HEADER)
         for i in range(len(rec)):
             writer.writerow([
-                f"{rec.t[i]:.4f}",
-                f"{rec.theta_big[i]:.6f}",
-                f"{rec.theta_small[i]:.6f}",
-                f"{rec.dtheta_big[i]:.6f}",
-                f"{rec.dtheta_small[i]:.6f}",
-                f"{rec.tau_big[i]:.6f}",
-                f"{rec.tau_small[i]:.6f}",
-                axis,
-                f"{plan.held_target:.6f}",
-                int(rec.mcu2_seq[i]),
-                # ── 末尾两列: 重力 A 系平面分量（水平静置全 0）──
-                f"{rec.gravity_ax[i]:.6f}",
-                f"{rec.gravity_ay[i]:.6f}",
-            ])
+                (f"{float(rec.col(n)[i]):.4f}" if n == "t"
+                 else (str(int(rec.col(n)[i])) if n in _INT_COLS
+                       else f"{float(rec.col(n)[i]):.6f}"))
+                for n in CSV_HEADER])
     return npz_path, csv_path
 
 
@@ -1391,10 +1945,11 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
     drive_axis = AXIS_NAME[axis]
     hold_axis = AXIS_NAME[AXIS_SMALL if axis == AXIS_BIG else AXIS_BIG]
 
+    link.begin_segment(segment_index)     # ★ 刚性环境: 每段重新抽 β0
     st = link.read()
     log(f"\n=== 段 {segment_index + 1} === driven={drive_axis} 轴 / held={hold_axis} 轴"
-        f"  温度=({st.temp_big},{st.temp_small})℃")
-    if max(st.temp_big, st.temp_small) >= args.max_temp:
+        f"  温度=({st.mcu_temp_big},{st.mcu_temp_small})℃")
+    if max(st.mcu_temp_big, st.mcu_temp_small) >= args.max_temp:
         if not cooldown(link, limiters, args.max_temp, "段前温度过高"):
             return "abort"
         st = link.read()
@@ -1509,7 +2064,7 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
         h_npz, h_csv = save_segment(rec_hold, plan, args.out, args.tag, segment_index,
                                     suffix=HOLD_SUFFIX)
         log(f"  静止保持段已记录: {h_csv}  ({len(rec_hold)} 行, "
-            f"t=0~{rec_hold.t[-1]:.2f}s, 含大角度阶跃)")
+            f"t=0~{rec_hold.col('t')[-1]:.2f}s, 含大角度阶跃)")
         if args.dry_run:
             pass
 
@@ -1598,7 +2153,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="采样率 Hz（**固定 100**；传更高会被拒绝并回到 100）")
     p.add_argument("--out", default=DEFAULT_OUT_DIR, help="保存目录")
     p.add_argument("--tag", default=None, help="文件名 tag（默认按 axis 自动取 big/small）")
-    p.add_argument("--seed", type=int, default=42, help="随机数种子（增强可复现）")
+    p.add_argument("--seed", type=int, default=42,
+                   help="随机数种子（增强/激励序列/每段随机 β0 **都**由它决定 ⇒ 采集是"
+                        "**确定性**的）。★ 采留出/测试集时必须换一个 seed，否则会得到与"
+                        "训练集**逐位相同**的数据（辨识脚本会做指纹比对并告警）")
     p.add_argument("--max-temp", type=float, default=55.0, help="电机过温阈值 ℃")
     p.add_argument("--kp", type=float, default=PID_KP, help=f"PID 比例增益（默认 {PID_KP}）")
     p.add_argument("--ki", type=float, default=PID_KI, help=f"PID 积分增益（默认 {PID_KI}）")
@@ -1628,6 +2186,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "g_A 方向覆盖更均匀 ⇒ P 的条件数更好")
     p.add_argument("--dry-run", action="store_true",
                    help="无硬件自检: 用内置仿真（planar_yaw_model.h 同方程）代替串口")
+    sg = p.add_argument_group(
+        "★ dry-run 仿真环境 2: 背隙「接触完全刚性 + 死区完全自由 + β 随机/漂移」",
+        "仅用于采集**测试数据**（用户要求）。与默认的平滑背隙被控对象（τ_t = k[dz(Δ)+γΔ]+cΔ̇）"
+        "不同: 死区内 τ_t≡0（连阻尼都没有）、接触后电机/云台**刚性锁定**（k = ∞）、"
+        "撞击为完全非弹性冲击；且**每条数据**的背隙中心 β0 重新随机抽样并随时间微弱漂移。"
+        "目的是把背隙建模逼到最不利情形: 死区内零刚度 ⇒ δ/k/c 几乎无梯度；k=∞ 只能用有限 k 近似；"
+        "β 每条数据都不同 ⇒ 单个全局 β 不可能对，必须用估计器的在线值（数据里的 backlash_center 列）。")
+    sg.add_argument("--sim-rigid", action="store_true",
+                    help="dry-run 用**刚性接触**环境（隐含: 记录 backlash_center / "
+                         "backlash_beta_true 两列；实机也会记，实机真值恒 0）")
+    sg.add_argument("--sim-beta-random-frac", type=float, default=SIM_BETA_RANDOM_FRAC,
+                    help="每条数据的 β0 随机幅度（占 δ 的比例，默认 0.30）")
+    sg.add_argument("--sim-beta-drift-frac", type=float, default=SIM_BETA_DRIFT_FRAC,
+                    help="β 漂移幅值（占 δ 的比例，默认 0.05）")
+    sg.add_argument("--sim-beta-drift-period", type=float, default=SIM_BETA_DRIFT_PERIOD,
+                    help="β 漂移周期 (s)，默认 30")
     return p
 
 
@@ -1685,10 +2259,21 @@ def main(argv=None) -> int:
         log("  [DRY-RUN] 无硬件: 用内置仿真代替串口"
             f"（planar_yaw_model.h 同方程, λ={SIM_FRICTION_LAMBDA:g}, "
             f"积分步长 {SIM_INT_STEP * 1e3:.3f} ms）")
+        if args.sim_rigid:
+            log(f"  [DRY-RUN] ★ 仿真环境 2: 接触**完全刚性** + 死区**完全自由**"
+                f"（τ_t≡0 in |Δ−β|<δ/2），撞击=完全非弹性冲击; "
+                f"β0 每条数据随机 ±{args.sim_beta_random_frac:.2f}·δ, "
+                f"漂移 ±{args.sim_beta_drift_frac:.2f}·δ / {args.sim_beta_drift_period:g}s")
+            log(f"  [DRY-RUN] 注意: 这个环境里 k/c/γ **无效**；"
+                f"记录列 backlash_center(在线估计) / backlash_beta_true(真值)")
     log("=" * 78)
 
     args._held_base = None          # --held-big-stratified 的基准平台方位角（首个小 yaw 段时确定）
-    link = SimRobotLink(rng) if args.dry_run else HwRobotLink()
+    link = (SimRobotLink(rng, rigid=args.sim_rigid,
+                         beta_random_frac=args.sim_beta_random_frac,
+                         beta_drift_frac=args.sim_beta_drift_frac,
+                         beta_drift_period=args.sim_beta_drift_period)
+            if args.dry_run else HwRobotLink())
     saved, attempts = 0, 0
     exit_code = 0
     interrupted = False

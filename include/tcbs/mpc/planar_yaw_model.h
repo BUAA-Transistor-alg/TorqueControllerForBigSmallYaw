@@ -79,6 +79,30 @@ struct ModelParams {
     double Py       = -0.001017;     // 上装一阶矩 m_u·ρ_y               kg·m（★ 同上）
     double fcBig    = 0.103360, fvBig   = 0.209044;   // 大 yaw 库仑/粘滞摩擦（fv 可疑）
     double fcSmall  = 0.030582, fvSmall = 0.048735;   // 小 yaw 库仑/粘滞摩擦（fv 可疑）
+    // ── ★ 大 yaw 传动背隙（3-DOF 模型用；2-DOF 的 eom() 不受影响）──
+    //   物理（用户实测）: 传动里一部分是**同步带**（两侧接触有弹性、范围很小），
+    //   大部分是**齿轮背隙**（中间几乎完全自由）。因此:
+    //       τ_t = k·dz(Δ) + c·Δ̇,   Δ = θ_motor − θ_platform − β
+    //       dz: |Δ| ≤ δ/2 → 0（自由）；|Δ| > δ/2 → Δ ∓ δ/2（弹性接触）
+    //   ★ 只有**宽度 δ 是静态可标定量**；β（死区中心相对电机编码零点的偏置）
+    //     随电机与云台共同旋转而移动、且云台角由 IMU 推出会有漂移
+    //     ⇒ β 由估计器**在线**给出（Estimate::backlash_center），不是模型参数。
+    double backlash_delta    = 0.0873;  // 背隙总宽度 δ (rad)，≈5°，待标定
+    double backlash_k        = 200.0;   // 接触刚度 (N·m/rad)（"弹性范围很小" ⇒ 较大）
+    double backlash_c        = 2.0;     // 接触阻尼 (N·m·s/rad)；若与 k 共线则按 2ζ√(k·J_m) 固定
+    double backlash_smooth_eps = 1.0e-4;// 平滑死区的过渡半宽 (rad)：≪ δ/2，中间仍"几乎完全自由"
+    double backlash_through  = 0.002;  // ★ 直通线性项 γ（死区内 τ_t += k·γ·Δ）
+    // ★ **直通线性项**（用户授权: 对"中间完全自由"的要求不高）:
+    //   τ_t = k·[dz(Δ) + γ·Δ] + c·Δ̇，γ = backlash_through
+    //   物理上死区内不该传力矩（γ=0），但 γ 很小（默认 0.002 ⇒ 等效刚度 k·γ = 0.4 N·m/rad，
+    //   在 Δ=δ/2 处只贡献 0.018 N·m）时:
+    //     · 给优化器/MPC 一个**非零梯度**（否则死区内 ∂τ_t/∂u ≡ 0，梯度全靠平滑 ε，很容易卡住）；
+    //     · 对闭环行为的影响可忽略（比 fc_big≈0.1 N·m 小一个量级）。
+    //   想严格物理就把 γ 置 0。
+    double Jmotor            = 0.006;   // 电机侧惯量（**折算到关节侧**），kg·m²
+    double fcMotor           = 0.030;   // 电机侧库仑摩擦（背隙内电机几乎空载 ⇒ 单独一组）
+    double fvMotor           = 0.010;   // 电机侧粘滞摩擦
+    double tau_offset_motor  = 0.0;     // 电机侧可选常数负载（默认 0）
     // ── 固定 / 可选 ──
     double frictionLambda = 100.0;   // tanh 软符号陡度（固定，不辨识）
                                      // ★ 100: |ω| ≳ 1°/s 即饱和（逼近真库仑）;
@@ -92,6 +116,11 @@ struct ModelExo {
     double gravity_a[2] = {0.0, 0.0};  // ★ 重力在 **A 系（大 yaw 转子系）** 的平面分量（水平时 (0,0)）
     double base_omega = 0.0;           // 底盘绕关节轴的角速度 (rad/s)
     double base_alpha = 0.0;           // 底盘绕关节轴的角加速度 (rad/s²)，未知时置 0
+    // ★ 背隙死区中心 β（rad）: 由估计器**在线**给出（Estimate::backlash_center），
+    //   不随 Δ 一起建模 —— 它随电机/云台共同旋转而移动、且云台角由 IMU 推出会漂移。
+    //   死区判据: Δ = θ_motor − θ_platform − β，于是 θ_p 始终是"物理云台角"，
+    //   MPC 的跟踪代价可以直接作用在它上面。
+    double backlash_beta = 0.0;
 };
 
 // ── 派生量（供组装、测试与文档引用）──
@@ -205,6 +234,41 @@ inline void integrateStep(const T q[2], const T qd[2], const T tau[2], const Mod
     }
 }
 
+// ── 3-DOF 积分一步（RK4；与 2-DOF 的 integrateStep 同风格）──
+template <typename T>
+inline void integrateStepBacklash(const T q[3], const T qd[3], const T u[3],
+                                  const ModelParams& p, const ModelExo& e, double dt,
+                                  int substeps, T q_next[3], T qd_next[3]) {
+    if (substeps < 1) substeps = 1;
+    const double hh = dt / static_cast<double>(substeps);
+    T qa[3] = {q[0], q[1], q[2]}, qda[3] = {qd[0], qd[1], qd[2]};
+    for (int s = 0; s < substeps; ++s) {
+        T k1v[3], k2v[3], k3v[3], k4v[3], t2[3], td2[3], t3[3], td3[3], t4[3], td4[3];
+        forwardAccelBacklash(qa, qda, u, p, e, k1v);
+        for (int i = 0; i < 3; ++i) {
+            t2[i] = qa[i] + T(0.5 * hh) * qda[i];
+            td2[i] = qda[i] + T(0.5 * hh) * k1v[i];
+        }
+        forwardAccelBacklash(t2, td2, u, p, e, k2v);
+        for (int i = 0; i < 3; ++i) {
+            t3[i] = qa[i] + T(0.5 * hh) * td2[i];
+            td3[i] = qda[i] + T(0.5 * hh) * k2v[i];
+        }
+        forwardAccelBacklash(t3, td3, u, p, e, k3v);
+        for (int i = 0; i < 3; ++i) {
+            t4[i] = qa[i] + T(hh) * td3[i];
+            td4[i] = qda[i] + T(hh) * k3v[i];
+        }
+        forwardAccelBacklash(t4, td4, u, p, e, k4v);
+        const double h6 = hh / 6.0;
+        for (int i = 0; i < 3; ++i) {
+            q_next[i] = qa[i] + T(h6) * (qda[i] + T(2.0) * td2[i] + T(2.0) * td3[i] + td4[i]);
+            qd_next[i] = qda[i] + T(h6) * (k1v[i] + T(2.0) * k2v[i] + T(2.0) * k3v[i] + k4v[i]);
+        }
+        for (int i = 0; i < 3; ++i) { qa[i] = q_next[i]; qda[i] = qd_next[i]; }
+    }
+}
+
 // ── 逆动力学: τ = M q̈ + h（辨识/前馈用）──
 inline void inverseDynamics(const double q[2], const double qd[2], const double qdd[2],
                             const ModelParams& p, const ModelExo& e, double tau[2]) {
@@ -287,6 +351,91 @@ inline void regressor(const double q[2], const double qd[2], const double qdd[2]
     Y[1][6] = std::tanh(p.frictionLambda * vs);
     Y[1][7] = vs;
     // 摩擦只作用于本轴 ⇒ 其它两列为 0（已初始化为 0）
+}
+
+// ============================================================================
+// 大 yaw 传动**背隙**（3-DOF: q = (θ_motor, θ_platform, θ_small)）
+//
+//   物理依据（用户实测）: 抖动来自大 yaw 背隙；持续给反向力矩"靠上背隙"后抖动显著减小。
+//   中间段几乎完全自由（齿轮背隙），两侧接触有弹性（同步带+啮合，范围很小）。
+//
+//   τ_t = k·dz(Δ) + c·Δ̇        传给云台的力矩
+//   Δ   = θ_m − θ_p            传动形变（β 已在估计器里折进 θ_p）
+//   dz  = 平滑死区（可导，供 MPC 的 autodiff 用）
+// ⚠ 2-DOF 的 eom() **保持不变**（δ→0 的刚性极限），新代码走 eomBacklash()。
+// ============================================================================
+
+// 平滑 ReLU: max(0,x) 的 C¹ 近似（slope ∈ [0,1]，**不会**因为 eps 小而出现刚度爆炸）
+template <typename T>
+inline T smoothRelu(const T& x, double eps) {
+    using std::sqrt;
+    return T(0.5) * (x + sqrt(x * x + T(eps * eps)));
+}
+
+// 平滑死区 dz(Δ): |Δ|≤δ/2 →≈0；|Δ|>δ/2 → Δ ∓ δ/2
+template <typename T>
+inline T deadzoneSmooth(const T& D, const ModelParams& p) {
+    const T h = T(0.5 * p.backlash_delta);
+    const double eps = p.backlash_smooth_eps;
+    return smoothRelu(D - h, eps) - smoothRelu(-D - h, eps);
+}
+
+// 传动扭矩 τ_t（含接触阻尼）
+template <typename T>
+inline T backlashTorque(const T& D, const T& Dd, const ModelParams& p) {
+    return T(p.backlash_k) * (deadzoneSmooth(D, p) + T(p.backlash_through) * D)
+         + T(p.backlash_c) * Dd;
+}
+
+// ── 3-DOF: M(3×3) 与 h(3)，约定 M·q̈ = u − h，u = (τ_cmd, 0, 0)（只有电机被驱动）──
+//   行 0 = 电机（θ_m），行 1 = 大 yaw 云台（θ_p），行 2 = 小 yaw（θ_s）
+//   云台+小 yaw 子块**完全复用 eom()**（q_b ← θ_p），只有大 yaw 云台行多一个 +τ_t
+template <typename T>
+inline void eomBacklash(const T q[3], const T qd[3], const ModelParams& p, const ModelExo& e,
+                        T M[3][3], T h[3]) {
+    T M2[2][2], h2[2];
+    const T qb[2] = {q[1], q[2]};
+    const T qdb[2] = {qd[1], qd[2]};
+    eom(qb, qdb, p, e, M2, h2);
+
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) M[i][j] = T(0.0);
+    M[0][0] = T(p.Jmotor);
+    for (int i = 0; i < 2; ++i) for (int j = 0; j < 2; ++j) M[i + 1][j + 1] = M2[i][j];
+
+    const T D = q[0] - q[1] - T(e.backlash_beta);   // Δ = θ_m − θ_p − β
+    const T Dd = qd[0] - qd[1];
+    const T tt = backlashTorque(D, Dd, p);   // 传给云台的力矩（电机受到 −τ_t）
+
+    h[0] = tt + frictionTorque(qd[0], p.fcMotor, p.fvMotor, p.frictionLambda)
+         + T(p.tau_offset_motor);
+    h[1] = h2[0] - tt;
+    h[2] = h2[1];
+}
+
+// ── 3-DOF 正动力学（M q̈ = u − h ⇒ q̈ = M⁻¹(u − h)）──
+//   M 按构造成**块对角**（电机行与云台行之间没有惯量耦合，只有 τ_t 这条力耦合）
+//   ⇒ 求逆只需标量除法 + 2×2 逆，既快又不引入 3×3 展开的笔误风险。
+template <typename T>
+inline void forwardAccelBacklash(const T q[3], const T qd[3], const T u[3],
+                                 const ModelParams& p, const ModelExo& e, T qdd[3]) {
+    T M[3][3], h[3];
+    eomBacklash(q, qd, p, e, M, h);
+    const T r0 = u[0] - h[0], r1 = u[1] - h[1], r2 = u[2] - h[2];
+    const T det2 = M[1][1] * M[2][2] - M[1][2] * M[2][1];
+    qdd[0] = r0 / M[0][0];
+    qdd[1] = (M[2][2] * r1 - M[1][2] * r2) / det2;
+    qdd[2] = (-M[2][1] * r1 + M[1][1] * r2) / det2;
+}
+
+// ── 数值可积性检查: 接触刚度引入的快模态 ω=√(k/μ_red) 必须远小于步长限制 ──
+//   μ_red = J_motor·J_platform/(J_motor+J_platform)（两个惯量通过弹簧互推的折合质量）
+//   返回**允许的最大 k**（超过它就建议加积分子步）。
+inline double recommendedBacklashStiffness(const ModelParams& p, double dt, bool rk4 = true) {
+    const double Jp = p.Jbig_eff + p.Js;              // 云台侧等效惯量
+    if (!(p.Jmotor > 1e-9) || !(Jp > 1e-9) || !(dt > 1e-9)) return 1e30;
+    const double mu_red = p.Jmotor * Jp / (p.Jmotor + Jp);
+    const double w_max = (rk4 ? 2.78 : 2.0) / dt;     // 显式积分稳定上限
+    return mu_red * w_max * w_max;
 }
 
 // ── 数值可积性检查（摩擦模态时间常数必须显著大于预测步长）──

@@ -9,9 +9,13 @@ namespace tcbs {
 // ============================================================================
 // planar_yaw_params.h — 默认参数集中定义
 //
-// ★ **8 个待辨识参数全是占位值**，必须由 python/scripts/collect_sysid.py 采集、
-//   再用 python/scripts/identify_params_torch.py（**唯一辨识路径**，torch 输出误差法）
-//   辨识后替换。几何量（d = dx/dy）是实测值，请按实际机械填写（当前 (0, 0.07)）。
+// ★ **8 个平面参数**由 python/scripts/collect_sysid.py 采集、再用
+//   python/scripts/identify_params_torch.py（**唯一辨识路径**，torch 输出误差法）辨识后替换。
+//   几何量（d = dx/dy）是实测值，请按实际机械填写（当前 (0, 0.07)）。
+// ★ **大 yaw 背隙那 8 个参数**（δ/k/c/γ/J_motor/电机摩擦/β）由**同一个** torch 辨识
+//   作为 3-DOF 模型参数**一起拟合**（共 16 参，不再"占位 + 手猜"）—— 见
+//   docs/backlash_model.md。注意 β 虽然也参与离线拟合，但**运行期必须用估计器的在线值**
+//   （`Estimate::backlash_center`），因为它随电机/云台共同旋转而漂移。
 // ============================================================================
 namespace dual_yaw {
 
@@ -63,6 +67,31 @@ inline ModelParams defaultModelParams() {
     p.frictionLambda = 100.0;
     p.tau_offset_big = 0.0;      // 可选常数负载（默认关）
     p.tau_offset_small = 0.0;
+
+    // ── ★ 大 yaw 传动背隙（3-DOF 模型 `eomBacklash()` 用；2-DOF 的 eom() 不受影响）──
+    //   τ_t = k·dz(Δ) + c·Δ̇,  Δ = θ_motor − θ_platform − β
+    //   **全是占位初值，必须用（重采的）数据标定**:
+    //     · δ: 用户实测"大约 5°" ⇒ 0.0873 rad。它同时是**唯一静态可标定**的背隙量；
+    //     · k / c: 同步带+啮合的接触刚度/阻尼（弹性范围很小 ⇒ k 较大）。若 k 与 c
+    //       在辨识里共线，按 c = 2ζ√(k·J_motor)（ζ≈0.05）固定 c —— 用户已同意；
+    //     · Jmotor / fcMotor / fvMotor: 电机侧（折算到关节侧）惯量与摩擦 —— 背隙内
+    //       电机几乎空载，所以它与云台侧那组**必须分开**（这正是 fv_big 被高估的原因）。
+    //   ⚠ β（死区中心）**不是参数**: 它随电机/云台共同旋转而移动，且云台角由 IMU 推出
+    //     会有漂移 ⇒ 由估计器在线给出（`YawStateEstimator::Estimate::backlash_center`）。
+    //   起标定作用的是"全量数据"里的 `theta_big_motor` 与 `theta_big_platform` 两列。
+    p.backlash_delta   = 0.0873;   // δ ≈ 5°
+    p.backlash_k       = 200.0;    // 占位：接触刚度（**必须实测**；k 给太大会让 MPC 的
+                                   //   Jacobian 求值失败 —— 试过 2000 会出现 trust_region 报错）
+    p.backlash_c       = 2.0;      // 占位：接触阻尼
+    p.backlash_smooth_eps = 1.0e-4;
+    p.backlash_through    = 0.002; // 直通线性项 γ（死区内的微弱梯度引导；物理严格=0）
+    p.Jmotor           = 0.006;    // 占位：电机侧惯量（关节侧）
+    p.fcMotor          = 0.030;    // 占位：电机侧库仑摩擦
+    p.fvMotor          = 0.010;    // 占位：电机侧粘滞摩擦
+    p.tau_offset_motor = 0.0;
+    // 稳定性自检: 接触刚度引入的快模态上限（k=200 在子步 2.5ms 下余量 ≈30×）
+    //   上限 = recommendedBacklashStiffness(p, dt/substeps)；
+    //   实际瓶颈仍是摩擦 λ（见上面的注释），背隙刚度不是限制项。
     return p;
 }
 

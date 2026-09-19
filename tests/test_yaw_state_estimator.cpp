@@ -188,6 +188,10 @@ struct Metrics {
     double max_gravity_err = 0.0;
     double max_base_omega_err = 0.0;       // 与"纯底盘角速度"的偏差（字段语义的真值）
     double max_base_omega_spec_err = 0.0;  // 与"按规范公式反推的期望值"的偏差
+    // ★ 底盘 IMU 与"大 yaw 编码器"同链路（延迟 + 值保持）⇒ 需一阶延时补偿
+    double max_chassis_az_err = 0.0;       // 估计器 chassis_azimuth vs 真值 ψ_c（补偿后）
+    double max_platform_joint_err = 0.0;   // θ_p = ψ_platform − ψ_chassis vs 真值 θ_b（补偿后）
+    double max_raw_chassis_err = 0.0;      // 对照: 未经补偿的被保持底盘值 vs 真值
     double last_innovation = 0.0;
     double max_sched_lag = 0.0;            // 实测最大迭代滞后（台架健康度，仅报告）
     double max_trusted_age = 0.0;          // 实测最大"小 yaw 编码器样本年龄"（台架健康度）
@@ -258,8 +262,10 @@ Metrics runScenario(const TruthCfg& cfg, double delay_param, double delay_truth,
             est.onMcu(big_meas, truthBigRate(t_enc < 0.0 ? 0.0 : t_enc),
                       small_meas, truthSmallRate(t),
                       pitch_meas,
-                      truthChassisYawF(t, cfg.chassis_freq),
-                      truthChassisRateF(t, cfg.chassis_freq), 0);
+                      // ★ 底盘 IMU 与"大 yaw 编码器"在同一条 MCU2 链路上 ⇒ 采样时刻同样滞后
+                      //   transport_delay（以前这里喂的是当前时刻的值，与声明时延不自洽）
+                      truthChassisYawF(t_enc < 0.0 ? 0.0 : t_enc, cfg.chassis_freq),
+                      truthChassisRateF(t_enc < 0.0 ? 0.0 : t_enc, cfg.chassis_freq), 0);
         }
 
         // 统计（跳过前 0.15s 收敛段；只统计可信编码器样本不过旧的帧，见 kStatsMaxTrustedAge）
@@ -289,6 +295,24 @@ Metrics runScenario(const TruthCfg& cfg, double delay_param, double delay_truth,
                 const double big_meas_ref = truthBig(t_enc0) + enc_offset_err;
                 m.max_big_meas_err = std::max(m.max_big_meas_err,
                                               std::fabs(big_meas_ref - truthBig(t)));
+                // ★ 底盘方位角: 一律与**真值底盘的 x 轴世界方位角**（矩阵值）比较 ——
+                //   注意底盘有 8°/5° 倾斜时 ψ_c 标量与"矩阵方位角"差 ≈ p·r ≈ 0.012 rad
+                //   （估计器/StrictPose 的约定），所以被保持的"标量 yaw"要先加上这个常数偏置
+                //   才能与矩阵值同口径比较（这样 tilt_bias 会在下面的差值里抵消掉）。
+                const double az_true = azimuthOf(s.R_world_C);
+                const double tilt_bias = azimuthOf(R_tilt(cfg));
+                m.max_chassis_az_err = std::max(m.max_chassis_az_err,
+                    std::fabs(std::remainder(e.chassis_azimuth - az_true, 2.0 * M_PI)));
+                m.max_raw_chassis_err = std::max(m.max_raw_chassis_err,
+                    std::fabs(std::remainder(
+                        truthChassisYawF(t_enc0, cfg.chassis_freq) + tilt_bias - az_true,
+                        2.0 * M_PI)));
+                // θ_p = ψ_platform(实时 IMU) − ψ_chassis(补偿后)。真值关节角 = truthBig(t)；
+                // 用"方位角之差"表达关节角本身带一个 ≈p·r 的常数偏置（倾斜下两者不等价，
+                // 见估计器注释/StrictPose 注释），因此阈值要加上 tilt_bias。
+                m.max_platform_joint_err = std::max(m.max_platform_joint_err,
+                    std::fabs(std::remainder(e.big_platform_angle - truthBig(t),
+                                             2.0 * M_PI)));
             }
             m.max_head_yaw_err = std::max(m.max_head_yaw_err,
                                           std::fabs(wrap(e.head_world_yaw - s.head_euler_yaw)));
@@ -356,6 +380,11 @@ struct HeldMetrics {
     double max_gravity_err = 0.0;
     double max_sched_lag = 0.0;
     double max_trusted_age = 0.0;
+    // ★ 底盘 IMU 与大 yaw 共用这条"低速率 + 不规则保持"链路 ⇒ 也要一阶延时补偿
+    double max_chassis_az_err = 0.0;     // 补偿后 chassis_azimuth vs 真值
+    double max_platform_joint_err = 0.0; // 补偿后 θ_p vs 真值 θ_b
+    double max_raw_chassis_err = 0.0;    // 对照: 被保持的底盘值 vs 真值
+    double max_raw_big_err = 0.0;        // 对照: 被保持的大 yaw 编码值 vs 真值（= max_raw_held_err）
 };
 
 HeldMetrics runHeldScenario(const TruthCfg& cfg, double transport_delay,
@@ -411,10 +440,14 @@ HeldMetrics runHeldScenario(const TruthCfg& cfg, double transport_delay,
                 const double hold = nextHold();
                 next_mcu2_refresh = t + hold;
                 m.max_hold_applied = std::max(m.max_hold_applied, hold);
-                held_big = truthBig(t) + 0.010;      // 到达值视为准确（含固定偏差）
-                held_big_rate = truthBigRate(t);
-                held_chassis_yaw = truthChassisYawF(t, cfg.chassis_freq);
-                held_chassis_omega = truthChassisRateF(t, cfg.chassis_freq);
+                // ★ 这一包的**采样时刻**比到达时刻早 transport_delay（链路传输时延），
+                //   大 yaw 与底盘 IMU 同一包 ⇒ 两者都按 t − transport_delay 取真值。
+                //   （估计器的年龄 = now − 首次看到该样本 + transport_delay，与外推一致。）
+                const double t_smp = std::max(0.0, t - transport_delay);
+                held_big = truthBig(t_smp) + 0.010;      // 到达值视为准确（含固定偏差）
+                held_big_rate = truthBigRate(t_smp);
+                held_chassis_yaw = truthChassisYawF(t_smp, cfg.chassis_freq);
+                held_chassis_omega = truthChassisRateF(t_smp, cfg.chassis_freq);
                 ++mcu2_seq;
             }
             est.onMcu(held_big, held_big_rate, truthSmall(t), truthSmallRate(t), truthPitch(t),
@@ -431,6 +464,20 @@ HeldMetrics runHeldScenario(const TruthCfg& cfg, double transport_delay,
                                           std::fabs(e.big_joint_rate - truthBigRate(t)));
             m.max_raw_held_err = std::max(m.max_raw_held_err,
                                           std::fabs(held_big - truthBig(t)));
+            // ★ 底盘 IMU: 补偿后 vs 真值；对照 = 被保持的原始底盘值 vs 真值。
+            //   两者都与**真值底盘的矩阵方位角**比较（被保持的标量 yaw 加 tilt_bias 后才同口径）。
+            {
+                const double az_true = azimuthOf(s.R_world_C);
+                const double tilt_bias = azimuthOf(R_tilt(cfg));
+                m.max_chassis_az_err = std::max(m.max_chassis_az_err,
+                    std::fabs(std::remainder(e.chassis_azimuth - az_true, 2.0 * M_PI)));
+                m.max_raw_chassis_err = std::max(m.max_raw_chassis_err,
+                    std::fabs(std::remainder(held_chassis_yaw + tilt_bias - az_true,
+                                             2.0 * M_PI)));
+                m.max_platform_joint_err = std::max(m.max_platform_joint_err,
+                    std::fabs(std::remainder(e.big_platform_angle - truthBig(t),
+                                             2.0 * M_PI)));
+            }
             if (e.big_enc_age >= 0.0) {
                 m.max_age_reported = std::max(m.max_age_reported, e.big_enc_age);
                 m.min_age_reported = std::min(m.min_age_reported, e.big_enc_age);
@@ -484,6 +531,10 @@ int main() {
     printf("=== 状态估计器验证（IMU 构型可切换: 大 yaw 转子 A / 头 H；大 yaw 编码器有延迟+误差）===\n");
 
     TruthCfg cfg;
+    // 底盘 8°/5° 倾斜下，"标量 ψ_c" 与"矩阵方位角"相差 ≈ p·r（≈0.012 rad）——
+    // θ_p 是用**方位角之差**表达的关节角，因此天然带这个常数偏置（见估计器/StrictPose 注释）。
+    // 断言里凡涉及"底盘方位角/θ_p 的绝对精度"都要加上它，否则会把约定差当成误差。
+    const double tilt_bias_az = std::fabs(azimuthOf(R_tilt(cfg)));
     const double delay_truth = 0.030;      // 实际链路延迟 30ms（含 MCU1 转发 + 串口）
     const double enc_err = 0.010;          // 大 yaw 编码器固定误差 0.01 rad
     const double duration = 2.0;
@@ -523,6 +574,17 @@ int main() {
     printf("    [信息] 反解底盘(x 轴方位角) vs 真值: %.2e rad（旋转矩阵差 %.2e）"
            "；θ_b 估计误差 %.2e rad —— 前者由后者限制，**不是** StrictPose 自身误差\n",
            m_ok.max_chassis_yaw_err, m_ok.max_chassis_att_err, m_ok.max_big_joint_err);
+    printf("    [信息] 底盘 IMU（与大 yaw 同链路、采样滞后 %.0f ms）: 补偿后底盘方位角误差"
+           " %.2e rad，对照未补偿 %.2e rad；θ_p 误差 %.2e rad\n",
+           delay_truth * 1000.0, m_ok.max_chassis_az_err, m_ok.max_raw_chassis_err,
+           m_ok.max_platform_joint_err);
+    // ★ 这两个量的**绝对**残差里含一个与补偿无关的常数: θ_p 用"方位角之差"表达关节角，
+    //   底盘 8°/5° 倾斜时它与真值关节角差 ≈p·r（还会随 θ_b 小幅变化，实测 ~7mrad）。
+    //   因此这里用**相对**判据: 补偿后的 θ_p 误差应显著小于"未补偿"情形（= ω_c·时延 + 同一个偏置）。
+    check(m_ok.max_platform_joint_err < 0.62 * (m_ok.max_raw_chassis_err + tilt_bias_az),
+          "底盘 IMU 一阶延时补偿: θ_p 误差 ≈ 倾斜常数偏置，远小于未补偿的 ω_c·时延",
+          m_ok.max_platform_joint_err,
+          0.62 * (m_ok.max_raw_chassis_err + tilt_bias_az));
     check(m_ok.max_platform_az_err < 2e-3, "IMU 直接给出的大 yaw 平台方位角 < 2mrad",
           m_ok.max_platform_az_err, 2e-3);
     check(m_ok.max_small_az_err < 5e-3, "可信量反解的小 yaw 输出方位角 < 5mrad",
@@ -535,8 +597,12 @@ int main() {
           m_ok.max_big_meas_err, 0.03);
     check(m_ok.max_gravity_err < 0.20, "重力方向(A 系)误差 < 0.20 m/s²",
           m_ok.max_gravity_err, 0.20);
-    check(m_ok.max_base_omega_err < 0.05, "底盘角速度误差 < 0.05 rad/s",
-          m_ok.max_base_omega_err, 0.05);
+    // 底盘角速度本身**不做**延时补偿（外推角速度需要角加速度，而底盘角加速度没有任何可信来源；
+    // 这是刻意的设计约束）⇒ 它的年龄误差 ≈ |α_c|·年龄。0.4Hz、幅值 0.5rad 时
+    // α_c,max = 0.5·(2π·0.4)² ≈ 3.2 rad/s²、年龄 ≈30ms ⇒ ≈0.10 rad/s（该量只以 μ·ω_c 的
+    // 小耦合进入模型，μ ≈ 1e-3 kg·m²）。
+    check(m_ok.max_base_omega_err < 0.15, "底盘角速度误差（= 被保持的 ω_c，年龄误差 α_c·age）< 0.15 rad/s",
+          m_ok.max_base_omega_err, 0.15);
     check(m_ok.used_mask != 0, "上报了所用数据位掩码",
           (double)m_ok.used_mask, 1.0);
 
@@ -586,6 +652,18 @@ int main() {
               (double)m.stale_ticks, 1.0);
         check(m.max_platform_az_err < 2e-3, "平台方位角仍由 IMU 精确给出（不受链路影响）",
               m.max_platform_az_err, 2e-3);
+        // ★ 底盘 IMU 也在这条链路上（同样延迟 + 值保持）⇒ 估计器对它做了一阶延时补偿。
+        //   对照: 直接用被保持的底盘值相减会带来 ω_c·(保持时长+时延) 的 θ_p 误差。
+        printf("   底盘方位角: 补偿后最大误差 %.5f rad；对照(被保持原始值) %.5f rad"
+               "  ⇒ θ_p 最大误差 %.5f rad\n",
+               m.max_chassis_az_err, m.max_raw_chassis_err, m.max_platform_joint_err);
+        check(m.max_chassis_az_err < 0.40 * m.max_raw_chassis_err,
+              "底盘 IMU 一阶延时补偿: 底盘方位角误差 < 未补偿的 40%"
+              "（残余主要是 ≈p·r 的约定偏置，非补偿误差）",
+              m.max_chassis_az_err, 0.40 * m.max_raw_chassis_err);
+        check(m.max_platform_joint_err < tilt_bias_az + 0.015,
+              "底盘转动 + 值保持下 θ_p 误差 ≈ 倾斜常数偏置(p·r) + 一阶残差",
+              m.max_platform_joint_err, tilt_bias_az + 0.015);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -651,10 +729,14 @@ int main() {
     //   故其关节角误差仅由编码器偏差 + 底盘角速度保持决定。
     //   附注: pitch 外推误差对**投影**只有二阶影响（关节轴方向与 ω 的 ẑ 分量共线、与 ṗ 垂直），
     //         因此 θ_p 的估计误差（即便 ~7mrad）不会显著污染 θ̇_b。
-    // 断言因此用"明显更大"的相对判据（实测 速率 19.5×、关节角 2.5×）+ 一个宽松上限。
-    check(m_head.max_big_rate_err > 5.0 * m_ok.max_big_rate_err,
+    // 断言因此用"明显更大"的相对判据（实测 速率 ~5×、关节角 2.2×）+ 一个宽松上限。
+    // ★ 阈值从 5× 降到 3.5×: ON_BIG_YAW 的基线里现在也含**被保持的底盘角速度**误差
+    //   （θ̇_b = ω_平台(实时) − ω_底盘(被保持)，误差 ≈ |α_c|·年龄；角速度本身不做延时补偿，
+    //    因为外推角速度需要角加速度而这个量没有可信来源 —— 见估计器实现注释），
+    //   0.4Hz 压力工况下把基线从 0.025 抬到 ~0.12 rad/s；ON_HEAD 的 θ̇_s 项仍是主导（~0.59）。
+    check(m_head.max_big_rate_err > 3.5 * m_ok.max_big_rate_err,
           "ON_HEAD: 大 yaw 关节角速度误差远大于 ON_BIG_YAW（多一项 θ̇_s 低通滞后）",
-          m_head.max_big_rate_err, 5.0 * m_ok.max_big_rate_err);
+          m_head.max_big_rate_err, 3.5 * m_ok.max_big_rate_err);
     // ★ 阈值从 1.6× 放宽到 1.2×: 上面的 0.34 rad/s 低通滞后**在
     //   `small_rate_lpf_alpha = 1.0`（默认值，即小 yaw 角速度直通 MCU 值、不滤波）下
     //   基本消失 ⇒ ON_HEAD 的 θ̇_s 项残差从 0.497 降到 0.171 rad/s，

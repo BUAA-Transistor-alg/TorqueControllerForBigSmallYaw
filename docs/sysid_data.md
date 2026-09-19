@@ -4,7 +4,16 @@
 
 - 采集脚本: `python/scripts/collect_sysid.py`
 - 输出目录: `data/sysid/`（`--out` 可改）
-- 被辨识模型: `include/tcbs/mpc/planar_yaw_model.h`（8 参: `Jbig_eff, Js, Px, Py, fc_big, fv_big, fc_small, fv_small`）
+- ★ **仿真环境 2（`--sim-rigid`，仅用于采集测试数据）**: 背隙"接触面完全刚性 + 死区完全自由" +
+  β 每条数据随机 + 微弱漂移；实现与动机见 `docs/backlash_model.md` §2.4。它额外写出
+  `backlash_center` / `backlash_beta_true` / `theta_true_*` / `dtheta_true_*` 共 8 列
+  （实机这 8 列恒 0 = "未知"）。
+- 被辨识模型: `include/tcbs/mpc/planar_yaw_model.h`
+  - **平面 2-DOF 子块** 8 参: `Jbig_eff, Js, Px, Py, fc_big, fv_big, fc_small, fv_small`
+  - ★ **大 yaw 背隙 / 电机侧** 8 参: `backlash_delta, backlash_k, backlash_c, backlash_through,
+    Jmotor, fc_motor, fv_motor, backlash_beta`（3-DOF 整机模型，见 `docs/backlash_model.md`）
+  - ⇒ 辨识需要 `theta_big_motor`（电机侧）**与** `theta_big_platform`（云台侧）**两列**；
+    12 列老数据没有云台侧列，会被辨识脚本跳过并提示重采。
 
 ---
 
@@ -39,7 +48,7 @@
  ├─ 采样: 300 点 @100 Hz（3.00 s），每点
  │        忙等到绝对时间点 → 读 est/mcu → 安全判定 → 两轴 PID → 力矩变化限幅
  │        → 仅力矩模式(mode=0)下发 → 记录（含 gravity_ax/gravity_ay）
- └─ 段尾: 主动回到**行程中心 −2.5°**保持（大 yaw 保持当前方位角）
+ └─ 段尾: 主动回到**行程中心**保持（当前行程 ±30° ⇒ 0°；大 yaw 保持当前平台方位角）
           * 只在**程序退出**时才连发零力矩（规格要求）
 ```
 
@@ -157,6 +166,10 @@ t,theta_big,theta_small,dtheta_big,dtheta_small,tau_big,tau_small,axis,held_targ
 
 | 键 | 单位 | 来源 | 说明 |
 |---|---|---|---|
+| `backlash_center` | rad | `est.backlash_center` | ★ **背隙死区中心 β 的在线值**（滑动 min/max，只用刚刷新的样本更新，见 `docs/backlash_model.md` §2.1）。3-DOF 辨识把它当**逐样本外生量**（= 运行期 MPC 拿到的就是它） |
+| `backlash_beta_true` | rad | 仿真真值 | ★ 仅 `--sim-rigid` 非 0；实机恒 0。用于诊断在线估计的精度 / `--beta-mode=true` 上限对照 |
+| `theta_true_motor` / `_platform` / `_small` | rad | 仿真真值 | ★ 仅 dry-run 非 0。真值状态: ① 量化"电机侧延时补偿估计"的误差；② `--state-mode=true` 上限对照 |
+| `dtheta_true_motor` / `_platform` / `_small` | rad/s | 仿真真值 | 同上（角速度） |
 | `chassis_yaw` | rad | `est.chassis_azimuth` | 底盘方位角估计（来自经 MCU1↔MCU2 链路的底盘 IMU，零阶保持、带延迟） |
 | `chassis_omega` | rad/s | `est.chassis_yaw_rate` | 底盘 yaw 角速度（同上） |
 | `big_enc_age` | s | `est.big_enc_age` | 大 yaw 值年龄（上位机计时）。**年龄大 → 该时刻 `theta_big` 的外推补偿更不可信**，可用于给样本降权/剔除 |
@@ -185,9 +198,9 @@ t,theta_big,theta_small,dtheta_big,dtheta_small,tau_big,tau_small,axis,held_targ
 | `ref_amp` | float64 | driven 参考的半幅（相对 `ref_center`） |
 | `tilted` | int32 | **1 = 本段在 `--tilted`（静态倾斜静置）下采集**；0 = 水平（默认，行为与旧版完全一致） |
 | `tilt_slot` | int32 | `--tilt-rolling` 时本段使用的倾角槽位下标（0/1/2…，见 §6.4）；未轮换时为 **−1** |
-| `small_travel_min` / `small_travel_max` | float64 | 小 yaw **硬限位**（机械行程）= −25° / +20° |
-| `small_env_min` / `small_env_max` | float64 | 小 yaw **参考包络** = −17° / +12°（硬限位两侧各留 8° 跟踪余量） |
-| `small_center` | float64 | 小 yaw **行程中心** = (−25°+20°)/2 = **−2.5°**（回中心/段尾保持/初始条件都用它） |
+| `small_travel_min` / `small_travel_max` | float64 | 小 yaw **硬限位**（机械行程）= −30° / +30°（对称） |
+| `small_env_min` / `small_env_max` | float64 | 小 yaw **参考包络** = −22° / +22°（硬限位两侧各留 8° 跟踪余量） |
+| `small_center` | float64 | 小 yaw **行程中心** = (−30°+30°)/2 = **0°**（回中心/段尾保持/初始条件都用它） |
 
 ---
 
@@ -200,10 +213,10 @@ t,theta_big,theta_small,dtheta_big,dtheta_small,tau_big,tau_small,axis,held_targ
 | 上位机 PID | `kp=2.0, ki=0.1, kd=0.2` | 位置式 + 条件积分抗饱和，输出限幅 **±1.0 N·m** |
 | 力矩变化限幅 | **0.1 N·m/步**（每轴独立） | 保护减速器；记录的是限幅**之后**的值 |
 | 到位（settle） | **2.0 s**（`--settle-sec`），未收敛最多再等 2 轮 | driven 与 held 两轴同时 PID 到位 |
-| 小 yaw 硬限位（机械行程） | **[−25°, +20°]**（**非对称**） | 电控侧也按它限位；`SMALL_TRAVEL_MIN/MAX` |
+| 小 yaw 硬限位（机械行程） | **[−30°, +30°]** | 电控侧也按它限位；`SMALL_TRAVEL_MIN/MAX` |
 | 小 yaw 中止阈值（上位机） | 同上（触及即中止本段、数据不保存、回中心） | 距界限 < 3° 只打印告警；`SMALL_ABORT_MIN/MAX` |
-| 小 yaw 参考包络 | **[−17°, +12°]** | 硬限位两侧各留 8° 跟踪超调余量；激励参考/到位目标/held 目标都用它 |
-| 小 yaw 行程中心 | **−2.5°** | = (min+max)/2，**不是 0**（见 §6.2） |
+| 小 yaw 参考包络 | **[−22°, +22°]** | 硬限位两侧各留 8° 跟踪超调余量；激励参考/到位目标/held 目标都用它 |
+| 小 yaw 行程中心 | **0°** | = (min+max)/2；式子不硬编码 0 ⇒ 非对称行程也自动正确（见 §6.2） |
 | 过温阈值 | **55 ℃**（`--max-temp`） | 超过则零力矩降温等待（上限 600 s），恢复后重采该段 |
 | 参考规划器（细化 1000 子步/周期） | 大 yaw: `v≤8 rad/s, a≤30 rad/s², j≤800 rad/s³`；小 yaw: `v≤3, a≤15, j≤400` | `TrajectoryPlanner` + `StepRefinementWrapper`；**到位移动与激励参考都走它**（避免阶跃过冲） |
 | 静态倾斜段 | `--tilted` 默认**关闭**；`--tilt-rolling` 隐含开启 | 只提示静置姿态 + 记录 `gravity_ax/ay` + 元数据 `tilted=1`。**不做倾角补偿、不改变激励方式、底盘仍静止**（见 §6.4） |
@@ -232,23 +245,24 @@ t,theta_big,theta_small,dtheta_big,dtheta_small,tau_big,tau_small,axis,held_targ
   （自检时真的出现过 3° 的段）。因此平滑后幅值 < **14°** 就放大输入重试，仍不行就换窗口。
 * 平滑后叠加常量不影响规划器行为（`step()` 只看 `target − p`，平移不变）。
 
-### 6.2 小 yaw 的**非对称行程**规则（硬限位 −25° … +20°）
+### 6.2 小 yaw 的行程规则（**对称** ±30°）
 
-**实测机械行程是 min = −25°、max = +20°**（不是 ±45°，也不是 ±40°）。三档含义:
+**实测机械行程是 min = −30°、max = +30°**（用户把限位放宽到左右各 30°）。三档含义:
 
 | 档 | 区间 | 用途 |
 |---|---|---|
-| ① **硬限位**（机械行程） | **[−25°, +20°]** | 电控侧也按它限位；`SMALL_TRAVEL_MIN/MAX` |
+| ① **硬限位**（机械行程） | **[−30°, +30°]** | 电控侧也按它限位；`SMALL_TRAVEL_MIN/MAX` |
 | ② **中止阈值**（上位机） | 同上（触及即中止本段、数据不保存、PID 回中心） | 对应旧版的 ±45° 中止；距界限 < 3° 只告警 |
-| ③ **参考包络** | **[−17°, +12°]**（两侧各留 8° 跟踪超调余量） | 激励参考、到位目标、held 保持目标都用它 |
+| ③ **参考包络** | **[−22°, +22°]**（两侧各留 8° 跟踪超调余量） | 激励参考、到位目标、held 保持目标都用它 |
 
-**中心是 −2.5°，不是 0**（`SMALL_CENTER_RAD = (min+max)/2`）: 行程不对称时 0 偏向 +20° 一侧，
-停在中心才能让到两端的余量相等（各 22.5°）。回中心/段尾保持/每次测量的初始条件都用它。
+**中心是 0°**（`SMALL_CENTER_RAD = (min+max)/2`；当前行程对称）。回中心/段尾保持/
+每次测量的初始条件都用它 —— 式子写成 `(min+max)/2` 而不是硬编码 0，
+以后改成非对称行程（例如 [−20°, +25°]）会自动跟着走。
 
-**行程非对称 ⇒ 所有"±band"的对称写法都改成了区间运算**:
+**所有"±band"的写法都改成区间运算**（对称/非对称行程都正确）:
 
-1. 参考半幅夹到 **≤ 包络半宽 14.5°**（= (12°−(−17°))/2），实际半幅 7°~14.5°
-   （下限 `MIN_EXCITE_AMP_SMALL` = 7° 兜底: 小 yaw 行程只有 45° 宽，下限不能沿用大 yaw 的 14°）；
+1. 参考半幅夹到 **≤ 包络半宽 22°**，实际半幅 7°~22°
+   （下限 `MIN_EXCITE_AMP_SMALL` = 7° 兜底: 小 yaw 行程比大 yaw 窄，下限不能沿用大 yaw 的 14°）；
 2. 中心从**可行中心区间** **`[env_min + 半幅, env_max − 半幅]`** 内随机取
    （`random_center_for()`；非对称区间里"±(band−半幅)"的写法会算错，不再使用）；
 3. **若仍超出包络 → 整体等比缩放 + 平移到包络内**（`fit_into_interval()`: 先按区间宽度缩放，
@@ -257,7 +271,7 @@ t,theta_big,theta_small,dtheta_big,dtheta_small,tau_big,tau_small,axis,held_targ
 
 > `axis=1`（driven = 小 yaw）时，`held`（大 yaw）目标在**现有平台方位角 ±π 内随机**（大 yaw 可多圈连续，无需限幅）。
 > `axis=0`（driven = 大 yaw）时，`held`（小 yaw）目标在**参考包络内**随机，但收进 **0.7 倍**
-> ⇒ **行程中心 −2.5° ± 10.15°**（⊂ 包络）。收窄的理由: 大 yaw 摆动会通过 `M12` 给小 yaw
+> ⇒ **行程中心 ± 0.7×包络半宽 = ±15.4°**（⊂ 包络）。收窄的理由: 大 yaw 摆动会通过 `M12` 给小 yaw
 > 注入扰动力矩（可达 ~0.3 N·m），PID 顶回来需要 ~10° 的瞬时偏差，收窄才有余量不触碰中止阈值。
 > 见脚本常量 `HELD_SMALL_MAX`。
 
@@ -318,17 +332,17 @@ npz（`held_big_stratified / held_strat_index / held_strat_count / held_strat_of
 
 | 触发 | 动作 |
 |---|---|
-| 小 yaw θ 超出**硬限位 [−25°, +20°]** | **立即中止本段**（数据**不保存**，避免污染） → PID 回**行程中心 −2.5°**（大 yaw 保持当前方位角）；距界限 < 3° 只打印告警 |
+| 小 yaw θ 超出**硬限位 [−30°, +30°]** | **立即中止本段**（数据**不保存**，避免污染） → PID 回**行程中心**（当前 0°；大 yaw 保持当前方位角）；距界限 < 3° 只打印告警 |
 | 电机温度 ≥ `--max-temp` | 中止本段 → 100 Hz 零力矩保温等待，降到 `max_temp − 5 ℃` 后**重采同一段号**；600 s 未降下来则退出 |
 | Ctrl+C | 立即停止激励 → 按 0.1 N·m/步斜坡把两轴力矩压到 0 → **连发 20 帧零力矩** → 关闭句柄 |
 | 正常结束 / 异常退出 | 同样经过 `safe_shutdown()`：斜坡归零 + 连发零力矩 |
-| 段尾 | 主动回到**行程中心 −2.5°**保持（大 yaw 保持）——比"撒手零力矩"安全: 段末残余角速度会通过耦合把另一轴推走 |
+| 段尾 | 主动回到**行程中心**（当前 0°）保持（大 yaw 保持）——比"撒手零力矩"安全: 段末残余角速度会通过耦合把另一轴推走 |
 
 段号 `0…segments−1` 与文件名序号一致；被中止的段会跳过该段号（不重排）。
 
 ---
 
-## 8. 无硬件自检（`--dry-run`）
+## 8. 无硬件自检（`--dry-run`）与仿真环境 2（`--sim-rigid`）
 
 ```bash
 python3 python/scripts/collect_sysid.py --dry-run --segments=1

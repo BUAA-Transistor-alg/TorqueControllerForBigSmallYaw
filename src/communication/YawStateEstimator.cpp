@@ -10,6 +10,9 @@ using rot::Mat3;
 
 namespace {
 constexpr double TWO_PI = 2.0 * M_PI;
+// 背隙 β 极值窗口的"新鲜样本"门限: 从上位机**首次看到该新样本**起算（见 estimate() 里
+// 的 bl_fresh）。链路间隔 ≈10 ms 时每一帧都新鲜；间隔 100 ms 时只在刷新后的头 20 ms 更新。
+constexpr double kBacklashFreshS = 0.02;
 }
 
 YawStateEstimator::YawStateEstimator(const Config& cfg) : cfg_(cfg) {
@@ -85,8 +88,9 @@ void YawStateEstimator::reset() {
 
     big_have_ = false;      big_meas_ = 0.0;   big_meas_t_ = -1.0;
     big_angle_ = 0.0;       big_rate_ = 0.0;   big_rate_lpf_ = 0.0;
-    big_rate_enc_lpf_ = 0.0; big_rate_enc_seen_ = false;
-    big_rate_bias_ = 0.0;    enc_t_last_ = -1.0;
+    big_motor_rate_lpf_ = 0.0; big_motor_rate_seen_ = false; motor_rate_t_last_ = -1.0;
+    bl_win_min_ = 0.0; bl_win_max_ = 0.0; bl_win_seen_ = false; bl_t_last_ = -1.0;
+    chassis_azimuth_ = 0.0;
     big_innovation_ = 0.0;
     big_anchor_t_ = -1.0; big_last_sample_t_ = -1.0; big_sample_interval_ = 0.0;
     mcu2_seq_ = 0; mcu2_seq_seen_ = false;
@@ -163,30 +167,12 @@ void YawStateEstimator::onImu(double euler_yaw, double euler_pitch, double euler
     } else {
         big_rate_lpf_ += cfg_.big_rate_lpf_alpha * (rate_target - big_rate_lpf_);
     }
-    // ── 用编码器值**慢速校正 IMU 支路的直流误差**（不把延迟的编码器值当 DC 用）──
-    //   ★ 为什么不是"互补滤波（低频取编码器 + 高频取 IMU）":
-    //     编码器值走 MCU1↔MCU2 低速链路（约 3~10 Hz）**且带传输延迟**，
-    //     它的直流分量本身就是"延迟后的真值"。而互补滤波只能补相位、补不了延迟
-    //     ⇒ 拿它当 DC 会给 0.3 Hz 量级的运动引入 (延迟 × θ̈) 的系统误差。
-    //     实测（tests/test_yaw_state_estimator）: 那种写法把 ON_BIG_YAW 的
-    //     大 yaw 角速度误差从 0.25 rad/s 放大到 ~1.07 rad/s，`base_omega` 也偏 0.21 rad/s。
-    //   ✅ 正确用法: 编码器角速度**无积分漂移**，所以只用它把 IMU 支路的**直流**慢慢拉回来
-    //     （陀螺偏置 / 底盘角速度残差 / ON_HEAD 的 θ̇_s 低通残差都是直流型的误差）。
-    //     高频路径完全不动 ⇒ 不引入链路延迟。
+    // ★ 大 yaw **云台侧**角速度只用 IMU 得到: 编码器量的物理含义是**电机**侧，
+    //   与云台侧之间隔着背隙 ⇒ 绝不再用它修正云台角速度（曾经那套"用编码器校正 IMU
+    //   支路直流"的互补滤波/偏置校正已按用户要求完全删除）。
+    big_rate_ = big_rate_lpf_;
     prov_.big_rate_from_imu = imu_seen_;
-    if (cfg_.big_rate_use_encoder && big_rate_enc_seen_ && cfg_.big_rate_bias_tau_s > 1e-9) {
-        const double dc_err = big_rate_lpf_ - big_rate_enc_lpf_;   // IMU 低频 − 编码器低频
-        // 按 IMU 实际间隔给系数 ⇒ 与采样率无关（时间常数 = big_rate_bias_tau_s）
-        const double dt_imu = (imu_t_ > 0.0) ? (now - imu_t_) : 0.0;
-        const double a_bias = (dt_imu > 1e-9)
-                                  ? (1.0 - std::exp(-dt_imu / cfg_.big_rate_bias_tau_s)) : 0.0;
-        big_rate_bias_ += a_bias * (dc_err - big_rate_bias_);
-        big_rate_ = big_rate_lpf_ - big_rate_bias_;
-        prov_.big_rate_from_encoder = true;
-    } else {
-        big_rate_ = big_rate_lpf_;
-        prov_.big_rate_from_encoder = false;
-    }
+    prov_.big_rate_from_encoder = false;
 
     imu_seen_ = true;
     imu_t_ = now;
@@ -299,25 +285,22 @@ void YawStateEstimator::onMcu(double yaw_big_angle, double yaw_big_omega,
         ++prov_.big_enc.count;
         prov_.big_enc.valid = true;
 
-        // ── 大 yaw 角速度的**编码器支路**（互补滤波的低频/直流部分）──
-        //   `yaw_big_omega` 是电控按编码器算出的关节角速度（已过映射，符号/比例一致）。
-        //   它走 MCU1↔MCU2 低速链路、值被保持 ⇒ 只在**新样本**时推动一次低通，
-        //   避免"值被保持"期间把同一个数反复灌进滤波器（那会伪造出额外的平滑）。
-        //   ⚠ 判据必须与上面**同一个**（含"角度值变化"那一项）：只按序号判断的话，
-        //     遇到序号不递增（或恒为 0）的实现会**永远不更新**，低频支路被冻结在首帧值。
-        if (cfg_.big_rate_use_encoder && new_sample) {
-            if (!big_rate_enc_seen_) {
-                big_rate_enc_lpf_ = yaw_big_omega;      // 首帧直接锚定，避免从 0 慢慢爬
-                big_rate_enc_seen_ = true;
+        // ── 大 yaw **电机侧**角速度（来自 MCU 编码器）──
+        //   它走 MCU1↔MCU2 低速链路、值被保持 ⇒ 只在**新样本**时推进一次低通
+        //   （"值被保持"期间反复灌同一个数会伪造出额外的平滑）。
+        //   判据与上面大 yaw 角度用的是**同一个** `new_sample`。
+        if (new_sample) {
+            if (!big_motor_rate_seen_) {
+                big_motor_rate_lpf_ = yaw_big_omega;   // 首帧锚定，避免从 0 慢慢爬
+                big_motor_rate_seen_ = true;
             } else {
-                // 按**实际间隔**给系数：链路率在 3~100 Hz 之间变化，固定 α 会让时间常数飘
-                const double d_enc = (enc_t_last_ > 0.0) ? (now - enc_t_last_) : 0.0;
-                const double a = (d_enc > 1e-9 && cfg_.big_rate_enc_tau_s > 1e-9)
-                                     ? (1.0 - std::exp(-d_enc / cfg_.big_rate_enc_tau_s))
-                                     : cfg_.big_rate_enc_alpha;
-                big_rate_enc_lpf_ += a * (yaw_big_omega - big_rate_enc_lpf_);
+                const double d_enc = (motor_rate_t_last_ > 0.0) ? (now - motor_rate_t_last_) : 0.0;
+                const double a = (d_enc > 1e-9 && cfg_.big_motor_rate_tau_s > 1e-9)
+                                     ? (1.0 - std::exp(-d_enc / cfg_.big_motor_rate_tau_s))
+                                     : cfg_.big_motor_rate_alpha;
+                big_motor_rate_lpf_ += a * (yaw_big_omega - big_motor_rate_lpf_);
             }
-            enc_t_last_ = now;
+            motor_rate_t_last_ = now;
         }
 
         if (new_sample) {
@@ -437,9 +420,61 @@ void YawStateEstimator::recompute(double now) {
     o.pitch_joint_rate = pitch_rate_;
 
     // ── 2) 大 yaw 估计 ──
-    o.big_joint_angle_meas = big_meas_;
-    o.big_joint_angle = big_angle_;
-    o.big_joint_rate = big_rate_;
+    o.big_joint_angle_meas = big_meas_;          // 电机侧（原始滞后测量）
+    o.big_joint_angle = big_angle_;              // 电机侧（延时补偿后）
+    o.big_joint_rate = big_rate_;                // 云台侧角速度（旧名，语义未变）
+    o.big_motor_angle = big_angle_;
+    o.big_motor_rate = big_motor_rate_seen_ ? big_motor_rate_lpf_ : big_rate_;
+    o.big_platform_rate = big_rate_;
+    // 云台侧关节角 θ_p = platform_azimuth_ − ψ_chassis（两者均解卷绕连续）。
+    // ★ 底盘 IMU **与大 yaw 编码器同一条 MCU2 链路**（同样有链路延迟 + 两次刷新之间被值保持），
+    //   因此这里对它做**一阶延时补偿**，而不是直接拿被保持的值相减:
+    //       ψ_c(T) ≈ ψ_c(样本) + ω_c(样本)·年龄,  年龄 = T − 上次看到新样本 + transport_delay
+    //   底盘没有第二个实时传感器（大 yaw 那边有 IMU 陀螺可以连续外推），所以只能用**被保持的
+    //   底盘角速度**做外推 —— 底盘角速度本来变化慢，一阶足够；补偿把"值保持"造成的阶梯
+    //   （误差 = ω_c·年龄，最长一个保持周期）变成连续量。
+    //   外推时间上限取 stale_age_s: 链路停流时不让它在 1 s 级别的超时窗口里无限增长
+    //   （超过该年龄时源本来就会被标 stale）。
+    double chassis_az = chassis_yaw_unwrapped_;
+    if (chassis_seen_ && chassis_sample_age_now > 0.0) {
+        chassis_az += chassis_rate_ * std::min(chassis_sample_age_now, cfg_.stale_age_s);
+    }
+    o.big_platform_angle = platform_azimuth_ - chassis_az;
+    // ── ★ 背隙中心 β 的**在线**估计（带遗忘的滑动 min/max of Δ_raw）──
+    //   Δ_raw = θ_motor − θ_platform。只有宽度 δ 是静态标定量；中心随电机/云台共同
+    //   旋转而移动、且云台角由 IMU 推出会漂移 ⇒ 中心必须在线确定（用户要求）。
+    //   做法: 极值分别向当前值遗忘（时间常数 backlash_center_tau_s）⇒ O(1) 近似滑窗。
+    //   云台双向旋转 ⇒ 一个时间常数内两侧翼都会被访问到，极值就是两次"接触"。
+    {
+        const double now2 = nowSeconds();
+        const double draw = big_angle_ - o.big_platform_angle;
+        // ★ 只用**刚拿到的那个新样本**更新极值窗口:
+        //   `big_angle_` 在两次样本之间是按角速度外推的，年龄越大外推误差越大
+        //   （≈ ½·α·age²，电机在背隙内自由段加速度可以很大）⇒ 拿"旧样本外推出来的值"
+        //   去撑极值会把 Δ 的极差撑得远大于 δ、把中心带偏（实测：不门控时 β 误差
+        //   可达 35 mrad ≈ 0.4δ；门控到样本到达后 20 ms 内 ⇒ 误差降到几 mrad 量级）。
+        const bool bl_fresh = (big_anchor_t_ > 0.0) && ((now2 - big_anchor_t_) <= kBacklashFreshS);
+        if (cfg_.backlash_center_tau_s > 1e-9 && bl_fresh) {
+            if (!bl_win_seen_) {
+                bl_win_min_ = bl_win_max_ = draw;   // 首帧直接锚定（假定此刻在死区中心）
+                bl_win_seen_ = true;
+                bl_t_last_ = now2;
+            } else {
+                const double dtb = (bl_t_last_ > 0.0) ? (now2 - bl_t_last_) : 0.0;
+                if (dtb > 1e-6) {
+                    const double a = 1.0 - std::exp(-dtb / cfg_.backlash_center_tau_s);
+                    bl_win_min_ = (draw < bl_win_min_) ? draw : (bl_win_min_ + a * (draw - bl_win_min_));
+                    bl_win_max_ = (draw > bl_win_max_) ? draw : (bl_win_max_ + a * (draw - bl_win_max_));
+                    bl_t_last_ = now2;
+                }
+            }
+            o.backlash_width_obs = bl_win_max_ - bl_win_min_;
+            // ★ β = Δ_raw 的**死区中心** = (max+min)/2。
+            //   模型用 Δ = θ_motor − θ_platform − β，把死区中心搬到 0；
+            //   （写成 −(max+min)/2 就反号了 —— 3-DOF 的 ctest 会抓到，见 testBacklash ④）
+            o.backlash_center = 0.5 * (bl_win_max_ + bl_win_min_);
+        }
+    }
     o.big_enc_age = big_sample_age_now;
     o.big_sample_interval = big_sample_interval_;
     o.chassis_imu_age = chassis_sample_age_now;
@@ -469,7 +504,7 @@ void YawStateEstimator::recompute(double now) {
     o.strict_pose = dual_yaw::makeStrictPose(imu_yaw_raw_, imu_pitch_raw_, imu_roll_raw_,
                                    on_head ? static_cast<int>(dual_yaw::StrictPoseImuLocation::ON_HEAD)
                                            : static_cast<int>(dual_yaw::StrictPoseImuLocation::ON_BIG_YAW),
-                                   big_angle_, theta_s, theta_p,
+                                   o.big_platform_angle, theta_s, theta_p,
                                    cfg_.mount_yaw, cfg_.mount_pitch, cfg_.mount_roll,
                                    cfg_.head_mount_yaw, cfg_.head_mount_pitch,
                                    cfg_.head_mount_roll,
@@ -504,12 +539,17 @@ void YawStateEstimator::recompute(double now) {
     //   而不是 "ψ_platform − θ_b" 的标量近似 —— 底盘有俯仰/横滚倾斜时两者差约 pitch·roll
     //   （本仓库测试里 8°/5° 倾斜下差 ~0.01 rad）；矩阵值在倾斜下严格正确。
     //   解卷绕: 取与标量近似值最近的圈，保持与 platform_azimuth_ 同源的连续性。
+    //   注: θ_b 用的是**已做一阶延时补偿**的底盘方位角（见上面 chassis_az），
+    //   所以这里的反解结果也就是补偿后的底盘方位角（+倾斜带来的严格化）。
     {
         const double az_wrapped = o.strict_pose.chassis_azimuth;
-        const double ref = platform_azimuth_ - big_angle_;
+        const double ref = chassis_azimuth_;   // 上一拍底盘方位角（θ_p 的参考同源）
         o.chassis_azimuth = std::remainder(az_wrapped - ref, 2.0 * M_PI) + ref;
+        chassis_azimuth_ = o.chassis_azimuth;   // 供下一拍的 θ_p / 解卷绕参考
     }
-    o.chassis_yaw_rate = chassis_seen_ ? chassis_rate_ : 0.0;   // 零阶保持
+    // 底盘角速度: 零阶保持（**不做**加速度级外推；一阶延时补偿只作用在方位角上，
+    // 因为外推一个"角速度"需要角加速度，而底盘角加速度没有任何可信来源）
+    o.chassis_yaw_rate = chassis_seen_ ? chassis_rate_ : 0.0;
 
     // ── 4) 模型外生量 ──
     // 重力: 先转到 IMU 系 g_imu = R_world_imuᵀ·(0,0,−g)，再转到 **A 系（大 yaw 转子系）**。

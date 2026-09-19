@@ -347,6 +347,80 @@ void testRegressor() {
     check(maxErr < 1e-6, "regressor 与 ∂τ/∂φ 数值偏导一致", maxErr, 1e-6);
 }
 
+// E. 大 yaw 传动**背隙**（3-DOF: q = (θ_motor, θ_platform, θ_small)）
+//    τ_t = k·dz(Δ) + c·Δ̇,  Δ = θ_m − θ_p − β
+void testBacklash() {
+    printf("\n[E] 背隙传动（3-DOF）\n");
+    ModelParams p = defaultModelParams();
+
+    // ① 死区: |Δ| ≤ δ/2 ⇒ τ_t ≈ 0（中间"几乎完全自由"）
+    double max_free = 0.0, max_err = 0.0;
+    for (double D = -0.49 * p.backlash_delta; D <= 0.49 * p.backlash_delta; D += 0.01 * p.backlash_delta) {
+        double q[3] = {D, 0.0, 0.0}, qd[3] = {0, 0, 0}, M[3][3], h[3];
+        ModelExo e;
+        eomBacklash(q, qd, p, e, M, h);
+        max_free = std::max(max_free, std::fabs(h[0]));      // h[0] 含 τ_t + 电机摩擦(Δ̇=0 ⇒ 0)
+    }
+    // 容差: 直通项 k·γ·|Δ|（用户授权的梯度引导，Δ≤δ/2）+ 平滑残余 ∝ k
+    const double free_tol = p.backlash_k * (p.backlash_through * 0.5 * p.backlash_delta + 1e-5);
+    check(max_free < free_tol, "死区内 τ_t ≈ 0（自由段, 仅剩直通项）", max_free, free_tol);
+
+    // ② 接触区: τ_t ≈ k·(|Δ| − δ/2)，两侧反号对称
+    double max_contact_err = 0.0, asym = 0.0;
+    for (double D = 0.6 * p.backlash_delta; D <= 3.0 * p.backlash_delta; D += 0.1 * p.backlash_delta) {
+        double qp[3] = {D, 0, 0}, qm[3] = {-D, 0, 0}, qd[3] = {0, 0, 0}, M[3][3], hp[3], hm[3];
+        ModelExo e;
+        eomBacklash(qp, qd, p, e, M, hp);
+        eomBacklash(qm, qd, p, e, M, hm);
+        // 含直通项: τ_t = k·[(Δ−δ/2) + γ·Δ]
+        const double theory = p.backlash_k * ((D - 0.5 * p.backlash_delta)
+                                              + p.backlash_through * D);
+        max_contact_err = std::max(max_contact_err, std::fabs(hp[0] - theory));
+        asym = std::max(asym, std::fabs(hp[0] + hm[0]));
+    }
+    check(max_contact_err < 1e-2, "接触区 τ_t ≈ k(Δ−δ/2)", max_contact_err, 1e-2);
+    check(asym < 1e-9, "正负 Δ 的 τ_t 严格反号（对称）", asym, 1e-9);
+
+    // ③ 阻尼项: Δ=0、Δ̇=1、去掉电机摩擦 ⇒ τ_t = c
+    {
+        ModelParams pn = p; pn.fcMotor = 0.0; pn.fvMotor = 0.0;
+        double q[3] = {0, 0, 0}, qd[3] = {1, 0, 0}, M[3][3], h[3];
+        ModelExo e;
+        eomBacklash(q, qd, pn, e, M, h);
+        check(std::fabs(h[0] - pn.backlash_c) < 1e-9, "接触阻尼项 = c·Δ̇", std::fabs(h[0] - pn.backlash_c), 1e-9);
+    }
+
+    // ④ β（死区中心）平移: Δ = θ_m − θ_p − β ⇒ 把 β 加到 θ_p 上等价于整体平移
+    {
+        // Δ = θ_m − θ_p − β 在 (θ_p → θ_p+δ, β → β−δ) 下不变
+        const double beta = 0.021;
+        double q1[3] = {0.05, 0.0, 0.0}, q2[3] = {0.05, beta, 0.0}, qd[3] = {0, 0, 0};
+        ModelExo e2fix;
+        double M[3][3], h1[3], h2[3];
+        ModelExo e1; ModelExo e2; e2.backlash_beta = -beta;   // θ_p 加 β ⇒ β 减 β 才不变
+        eomBacklash(q1, qd, p, e1, M, h1);
+        eomBacklash(q2, qd, p, e2, M, h2);
+        check(std::fabs(h1[0] - h2[0]) < 1e-12, "β 把死区整体平移（Δ = θ_m−θ_p−β）",
+              std::fabs(h1[0] - h2[0]), 1e-12);
+    }
+
+    // ⑤ 电机侧与云台侧解耦: 死区内给电机力矩 ⇒ 云台加速度 ≈ 0
+    {
+        double q[3] = {0.0, 0.0, 0.0}, qd[3] = {0, 0, 0}, u[3] = {0.5, 0.0, 0.0};
+        double qdd[3];
+        ModelExo e;
+        forwardAccelBacklash(q, qd, u, p, e, qdd);
+        check(std::fabs(qdd[1]) < 1e-3, "死区内电机出力不驱动云台（解耦）", std::fabs(qdd[1]), 1e-3);
+        check(qdd[0] > 1.0, "同一力矩全部作用在电机上（q̈_m = u/J_m）", qdd[0], 1.0);
+    }
+
+    // ⑥ 接触刚度余量
+    {
+        const double k_ok = recommendedBacklashStiffness(p, 0.0025, true);
+        check(p.backlash_k <= k_ok, "接触刚度在子步 2.5ms 下稳定（有子步余量）", p.backlash_k, k_ok);
+    }
+}
+
 // D. 能量一致性: ω_c = 0、无摩擦、τ = 0 ⇒ dE/dt = 0
 void testEnergy() {
     printf("\n[D] 能量一致性（dE/dt = q̇ᵀτ）\n");
@@ -403,6 +477,7 @@ int main() {
     testAnalyticCases();
     testRegressor();
     testEnergy();
+    testBacklash();
     printf("\n%s (失败项: %d)\n", g_fail == 0 ? "全部通过" : "存在失败", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

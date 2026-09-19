@@ -20,8 +20,13 @@ namespace tcbs {
 //     发送旧值（值被保持），到达值本身可视为准确但**延迟不确定** → 靠**新样本序号**
 //     识别新样本（序号变化即新样本），年龄由**上位机自己的时钟**测量，再用 IMU
 //     角速度做**一阶（速度）外推**补齐
-//   - 底盘 IMU（同样经该链路）: 与上一条相同；仅做**零阶保持**（底盘角速度变化慢，
-//     不做任何加速度级外推，避免发散），其年龄同样由上位机计时
+//   - 底盘 IMU（同样经该链路，与大 yaw 编码器**共用同一个新样本序号**）: 延迟 + 值保持
+//     与上一条相同 ⇒ 同样做**一阶（速度）延时补偿**（底盘没有第二个实时传感器，只能用
+//     被保持的底盘角速度外推: ψ_c(T) ≈ ψ_c(样本) + ω_c(样本)·年龄；外推时间上限 = stale_age_s）。
+//     ★ 这一步是必须的: θ_p = ψ_platform − ψ_chassis，而 ψ_platform 来自**实时** IMU；
+//     底盘转动时若直接拿被保持的 ψ_chassis 相减，θ_p 会有 ω_c·年龄 的误差（最长一个保持周期），
+//     它同时污染 MPC 的关节初值、背隙 Δ 的在线估计与反解底盘方位角。
+//     其年龄同样由上位机计时
 //   - **不使用电控侧时钟**（MCU 端计时不可用）；判定新样本只用: 首帧 / 序号变化 / 值变化，
 //     不做"可用性"检测（上电第一帧即视为一次更新）
 //
@@ -118,31 +123,18 @@ public:
         //   （大 yaw 那个是陀螺投影，与本项无关）。
         double small_rate_lpf_alpha = 0.35;   // 小 yaw 关节角速度
         double big_rate_lpf_alpha   = 0.35;   // 大 yaw 平台/关节角速度（IMU 支路的高频低通）
-        // ── 大 yaw 角速度: 用 MCU 编码器角速度 `yaw_big_omega` 校正 IMU 支路的直流 ──
-        //   IMU 陀螺投影高频准但**有直流误差**（陀螺偏置、底盘项残差、ON_HEAD 的 θ̇_s
-        //   低通残差都是直流型）；编码器角速度无积分漂移，正好补直流。
-        //   ★ 只用它**慢速"拉直流**，不做"低频取编码器"的互补滤波 —— 编码器值走
-        //     MCU1↔MCU2 低速链路（约 3~10 Hz）且带传输延迟，互补滤波补不了延迟，
-        //     实测会把 0.3 Hz 运动的速率误差放大到 ~1 rad/s（见 .cpp 里的实测数字）。
-        //   `big_rate_enc_tau_s`: 编码器支路低通时间常数（抹平"值被保持"的台阶）；
-        //   `big_rate_bias_tau_s`: **直流校正时间常数（默认 60 s）**。必须远大于被测运动
-        //     的周期，否则校正器会把运动本身当成"直流误差"吃掉 ——
-        //     实测（tests/test_yaw_state_estimator）: τ=5 s 时 0.3 Hz 运动会漏进校正量
-        //     约 0.18 rad/s（该频率下 τ 只有 5 s ⇒ 衰减不够），误差反而比不做校正更大。
-        //     60 s ⇒ 对 0.1~1 Hz 的运动泄漏 < 1%，只在**几分钟**尺度上把陀螺偏置磨掉。
-        //   ── ⚠ 默认 **false**（关闭）: 实测在当前 MCU1↔MCU2 链路上**净亏** ──
-        //     延迟造成的误差是 (transport_delay × θ̈_big): 0.3 Hz、1.7 rad/s 的运动
-        //     ⇒ θ̈≈6 rad/s²、20 ms 延迟 ⇒ **0.12 rad/s**，比它想修正的陀螺偏置
-        //     (0.01~0.05 rad/s) 还大。也就是说:
-        //       · 大 yaw 运动在 **0.05 Hz 以下**（或链路更快/延迟更小）⇒ 有用；
-        //       · 0.1~1 Hz（辨识采集就是这个band）⇒ **有害**。
-        //     实测 tests/test_yaw_state_estimator: 开启后 ON_BIG_YAW 的大 yaw 角速度
-        //     误差不降反升，`ON_HEAD 明显差于 ON_BIG_YAW` 那条预期关系被打破。
-        //     要用就显式置 true，并先把 `big_rate_bias_tau_s` 加大到远大于运动周期。
-        bool   big_rate_use_encoder = false;
-        double big_rate_enc_alpha   = 0.25;   // 无 dt 信息时的兜底系数
-        double big_rate_enc_tau_s   = 0.30;   // 编码器支路低通时间常数 (s)
-        double big_rate_bias_tau_s  = 60.0;   // 直流校正时间常数 (s)；≤0 等于关闭校正
+        // ── 大 yaw **电机侧**角速度的低通 ──
+        //   来源 = MCU 的 `yaw_big_omega`（电控按**编码器**算出的电机角速度）。
+        //   它只用于"电机侧"状态 θ̇_m；**不再**用它去修正任何云台侧的量
+        //   （曾经加过"用编码器角速度校正 IMU 支路直流"的互补滤波/偏置校正，已按用户
+        //    要求**完全删除** —— 编码器量的物理含义是电机侧，与云台侧之间隔着背隙，
+        //    拿它修正云台角速度在原理上就是错的）。
+        double big_motor_rate_tau_s = 0.30;   // 低通时间常数 (s)，按 MCU 新样本间隔换算
+        double big_motor_rate_alpha = 0.25;   // 拿不到采样间隔时的兜底系数
+        // ── 背隙中心（β）在线估计的遗忘时间常数（s）──
+        //   越短越跟得上 IMU 漂移，但会被"单侧贴住"的运动带偏；
+        //   3 s 是"包含一次换向"的折中。≤0 关闭估计（β 恒 0）。
+        double backlash_center_tau_s = 3.0;
         double pitch_rate_lpf_alpha = 0.25;
         // pitch 角加速度估计低通（0 = 不使用角加速度，置 0）
         double pitch_acc_lpf_alpha = 0.15;
@@ -184,7 +176,7 @@ public:
         SourceInfo chassis_imu;    // 底盘 IMU（经 MCU）
 
         bool big_rate_from_imu = false;    // 大 yaw 角速度的高频是否来自 IMU
-        bool big_rate_from_encoder = false;  // 其低频/直流是否来自 MCU 编码器值（互补滤波）
+        bool big_rate_from_encoder = false;  // （已废弃：编码器不再参与云台角速度；恒 false，仅为 ABI 兼容保留）
         bool reverse_from_trusted = false; // 反解是否全部由可信量完成（无延迟源参与）
         double big_enc_delay_used = 0.0;   // 本帧大 yaw 值的实测年龄（s）
         double big_enc_innovation = 0.0;   // 编码器观测 − 预测（rad），诊断用
@@ -221,7 +213,24 @@ public:
         // ── 2) 大 yaw（延迟/带误差编码器 + IMU 速率 → 延迟补偿估计）──
         double big_joint_angle_meas = 0.0;  // 原始测量（滞后）
         double big_joint_angle = 0.0;       // 延迟补偿后的估计（控制用）
-        double big_joint_rate = 0.0;        // 关节角速度估计
+        double big_joint_rate = 0.0;        // 关节角速度估计（= 云台侧，见下）
+        // ── ★ 大 yaw 电机侧 / 云台侧 显式分离 ──
+        //   `big_joint_angle` / `_meas` 是**电机侧**（MCU 编码器；带链路延迟与保持）；
+        //   `big_joint_rate` 是**云台侧**关节角速度（IMU 陀螺投影）—— 两者不同源，
+        //   差异就是传动形变 Δ（背隙）。旧字段名保留以兼容，新代码请用下面四个。
+        double big_motor_angle = 0.0;       // 电机侧关节角（= big_joint_angle）
+        double big_motor_rate = 0.0;        // 电机侧角速度（MCU 编码器，低通后）
+        double big_platform_angle = 0.0;    // 云台侧关节角 θ_p = platform_azimuth − ψ_chassis
+                                            //   （ψ_chassis 已做一阶延时补偿，见文件头）
+        double big_platform_rate = 0.0;     // 云台侧角速度（= big_joint_rate）
+        // ── ★ 背隙中心的**在线**估计（β）──
+        //   Δ_raw = θ_motor − θ_platform；死区中心随电机/云台共同旋转而移动、
+        //   且云台角由 IMU 推出会漂移 ⇒ **只有宽度 δ 是静态标定量**，中心必须在用中确定。
+        //   做法: 对 Δ_raw 维护带遗忘的滑动 min/max（τ≈window τ），
+        //         center = (max+min)/2,  width_obs = max−min。
+        //   模型里用 Δ = θ_motor − (θ_platform + β)，β = −center ⇒ 死区关于 0 对称。
+        double backlash_center = 0.0;       // β（rad）—— 加在云台角上
+        double backlash_width_obs = 0.0;    // 观测到的 Δ_raw 极差（≈ δ；诊断用）
         double big_enc_age = -1.0;          // ★ 大 yaw 值的年龄（上位机计时，s）
         double big_sample_interval = 0.0;   // 最近两次新样本间隔（s，上位机计时）
         double chassis_imu_age = -1.0;      // 底盘 IMU 值的年龄（上位机计时，s）
@@ -236,8 +245,8 @@ public:
                                             //   = B 系 x 轴方位角 = 头 x 轴方位角（Rx(p)x̂=x̂）
         double los_azimuth = 0.0;           // 视轴（bore）世界方位角
         double los_elevation = 0.0;         // 视轴世界俯仰角
-        double chassis_azimuth = 0.0;       // ψ_chassis = ψ_big − θ_big（估计）
-        double chassis_yaw_rate = 0.0;      // 底盘 yaw 角速度（底盘 IMU，rad/s）
+        double chassis_azimuth = 0.0;       // ψ_chassis = ψ_big − θ_big（估计；已做一阶延时补偿）
+        double chassis_yaw_rate = 0.0;      // 底盘 yaw 角速度（底盘 IMU，零阶保持，rad/s）
 
         // ── 4) 模型外生量 ──
         double base_omega[3] = {0.0, 0.0, 0.0};   // 底盘角速度，关节参考系 C
@@ -331,10 +340,17 @@ private:
     double big_angle_ = 0.0;       // 延迟补偿估计
     double big_rate_ = 0.0;        // 关节角速度估计（互补滤波后）
     double big_rate_lpf_ = 0.0;    // IMU 支路低通（提供高频分量）
-    double big_rate_enc_lpf_ = 0.0;  // 编码器支路低通（提供"无漂移的直流参考"）
-    bool   big_rate_enc_seen_ = false;
-    double big_rate_bias_ = 0.0;     // IMU 支路的直流校正量（由编码器支路慢速估计）
-    double enc_t_last_ = -1.0;       // 上次编码器新样本时刻（用于 dt 相关系数）
+    double big_motor_rate_lpf_ = 0.0;   // 电机侧角速度低通
+    bool   big_motor_rate_seen_ = false;
+    double motor_rate_t_last_ = -1.0;   // 上次电机侧新样本时刻（用于 dt 相关系数）
+    // ── 背隙中心（β）在线估计: 带遗忘的滑动 min/max ──
+    //   这些量在 `estimate()`（const）里更新 —— estimate() 是"读估计"，
+    //   但 β 的滑动窗口是随读带更新的在线状态，故显式 mutable。
+    mutable double bl_win_min_ = 0.0;
+    mutable double bl_win_max_ = 0.0;
+    mutable bool   bl_win_seen_ = false;
+    mutable double bl_t_last_ = -1.0;
+    mutable double chassis_azimuth_ = 0.0;   // 上一拍底盘方位角（算 θ_p / 解卷绕参考用）
     double big_innovation_ = 0.0;
     uint8_t mcu2_seq_ = 0;
     bool   mcu2_seq_seen_ = false;        // 是否已收到过第一帧（首帧即视为一次更新）

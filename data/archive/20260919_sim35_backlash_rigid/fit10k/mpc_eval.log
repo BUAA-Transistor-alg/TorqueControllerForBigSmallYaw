@@ -1,0 +1,78 @@
+[10k-eval] 拟合参数: 0.055673,0.020811,0.001797,-0.021587,0.192167,0.122928,0.093806,0.035564 | 0.242788,153.385314,2.379537,0.274192,0.004904,0.005113,0.004254,0.000000
+=== E1 控制器=准确参数（参考） ===
+=== MPC 参数评估 E1 准确参数 ===
+φ = [0.05000 0.02000 0.00866 0.00500 0.2200 0.0550 0.0973 0.0280]
+背隙/电机侧: δ=0.0873 rad (5.00°)  k=200.00  c=2.000  γ=0.00200  Jmotor=0.00600  fcMotor=0.0300  fvMotor=0.0100
+★ 被控对象 = **刚性接触 + 死区完全自由**: k=1e+05 N·m/rad（1N·m ⇒ 1.0e-05 rad 变形）、c=0、γ=0
+★ β: 真值 β0=-0.0143 rad + 漂移（**随机重抽**）；控制器侧 β = 在线估计（τ=3.0s 滑动极值）
+N=12 max_iter=8
+模型 λ=100  子步=4 (有效步长 2.50 ms)  plant λ=10000 (步长 20.0 µs)  T=3.0s
+场景                         最大误差        RMS θs 最小(°) θs 最大(°) 求解均ms 求解最大 失败
+[dump] 闭环轨迹已写入 _tmp10k/mpc_true_0.csv（300 行）
+阶跃 0.6rad（双轴同参考）     0.1295     0.0261        -0.20        16.17       1.38       7.61      0
+[dump] 闭环轨迹已写入 _tmp10k/mpc_true_1.csv（300 行）
+大阶跃 1.2rad（需大 yaw 展开）     0.6474     0.1578        -4.44        17.30       1.39       9.20      0
+[dump] 闭环轨迹已写入 _tmp10k/mpc_true_2.csv（300 行）
+正弦跟踪 0.3rad @0.5Hz         0.0193     0.0069        -0.87         5.88       1.87      10.49      0
+=== E2 控制器=拟合参数（在线 β） ===
+=== MPC 参数评估 E2 拟合参数(10k) ===
+φ = [0.05567 0.02081 0.00180 -0.02159 0.1922 0.1229 0.0938 0.0356]
+背隙/电机侧: δ=0.2428 rad (13.91°)  k=153.39  c=2.380  γ=0.27419  Jmotor=0.00490  fcMotor=0.0051  fvMotor=0.0043
+★ 被控对象 = **刚性接触 + 死区完全自由**: k=1e+05 N·m/rad（1N·m ⇒ 1.0e-05 rad 变形）、c=0、γ=0
+★ β: 真值 β0=-0.0143 rad + 漂移（**随机重抽**）；控制器侧 β = 在线估计（τ=3.0s 滑动极值）
+N=12 max_iter=8
+模型 λ=100  子步=4 (有效步长 2.50 ms)  plant λ=10000 (步长 20.0 µs)  T=3.0s
+场景                         最大误差        RMS θs 最小(°) θs 最大(°) 求解均ms 求解最大 失败
+[dump] 闭环轨迹已写入 _tmp10k/mpc_fit_0.csv（300 行）
+阶跃 0.6rad（双轴同参考）     0.1303     0.0263        -0.07        15.77       1.81       4.36      0
+[dump] 闭环轨迹已写入 _tmp10k/mpc_fit_1.csv（300 行）
+大阶跃 1.2rad（需大 yaw 展开）     0.6673     0.1632        -5.27        17.22       1.39       3.09      0
+[dump] 闭环轨迹已写入 _tmp10k/mpc_fit_2.csv（300 行）
+正弦跟踪 0.3rad @0.5Hz         0.0192     0.0065        -0.45         3.39       1.35       3.30      0
+=== E3 控制器=拟合参数 + β 真值 ===
+=== MPC 参数评估 E3 拟合+β真值 ===
+φ = [0.05567 0.02081 0.00180 -0.02159 0.1922 0.1229 0.0938 0.0356]
+背隙/电机侧: δ=0.2428 rad (13.91°)  k=153.39  c=2.380  γ=0.27419  Jmotor=0.00490  fcMotor=0.0051  fvMotor=0.0043
+★ 被控对象 = **刚性接触 + 死区完全自由**: k=1e+05 N·m/rad（1N·m ⇒ 1.0e-05 rad 变形）、c=0、γ=0
+★ β: 真值 β0=-0.0143 rad + 漂移（**随机重抽**）；控制器侧 β = 真值（上限对照）（τ=3.0s 滑动极值）
+N=12 max_iter=8
+模型 λ=100  子步=4 (有效步长 2.50 ms)  plant λ=10000 (步长 20.0 µs)  T=3.0s
+场景                         最大误差        RMS θs 最小(°) θs 最大(°) 求解均ms 求解最大 失败
+[dump] 闭环轨迹已写入 _tmp10k/mpc_fitb_0.csv（300 行）
+阶跃 0.6rad（双轴同参考）     0.1426     0.0288        -0.16        15.96       1.63       2.69      0
+[dump] 闭环轨迹已写入 _tmp10k/mpc_fitb_1.csv（300 行）
+大阶跃 1.2rad（需大 yaw 展开）     0.6618     0.1618        -4.85        17.25       2.02       4.30      0
+[dump] 闭环轨迹已写入 _tmp10k/mpc_fitb_2.csv（300 行）
+正弦跟踪 0.3rad @0.5Hz         0.0199     0.0071        -0.72         2.72       2.04       4.86      0
+=== E4 控制器=准确参数 + β=0 ===
+=== MPC 参数评估 E4 准确+β=0 ===
+φ = [0.05000 0.02000 0.00866 0.00500 0.2200 0.0550 0.0973 0.0280]
+背隙/电机侧: δ=0.0873 rad (5.00°)  k=200.00  c=2.000  γ=0.00200  Jmotor=0.00600  fcMotor=0.0300  fvMotor=0.0100
+★ 被控对象 = **刚性接触 + 死区完全自由**: k=1e+05 N·m/rad（1N·m ⇒ 1.0e-05 rad 变形）、c=0、γ=0
+★ β: 真值 β0=-0.0143 rad + 漂移（**随机重抽**）；控制器侧 β = **不用（恒 0）**（τ=3.0s 滑动极值）
+N=12 max_iter=8
+模型 λ=100  子步=4 (有效步长 2.50 ms)  plant λ=10000 (步长 20.0 µs)  T=3.0s
+场景                         最大误差        RMS θs 最小(°) θs 最大(°) 求解均ms 求解最大 失败
+阶跃 0.6rad（双轴同参考）     0.1281     0.0258        -0.26        16.22       1.36       3.32      0
+大阶跃 1.2rad（需大 yaw 展开）     0.6481     0.1581        -4.55        17.31       2.06       5.61      0
+正弦跟踪 0.3rad @0.5Hz         0.0193     0.0067        -0.22         5.83       1.92       4.41      0
+/home/huhu233/.config/matplotlib is not a writable directory
+Matplotlib created a temporary cache directory at /tmp/matplotlib-8ihqepi4 because there was an issue with the default path (/home/huhu233/.config/matplotlib); it is highly recommended to set the MPLCONFIGDIR environment variable to a writable directory, in particular to speed up the import of Matplotlib and to better support multiprocessing.
+/home/huhu233/.local/lib/python3.10/site-packages/matplotlib/projections/__init__.py:63: UserWarning: Unable to import Axes3D. This may be due to multiple versions of Matplotlib being installed (e.g. as a system package and as a pip package). As a result, the 3D projection is not available.
+  warnings.warn("Unable to import Axes3D. This may be due to multiple versions of "
+场景                  最大误差(rad)   RMS(rad)    β 估计误差(rad)
+阶跃 0.6 rad             0.1303     0.0263         0.0291
+大阶跃 1.2 rad            0.6673     0.1632         0.0299
+正弦 0.3 rad @0.5Hz       0.0192     0.0065         0.0290
+[plot] 已保存 _tmp10k/mpc_tracking_fitted.png  (342.5 KB)
+/home/huhu233/.config/matplotlib is not a writable directory
+Matplotlib created a temporary cache directory at /tmp/matplotlib-xy_7xx24 because there was an issue with the default path (/home/huhu233/.config/matplotlib); it is highly recommended to set the MPLCONFIGDIR environment variable to a writable directory, in particular to speed up the import of Matplotlib and to better support multiprocessing.
+/home/huhu233/.local/lib/python3.10/site-packages/matplotlib/projections/__init__.py:63: UserWarning: Unable to import Axes3D. This may be due to multiple versions of Matplotlib being installed (e.g. as a system package and as a pip package). As a result, the 3D projection is not available.
+  warnings.warn("Unable to import Axes3D. This may be due to multiple versions of "
+场景                  最大误差(rad)   RMS(rad)    β 估计误差(rad)
+阶跃 0.6 rad             0.1295     0.0261         0.0294
+大阶跃 1.2 rad            0.6474     0.1578         0.0300
+正弦 0.3 rad @0.5Hz       0.0193     0.0069         0.0296
+[plot] 已保存 _tmp10k/mpc_tracking_true.png  (324.6 KB)
+[10k-eval] 完成
+exit=0
