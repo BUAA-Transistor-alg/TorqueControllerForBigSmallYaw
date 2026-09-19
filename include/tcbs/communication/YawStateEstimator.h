@@ -121,16 +121,16 @@ public:
         // α = 1.0 ⇒ **直通（不做任何滤波）**；α 越小越平滑、滞后越大。
         // ★ 要"角速度完全取自 MCU、不滤波"就是 `small_rate_lpf_alpha = 1.0`
         //   （大 yaw 那个是陀螺投影，与本项无关）。
-        double small_rate_lpf_alpha = 0.35;   // 小 yaw 关节角速度
-        double big_rate_lpf_alpha   = 0.35;   // 大 yaw 平台/关节角速度（IMU 支路的高频低通）
+        double small_rate_lpf_alpha = 1.0;   // 小 yaw 关节角速度
+        double big_rate_lpf_alpha   = 1.0;   // 大 yaw 平台/关节角速度（IMU 支路的高频低通）
         // ── 大 yaw **电机侧**角速度的低通 ──
         //   来源 = MCU 的 `yaw_big_omega`（电控按**编码器**算出的电机角速度）。
         //   它只用于"电机侧"状态 θ̇_m；**不再**用它去修正任何云台侧的量
         //   （曾经加过"用编码器角速度校正 IMU 支路直流"的互补滤波/偏置校正，已按用户
         //    要求**完全删除** —— 编码器量的物理含义是电机侧，与云台侧之间隔着背隙，
         //    拿它修正云台角速度在原理上就是错的）。
-        double big_motor_rate_tau_s = 0.30;   // 低通时间常数 (s)，按 MCU 新样本间隔换算
-        double big_motor_rate_alpha = 0.25;   // 拿不到采样间隔时的兜底系数
+        double big_motor_rate_tau_s = 0.001;   // 低通时间常数 (s)，按 MCU 新样本间隔换算
+        double big_motor_rate_alpha = 1.0;   // 拿不到采样间隔时的兜底系数
         // ── 背隙中心（β）在线估计的遗忘时间常数（s）──
         //   越短越跟得上 IMU 漂移，但会被"单侧贴住"的运动带偏；
         //   3 s 是"包含一次换向"的折中。≤0 关闭估计（β 恒 0）。
