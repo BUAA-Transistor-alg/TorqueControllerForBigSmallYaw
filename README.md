@@ -93,7 +93,8 @@ python3 python/scripts/collect_sysid.py --tag=small --segments=6 --tilted
 # ①' 只采**测试数据**（无硬件）: 用"刚性接触 + 死区完全自由 + β 每条数据随机/漂移"的仿真环境
 #    python3 python/scripts/collect_sysid.py --dry-run --sim-rigid --segments=100 \
 #            --duration-sec=3 --no-record-hold --out=/tmp/rigid
-# ② 拟合（torch 输出误差法；λ 固定 100，不改。拟合 **16 参**：平面 8 参 + 背隙/电机侧 8 参）
+# ② 拟合（torch 输出误差法；λ 固定 100，不改。拟合 15 参：平面 8 + 背隙/电机侧 8 里去掉了
+#   **默认冻结**的直通项 γ；保持段默认只取前 3 s，见 --hold-max-sec）
 #   需要数据里同时有 theta_big_motor（电机侧）与 theta_big_platform（云台侧）两列
 #   δ 的独立校验/初值: python3 python/scripts/calibrate_backlash.py --data='data/sysid/*.csv'
 # ★ 几何已按实测填好（(dx, dy) = (0, 0.07)），实机数据**不需要**再给 --dx/--dy；

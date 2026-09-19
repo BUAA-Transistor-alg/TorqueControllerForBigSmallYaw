@@ -41,6 +41,10 @@ python3 python/scripts/identify_params_torch.py --data='/tmp/bs_data/*.csv' \
 ./build/tcbs_mpc_param_eval --phi=$TRUTH_8 --phi2=$TRUTH_EXTRA_8
 ```
 
+> 注：这批数据里有 5 个 `_hold` 保持段（800~1394 点）。辨识脚本**默认只取每个保持段的前 3 s**
+> （`--hold-max-sec`，0 = 不截断）：后段几乎是静止（std 比前 3 s 小 10~800 倍），
+> 而开头正是大角度阶跃。本文的数字是当年旧版（不截断）跑出来的。
+
 ## 3. 结论摘要（详见 docs/backlash_model.md §7）
 
 1. 辨识脚本的 numpy/torch 3-DOF 模型与 C++ `eomBacklash` 在"同输入同初值"下一致到

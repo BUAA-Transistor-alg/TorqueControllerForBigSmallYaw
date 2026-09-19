@@ -1,0 +1,13 @@
+cd /home/huhu233/rm2027/TorqueControllerForBigSmallYaw
+D=data/cars/Sentry1/sysid
+SPLIT=140                      # 段号 >= 140 的段做留出（0..179，即最后 22%）
+ABS="$PWD/$D"
+_pick() {   # $1 = lt|ge
+  (cd "$D" && ls *.csv | awk -v s="$SPLIT" -v d="$ABS" -v mode="$1" '
+     { b=$0; sub(/\.csv$/,"",b); sub(/_hold$/,"",b); n=split(b,a,"_"); i=a[n]+0;
+       if ((mode=="lt" && i < s) || (mode=="ge" && i >= s)) printf "%s/%s,", d, $0 }')
+}
+TRAIN=$(_pick lt)   # 279 个文件
+VAL=$(_pick ge)     #  80 个文件
+
+python3 python/scripts/identify_params_torch.py   --data="$TRAIN" --val-data="$VAL"   --epochs=10000 --batch-segments --substeps=2 --threads=4   --eval-every=100 --print-every=100   --beta-mode=auto --state-mode=est   --plot-out=data/cars/Sentry1/ident/ident   --out=data/cars/Sentry1/ident/params.txt 

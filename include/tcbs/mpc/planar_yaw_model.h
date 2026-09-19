@@ -73,12 +73,12 @@ struct ModelParams {
     double m_u_known = 0.0;
     // ── ★ 8 个待辨识参数（标定值；**与 dual_yaw::defaultModelParams() 保持一致**，
     //    那里是权威来源、并记录了可信度分级）──
-    double Jbig_eff = 0.051893;      // 大 yaw 侧惯量（含 m_u|d|²）      kg·m²
-    double Js       = 0.009162;      // 上装绕小 yaw 轴总惯量            kg·m²
-    double Px       = 0.001897;      // 上装一阶矩 m_u·ρ_x               kg·m（★ 本批数据不可辨识）
-    double Py       = -0.001017;     // 上装一阶矩 m_u·ρ_y               kg·m（★ 同上）
-    double fcBig    = 0.103360, fvBig   = 0.209044;   // 大 yaw 库仑/粘滞摩擦（fv 可疑）
-    double fcSmall  = 0.030582, fvSmall = 0.048735;   // 小 yaw 库仑/粘滞摩擦（fv 可疑）
+    double Jbig_eff = 0.045614;      // 大 yaw 侧惯量（含 m_u|d|²）      kg·m²
+    double Js       = 0.008116;      // 上装绕小 yaw 轴总惯量            kg·m²
+    double Px       = 0.021348;      // 上装一阶矩 m_u·ρ_x               kg·m（★ 本批数据不可辨识）
+    double Py       = -0.007430;     // 上装一阶矩 m_u·ρ_y               kg·m（★ 同上）
+    double fcBig    = 0.096245, fvBig   = 0.237374;   // 大 yaw 库仑/粘滞摩擦（fv 可疑）
+    double fcSmall  = 0.033434, fvSmall = 0.048466;   // 小 yaw 库仑/粘滞摩擦（fv 可疑）
     // ── ★ 大 yaw 传动背隙（3-DOF 模型用；2-DOF 的 eom() 不受影响）──
     //   物理（用户实测）: 传动里一部分是**同步带**（两侧接触有弹性、范围很小），
     //   大部分是**齿轮背隙**（中间几乎完全自由）。因此:
@@ -87,11 +87,11 @@ struct ModelParams {
     //   ★ 只有**宽度 δ 是静态可标定量**；β（死区中心相对电机编码零点的偏置）
     //     随电机与云台共同旋转而移动、且云台角由 IMU 推出会有漂移
     //     ⇒ β 由估计器**在线**给出（Estimate::backlash_center），不是模型参数。
-    double backlash_delta    = 0.0873;  // 背隙总宽度 δ (rad)，≈5°，待标定
-    double backlash_k        = 200.0;   // 接触刚度 (N·m/rad)（"弹性范围很小" ⇒ 较大）
-    double backlash_c        = 2.0;     // 接触阻尼 (N·m·s/rad)；若与 k 共线则按 2ζ√(k·J_m) 固定
+    double backlash_delta    = 0.096463; // 背隙总宽度 δ (rad)，≈5.53°（实车辨识）
+    double backlash_k        = 157.8279; // 接触刚度 (N·m/rad)（"弹性范围很小" ⇒ 较大）
+    double backlash_c        = 2.591145; // 接触阻尼 (N·m·s/rad)；与 k 共线、可信度低（见 params.h）
     double backlash_smooth_eps = 1.0e-4;// 平滑死区的过渡半宽 (rad)：≪ δ/2，中间仍"几乎完全自由"
-    double backlash_through  = 0.002;  // ★ 直通线性项 γ（死区内 τ_t += k·γ·Δ）
+    double backlash_through  = 0.002;  // ★ 直通线性项 γ（死区内 τ_t += k·γ·Δ）；默认冻结不辨识
     // ★ **直通线性项**（用户授权: 对"中间完全自由"的要求不高）:
     //   τ_t = k·[dz(Δ) + γ·Δ] + c·Δ̇，γ = backlash_through
     //   物理上死区内不该传力矩（γ=0），但 γ 很小（默认 0.002 ⇒ 等效刚度 k·γ = 0.4 N·m/rad，
@@ -99,9 +99,9 @@ struct ModelParams {
     //     · 给优化器/MPC 一个**非零梯度**（否则死区内 ∂τ_t/∂u ≡ 0，梯度全靠平滑 ε，很容易卡住）；
     //     · 对闭环行为的影响可忽略（比 fc_big≈0.1 N·m 小一个量级）。
     //   想严格物理就把 γ 置 0。
-    double Jmotor            = 0.006;   // 电机侧惯量（**折算到关节侧**），kg·m²
-    double fcMotor           = 0.030;   // 电机侧库仑摩擦（背隙内电机几乎空载 ⇒ 单独一组）
-    double fvMotor           = 0.010;   // 电机侧粘滞摩擦
+    double Jmotor            = 0.005455; // 电机侧惯量（**折算到关节侧**），kg·m²
+    double fcMotor           = 0.004139; // 电机侧库仑摩擦（背隙内电机几乎空载 ⇒ 单独一组；可信度低）
+    double fvMotor           = 0.030332; // 电机侧粘滞摩擦（同上：与 fcMotor 互换得很厉害）
     double tau_offset_motor  = 0.0;     // 电机侧可选常数负载（默认 0）
     // ── 固定 / 可选 ──
     double frictionLambda = 100.0;   // tanh 软符号陡度（固定，不辨识）

@@ -133,6 +133,9 @@ identify_params_torch.py — **三维（含大 yaw 背隙）**模型的 **PyTorc
   * **电机侧/云台侧角度都必须有**（老 12 列数据没有云台侧列 ⇒ 会被跳过并提示重采）。
   * 角速度一律用「中心差分 + 3 点平滑」从角度列重算（记录里的角速度通道在"值保持"链路上
     会有台阶/尖峰，不适合当拟合目标）。
+  * ★ **保持段（文件名带 `_hold`）只取前 3 s**（`--hold-max-sec`，默认 3.0）：到位+稳定判据
+    满足之后的保持过程基本是静止，后面的点白费算力、还会把参数往"零速摩擦"方向拉；
+    普通收集段不截断（`--hold-max-sec=0` 可恢复旧行为）。
 """
 
 from __future__ import annotations
@@ -144,7 +147,7 @@ import math
 import os
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields as _dataclass_fields, replace
 
 import numpy as np
 
@@ -214,18 +217,19 @@ def p_direction(dx: float, dy: float, zero_angle_deg: float = 0.0):
 def default_param_vector() -> np.ndarray:
     """默认初值 = **`include/tcbs/mpc/planar_yaw_params.h::defaultModelParams()` 当前那组**。
 
-    前 8 个 = 平面 8 参（本仓库实车辨识值，见 data/cars/Sentry1/ident/lam100.txt；
+    前 8 个 = 平面 8 参（本仓库实车辨识值，见 data/cars/Sentry1/ident/params.txt；
     Px/Py 因缺固定倾角而**不可信**，这里照抄头文件里的值，让拟合自己去动）；
-    后 8 个 = 背隙/电机侧（δ 用 C++ 默认 5°、k/c 用默认、J_motor/电机摩擦用 CAD 占位、β=0）。
+    后 8 个 = 背隙/电机侧（**由同一批数据、同一次 16 参拟合一起给出**，不再是 CAD 占位值；
+    γ 固定 0.002、β 固定 0 —— 运行期 β 由估计器在线给）。
 
     ★ 为什么默认初值用"已在用的那组"而不是 CAD 占位值: 实机辨识的日常用法是
     「参数已经有值 → 重采一次数据 → 再拟合修正」，从当前值出发只需微调；
-    log 参数化下从 CAD 占位值（Jbig_eff 0.024 vs 实车 0.052）爬到真值要几百个 epoch，
+    log 参数化下从 CAD 占位值（Jbig_eff 0.024 vs 实车 0.0456）爬到真值要几百个 epoch，
     纯属浪费算力。要复现"从零辨识"就用 `--init-vector=<CAD 占位值>`。
     """
-    return np.array([0.051893, 0.009162, 0.001897, -0.001017, 0.103360, 0.209044,
-                     0.030582, 0.048735,          # ← 与 planar_yaw_params.h 一致
-                     0.0873, 200.0, 2.0, 0.002, 0.006, 0.030, 0.010, 0.0],
+    return np.array([0.045614, 0.008116, 0.021348, -0.007430, 0.096245, 0.237374,
+                     0.033434, 0.048466,          # ← 与 planar_yaw_params.h 一致
+                     0.096463, 157.8279, 2.591145, 0.002, 0.005455, 0.004139, 0.030332, 0.0],
                     dtype=np.float64)
 
 
@@ -1013,6 +1017,54 @@ def _col(rec, names, n=None):
 _MOTOR_COLS = ("theta_big_motor", "theta_big", "theta_b")
 _PLATFORM_COLS = ("theta_big_platform", "theta_platform")
 _SMALL_COLS = ("theta_small", "theta_s")
+
+
+# ★ 保持段（`collect_sysid.py --record-hold` 落盘的、文件名带 `_hold` 后缀的那些段）里的
+#   "静止保持"部分：到位+稳定判据满足之后就一直几乎不动了，后面的点是纯浪费算力，而且
+#   长时间静止段会主导 loss（把参数往"零速摩擦"方向拉）⇒ 默认**只取前 3 s**。
+#   普通收集段（300 点 3 s 的激励段）保持原样，采集脚本也不改。
+HOLD_NAME_SUFFIX = "_hold"
+HOLD_KEEP_SEC = 3.0
+
+
+def is_hold_segment(seg: "Segment") -> bool:
+    """按文件名后缀判定"静止保持段"（`collect_sysid.py` 的 HOLD_SUFFIX 约定）。"""
+    return HOLD_NAME_SUFFIX in os.path.basename(str(seg.source))
+
+
+def truncate_hold_segments(segs, max_sec: float = HOLD_KEEP_SEC, verbose: bool = True):
+    """把**保持段**截断到前 ``max_sec`` 秒（按点数 = round(max_sec/dt)，与物理时间一致），
+    普通段原样返回。``max_sec <= 0`` ⇒ 不截断。
+
+    只切"逐样本数组"，标量元数据（axis/held_target/dt/source/tag）不动。
+    在**载入后立刻**做 ⇒ 拟合、留出评估、画图用的都是同一批截断后的数据。
+    """
+    if max_sec is None or max_sec <= 0:
+        return segs
+    out, n_cut, pts_kept, pts_drop = [], 0, 0, 0
+    fields = [f.name for f in _dataclass_fields(Segment)]
+    for seg in segs:
+        T = int(seg.T)
+        n = int(round(float(max_sec) / seg.dt))
+        if not is_hold_segment(seg) or T <= n:
+            out.append(seg)
+            continue
+        sl = slice(0, n)
+        kw = {}
+        for name in fields:
+            v = getattr(seg, name)
+            if isinstance(v, np.ndarray) and v.ndim >= 1 and v.shape[0] == T:
+                kw[name] = v[sl]
+        out.append(replace(seg, **kw))
+        n_cut += 1
+        pts_kept += n
+        pts_drop += T - n
+    if verbose and n_cut:
+        tot = pts_kept + pts_drop
+        print(f"[hold] 保持段截断: {n_cut} 段 → 各取前 {max_sec:g} s（{pts_kept} 点），"
+              f"丢 {pts_drop} 点（占这些段的 {100.0 * pts_drop / max(1, tot):.0f}%）"
+              f"；普通段不截断")
+    return out
 
 
 def seg_fingerprint(seg: "Segment") -> str:
@@ -2717,6 +2769,11 @@ def _build_argparser():
                     help="★ 状态目标来源: est（默认）= 记录/估计值（控制器真正看到的）；"
                          "true = 仿真真值列 `theta_true_*`（**只有 dry-run 数据有**）——"
                          "上限对照，用来把'模型误差'与'电机状态估计误差'分开")
+    ap.add_argument("--hold-max-sec", type=float, default=HOLD_KEEP_SEC,
+                    help="★ **保持段**（`collect_sysid.py --record-hold` 落盘、文件名带 `_hold` "
+                         "后缀的段）只取前 N 秒（默认 3.0）：后面的基本是静止，白费算力、"
+                         "还会把参数往'零速摩擦'方向拉。**普通收集段不截断**；"
+                         "0 = 不截断（老行为）")
     ap.add_argument("--val-data", type=str, default=None,
                     help="留出（测试）数据 glob: 只用于**评估与画图**，不参与训练。"
                          "给了它就把 RMSE/轨迹对比图都换成留出集（这才是真正的泛化检查）")
@@ -2818,6 +2875,7 @@ def main(argv=None) -> int:
     phi0[15] = float(args.backlash_beta)
 
     segs = load_segments(patterns, dt_override=args.dt)
+    segs = truncate_hold_segments(segs, args.hold_max_sec)
     if not segs:
         print("[error] 没有读到数据；请用 --data=<glob> 指定（或先跑采集脚本）",
               file=sys.stderr)
@@ -2826,6 +2884,7 @@ def main(argv=None) -> int:
     val_segs = None
     if args.val_data:
         val_segs = load_segments([args.val_data], dt_override=args.dt)
+        val_segs = truncate_hold_segments(val_segs, args.hold_max_sec)
         if not val_segs:
             print(f"[error] --val-data={args.val_data} 没读到数据", file=sys.stderr)
             return 2
