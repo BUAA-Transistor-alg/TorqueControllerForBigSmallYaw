@@ -331,7 +331,7 @@ STABLE_SEC = 3.0                      # 之后还需**连续**满足稳定条件
 #   ③ 大 yaw 平台角速度 ④ 小 yaw 关节角速度 都 < STABLE_VEL_TOL
 # ⇒ 两次采样至少间隔 SETTLE_SEC + STABLE_SEC = 8 s（不满足就一直保持稳定控制等下去）。
 STABLE_ERR_TOL_DEG = 3.0              # 误差容差（度；两轴共用）
-STABLE_VEL_TOL_DEG_S = 6.0            # 速度阈值（度/秒；两轴共用）
+STABLE_VEL_TOL_DEG_S = 12.0            # 速度阈值（度/秒；两轴共用）
 ZERO_FRAMES_AT_EXIT = 20              # 退出前必发的零力矩帧数（规格: 连发几帧）
 MAX_COOL_WAIT_S = 600.0               # 过热等待上限（超过则退出）
 COOL_HYSTERESIS_C = 5.0               # 降温到 max_temp − 5 ℃ 才恢复
