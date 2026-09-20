@@ -18,8 +18,8 @@
         且云台角由 IMU 推出会有漂移 ⇒ 这只作为离线参考，运行期由估计器在线给）
 
 用法:
-    python3 python/scripts/calibrate_backlash.py --data='data/cars/Sentry1/sysid/*.csv'
-    python3 python/scripts/calibrate_backlash.py --data='.../*.csv' --json-out=... --skip-first 5
+    python3 python/scripts/calibrate_backlash.py --data='data/cars/Sentry1/sysid/*.npz'
+    python3 python/scripts/calibrate_backlash.py --data='.../*.npz' --json-out=... --skip-first 5
 
 注意:
     · 需要**新格式**的 CSV（含 `theta_big_motor` / `theta_big_platform` 两列）；
@@ -46,20 +46,40 @@ import numpy as np
 
 
 def _load(path):
-    d = np.genfromtxt(path, delimiter=",", names=True, invalid_raise=False)
-    if d is None or d.dtype.names is None:
+    """读一段数据（**npz（采集脚本默认格式）或 csv（老数据）**），只取标定需要的列。
+
+    返回 ``(m, mm, p, age, rate)`` 或 ``None``（缺电机侧/云台侧列 ⇒ 跳过该文件）。
+    """
+    if path.endswith(".npz"):
+        with np.load(path, allow_pickle=False) as z:
+            arrs = {k: z[k] for k in z.files}
+
+        def get(name):
+            v = arrs.get(name)
+            return None if v is None else np.atleast_1d(np.asarray(v, dtype=float))
+    else:
+        d = np.genfromtxt(path, delimiter=",", names=True, invalid_raise=False)
+        if d is None or d.dtype.names is None:
+            return None
+
+        def get(name):
+            if name not in d.dtype.names:
+                return None
+            return np.atleast_1d(np.asarray(d[name], dtype=float))
+
+    m = get("theta_big_motor")
+    p = get("theta_big_platform")
+    if m is None or p is None:
         return None
-    need = ("theta_big_motor", "theta_big_platform")
-    if any(k not in d.dtype.names for k in need):
-        return None
-    m = np.atleast_1d(d["theta_big_motor"]).astype(float)
-    mm = (np.atleast_1d(d["theta_big_motor_meas"]).astype(float)
-          if "theta_big_motor_meas" in d.dtype.names else m)
-    p = np.atleast_1d(d["theta_big_platform"]).astype(float)
-    age = (np.atleast_1d(d["big_enc_age"]).astype(float)
-           if "big_enc_age" in d.dtype.names else np.zeros_like(m))
-    rate = (np.atleast_1d(d["dtheta_big_platform"]).astype(float)
-            if "dtheta_big_platform" in d.dtype.names else np.zeros_like(m))
+    mm = get("theta_big_motor_meas")
+    if mm is None:
+        mm = m
+    age = get("big_enc_age")
+    if age is None:
+        age = np.zeros_like(m)
+    rate = get("dtheta_big_platform")
+    if rate is None:
+        rate = np.zeros_like(m)
     ok = np.isfinite(m) & np.isfinite(p) & np.isfinite(age) & np.isfinite(rate)
     age = np.clip(np.where(age < 0.0, 0.0, age), 0.0, 0.5)   # 负年龄 = 未知 ⇒ 不补偿
     if not np.any(ok):
@@ -69,7 +89,8 @@ def _load(path):
 
 def main():
     ap = argparse.ArgumentParser(description="大 yaw 背隙 δ / 中心 β 标定（从记录数据直接估）")
-    ap.add_argument("--data", required=True, help="CSV glob（可逗号分隔多个）")
+    ap.add_argument("--data", required=True,
+                    help="数据 glob（**npz（默认格式）/ csv**，可逗号分隔多个）")
     ap.add_argument("--q-lo", type=float, default=0.1, help="下分位（%%），默认 0.1")
     ap.add_argument("--q-hi", type=float, default=99.9, help="上分位（%%），默认 99.9")
     ap.add_argument("--skip-first", type=int, default=1,
@@ -93,7 +114,7 @@ def main():
         files.extend(hit)
     files = sorted(set(files))[a.skip_first:]
     if not files:
-        print("没有可读的 CSV（需要新格式: 含 theta_big_motor / theta_big_platform）")
+        print("没有可读的数据（npz/csv；需要新格式: 含 theta_big_motor / theta_big_platform）")
         return 1
 
     lows, highs, spans, centers, ns, pool = [], [], [], [], [], []

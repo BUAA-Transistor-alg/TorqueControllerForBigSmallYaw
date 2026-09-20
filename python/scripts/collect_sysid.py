@@ -99,7 +99,8 @@
           → 两轴各跑 PID(误差 e = wrap(目标 − 反馈)) → 各轴力矩变化率限幅
           → 仅力矩模式下发 → 记录（含重力 A 系平面分量 gravity_ax/ay）
     收尾: 主动回到**行程中心**保持（当前行程 ±30° ⇒ 中心 0°；大 yaw 保持当前平台方位角）
-    保存: ``data/sysid/sysid_<tag>_<时间戳>_<序号>.npz`` 与同名 ``.csv``（同时写）
+    保存: ``data/sysid/sysid_<tag>_<时间戳>_<序号>.npz``（★ **默认只写 npz**，
+          ``--save-csv`` 才再加一份同名 ``.csv``；npz 是 csv 的超集，辨识只读 npz）
           **零力矩只在程序退出时发**（见 safe_shutdown）
 
 ================================================================================
@@ -209,8 +210,9 @@
    另一轴推着走）；新脚本每段结束**主动回中保持**，只在程序退出时才连发零力矩。
 6. **参考增强更严格**: 平滑**之后**校验激励幅值（≥14°），不够就放大输入重试、再换窗口
    —— 旧脚本没有这层校验，可能采到"平滑完几乎不动"的静止段。
-7. **数据格式**: npz + csv 双写，含 ``axis`` / ``held_target`` / ``mcu2_seq`` /
-   底盘数据 / ``big_enc_age`` 以及全部标量元数据（dt、PID 增益、参考来源与幅值）。
+7. **数据格式**: **默认只落 npz**（``--save-csv`` 才另写一份 csv），含 ``axis`` /
+   ``held_target`` / ``mcu2_seq`` / 底盘数据 / ``big_enc_age`` 以及全部标量元数据
+   （dt、PID 增益、参考来源与幅值）。
 8. **两个关节都要到位**: 旧脚本只有"把单轴 PID 到某角度"；新脚本 driven 与 held **两轴
    都先 PID 到位并稳定**（未收敛最多再等 2 轮），否则段内会混入未记录的扰动力矩。
 9. **dry-run 内置仿真**: 旧脚本必须有硬件才能跑；新脚本用 ``planar_yaw_model.h`` 的同一
@@ -459,6 +461,10 @@ SIM_BETA_DRIFT_FRAC = 0.05    # 漂移幅值 = 0.05·δ
 SIM_BETA_DRIFT_PERIOD = 30.0  # 漂移周期 (s)
 SIM_BETA_TAU_S = 3.0          # β 在线估计的遗忘时间常数（= 估计器默认 backlash_center_tau_s）
 SIM_ENC_NOISE = 2e-5         # 编码器噪声标准差（rad），仅让 PID 微分项有真实感
+# ── ★ 仿真环境 3（--sim-no-backlash）: "没有背隙"（诊断/可辨识性实验用）──
+#   δ = 0 ⇒ 电机与云台之间没有空行程，只剩一条刚度为 SIM_NO_BACKLASH_K 的"同步带"弹簧
+#   （τ_t = k·Δ + c·Δ̇）。它是"真实系统其实没有背隙"时当前 16 参模型的识别极限实验。
+SIM_NO_BACKLASH_K = 200.0     # 无背隙时那条"同步带"的刚度（N·m/rad）
 
 
 def log(msg: str = "") -> None:
@@ -786,6 +792,7 @@ class SegmentPlan:
     held_strat_index: int = -1   # --held-big-stratified: 本段 held 方位角的下标
     held_strat_count: int = 0    # --held-big-stratified: 分层总数（0 = 未启用）
     held_strat_offset: float = 0.0   # 相对分层基准的偏移 rad
+    no_backlash: int = 0      # 1 = dry-run 用的被控对象**没有背隙**（δ=0；诊断/可辨识性实验）
     src_file: str = ""        # 参考来源（录制文件名）
     src_start: int = 0        # 参考在录制文件中的起点下标
     src_scale: float = 0.0    # 随机缩放系数
@@ -1407,17 +1414,33 @@ class SimRobotLink:
     def __init__(self, rng, int_step: float = SIM_INT_STEP, tilt_deg: float = 0.0,
                  rigid: bool = False, beta_random_frac: float = SIM_BETA_RANDOM_FRAC,
                  beta_drift_frac: float = SIM_BETA_DRIFT_FRAC,
-                 beta_drift_period: float = SIM_BETA_DRIFT_PERIOD):
+                 beta_drift_period: float = SIM_BETA_DRIFT_PERIOD,
+                 no_backlash: bool = False,
+                 no_backlash_k: float = SIM_NO_BACKLASH_K):
         """``rigid=True`` ⇒ 用 **RigidBacklashPlant**（接触完全刚性 + 死区完全自由 +
-        每条数据随机 β + 微弱漂移）替代平滑背隙被控对象，仅用于采集测试数据。"""
+        每条数据随机 β + 微弱漂移）替代平滑背隙被控对象，仅用于采集测试数据。
+
+        ``no_backlash=True`` ⇒ 被控对象**没有背隙**（``backlash_delta = 0``，电机与云台之间
+        只剩一条刚度为 ``no_backlash_k`` 的"同步带"弹簧）—— 用于**可辨识性诊断**：
+        当前 16 参模型（δ 走 log 参数化、死区近乎不可微）在这种数据上还能不能识别出
+        "其实没有背隙"。与 ``rigid`` 互斥（刚性约束 + 零宽死区是退化情形）。
+        """
         self.rng = rng
         self.rigid = bool(rigid)
+        self.no_backlash = bool(no_backlash)
+        if self.rigid and self.no_backlash:
+            raise ValueError("--sim-rigid 与 --sim-no-backlash 互斥"
+                             "（零宽死区 + 刚性约束是退化情形，无法积分）")
         if self.rigid:
             self.plant = RigidBacklashPlant(
                 int_step=int_step, tilt_deg=tilt_deg,
                 beta_drift=float(beta_drift_frac) * 0.0873,
                 beta_period=float(beta_drift_period),
                 beta_random_frac=float(beta_random_frac))
+        elif self.no_backlash:
+            self.plant = PlanarYawPlant(int_step=int_step, tilt_deg=tilt_deg,
+                                        backlash_delta=0.0,
+                                        backlash_k=float(no_backlash_k))
         else:
             self.plant = PlanarYawPlant(int_step=int_step, tilt_deg=tilt_deg)
         self.t = 0.0                 # 仿真时钟（每个控制周期 +DT）
@@ -1805,30 +1828,38 @@ def recenter(link, pids, limiters, max_temp: float, seconds: float = RECENTER_SE
 
 
 # ============================================================================
-# 保存（npz + csv 同时写）
+# 保存（★ 默认只写 npz；--save-csv 才同时写 csv）
 # ============================================================================
-def _unique_paths(out_dir: str, tag: str, segment_index: int, suffix: str = ""):
+def _unique_paths(out_dir: str, tag: str, segment_index: int, suffix: str = "",
+                  save_csv: bool = False):
     base = f"sysid_{tag}_{time.strftime('%Y%m%d_%H%M%S')}_{segment_index:02d}{suffix}"
     npz_path = os.path.join(out_dir, base + ".npz")
-    csv_path = os.path.join(out_dir, base + ".csv")
+    csv_path = os.path.join(out_dir, base + ".csv") if save_csv else None
     k = 1
-    while os.path.exists(npz_path) or os.path.exists(csv_path):
+    while os.path.exists(npz_path) or (csv_path is not None and os.path.exists(csv_path)):
         npz_path = os.path.join(out_dir, f"{base}_{k}.npz")
-        csv_path = os.path.join(out_dir, f"{base}_{k}.csv")
+        csv_path = os.path.join(out_dir, f"{base}_{k}.csv") if save_csv else None
         k += 1
     return npz_path, csv_path
 
 
 def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
-                 tag_override: str | None, segment_index: int, suffix: str = ""):
-    """同时写 npz 与 csv。npz 里的 ``axis``/``held_target`` 是**标量**（段内恒定），
-    CSV 里它们是每行一列（同值）；其余列一一对应。详见 docs/sysid_data.md。
+                 tag_override: str | None, segment_index: int, suffix: str = "",
+                 save_csv: bool = False):
+    """写 npz（**默认只写这一份**；``save_csv=True`` 时再写一份同名 csv）。
 
-    CSV = 10 个固定列 + 末尾两列 ``gravity_ax,gravity_ay``（重力 A 系平面分量，
+    npz 里的 ``axis``/``held_target`` 是**标量**（段内恒定），CSV 里它们是每行一列（同值）；
+    其余列一一对应。详见 docs/sysid_data.md。
+
+    ★ 为什么默认不写 CSV: npz 的列是 CSV 的**超集**（多了打包的 ``theta_true``/``dtheta_true``、
+    仿真真值 β 列，且 csv 只保留了 6 位小数），辨识脚本本来就只按列名从 npz 读；
+    CSV 的体积却与 npz 同量级 ⇒ 实测一个 360 段的数据目录，去掉 csv 后体积减半。
+
+    CSV（``--save-csv``）= 10 个固定列 + 末尾两列 ``gravity_ax,gravity_ay``（重力 A 系平面分量，
     水平静置时全 0）——追加在最后，保证按列名取列的读取器不失效。
     """
     tag = tag_override or AXIS_NAME[plan.axis]
-    npz_path, csv_path = _unique_paths(out_dir, tag, segment_index, suffix)
+    npz_path, csv_path = _unique_paths(out_dir, tag, segment_index, suffix, save_csv)
     axis = int(plan.axis)
 
     def arr(name):
@@ -1887,6 +1918,8 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
         # ── 静态倾斜段标记（--tilted / --tilt-rolling）──
         tilted=np.int32(plan.tilted),
         tilt_slot=np.int32(plan.tilt_slot),
+        # ── ★ 无背隙仿真标记（--sim-no-backlash；诊断用，实机恒 0）──
+        no_backlash=np.int32(plan.no_backlash),
         # ── held 大 yaw 方位角分层（--held-big-stratified）──
         held_big_stratified=np.int32(1 if plan.held_strat_count else 0),
         held_strat_index=np.int32(plan.held_strat_index),
@@ -1904,6 +1937,8 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
                  "tx_yaw_big_mode", "tx_yaw_small_mode",
                  "est_valid", "mcu_valid", "imu_valid", "mcu2_seq",
                  "mcu_dt_one_tenth_ms", "imu_dt_one_tenth_ms"}
+    if csv_path is None:
+        return npz_path, None          # ★ 默认路径: 只落 npz，不写 csv
     with open(csv_path, "w", newline="") as fh:
         writer = csv.writer(fh, lineterminator="\n")
         writer.writerow(CSV_HEADER)
@@ -1984,6 +2019,7 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
     plan = build_segment_plan(rng, targets, axis, st, planners, samples,
                               held_big_override=held_override)
     plan.tilted = 1 if args.tilted else 0
+    plan.no_backlash = 1 if getattr(args, "sim_no_backlash", False) else 0
     plan.tilt_slot = tilt_slot
     plan.held_strat_index = strat_k
     plan.held_strat_count = (max(1, args.segments // 2)
@@ -2062,9 +2098,11 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
     log(f"  ✓ 已稳定（第二段用时 {waited:.2f}s，两段合计 {args.settle_sec + waited:.2f}s）")
     if rec_hold is not None and len(rec_hold) > 0:
         h_npz, h_csv = save_segment(rec_hold, plan, args.out, args.tag, segment_index,
-                                    suffix=HOLD_SUFFIX)
-        log(f"  静止保持段已记录: {h_csv}  ({len(rec_hold)} 行, "
+                                    suffix=HOLD_SUFFIX, save_csv=args.save_csv)
+        log(f"  静止保持段已记录: {h_npz}  ({len(rec_hold)} 行, "
             f"t=0~{rec_hold.col('t')[-1]:.2f}s, 含大角度阶跃)")
+        if h_csv:
+            log(f"        {h_csv}")
         if args.dry_run:
             pass
 
@@ -2094,9 +2132,11 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
     #    * 真正的"零力矩"只在程序退出时发（规格要求），见 safe_shutdown()。
     recenter(link, pids, limiters, args.max_temp)
 
-    npz_path, csv_path = save_segment(rec, plan, args.out, args.tag, segment_index)
-    log(f"  保存: {npz_path}")
-    log(f"        {csv_path}  ({len(rec)} 行)")
+    npz_path, csv_path = save_segment(rec, plan, args.out, args.tag, segment_index,
+                                      save_csv=args.save_csv)
+    log(f"  保存: {npz_path}  ({len(rec)} 行)")
+    if csv_path:
+        log(f"        {csv_path}")
     return "saved"
 
 
@@ -2166,6 +2206,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="把每次的静止保持段（到位+稳定等待, 含大角度阶跃）也落盘并参与辨识"
                         "（文件名后缀 %s；**最开始的第一次不记**）。默认开；--no-record-hold 关闭"
                         % HOLD_SUFFIX)
+    p.add_argument("--save-csv", action=argparse.BooleanOptionalAction, default=False,
+                   help="★ **默认不写 CSV**: 只落 npz（列更全、体积约小 2 倍、辨识直接可读）。"
+                        "给 --save-csv 才同时写同名 .csv（**只为人眼看/给老脚本用**；"
+                        "注意目录里 csv 与 npz 成对存在时，辨识脚本只读 npz 那一份）")
     p.add_argument("--stable-sec", type=float, default=STABLE_SEC,
                    help=f"到位后还需连续满足稳定条件这么久（默认 {STABLE_SEC:g}s）")
     p.add_argument("--err-tol-deg", type=float, default=STABLE_ERR_TOL_DEG,
@@ -2187,15 +2231,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true",
                    help="无硬件自检: 用内置仿真（planar_yaw_model.h 同方程）代替串口")
     sg = p.add_argument_group(
-        "★ dry-run 仿真环境 2: 背隙「接触完全刚性 + 死区完全自由 + β 随机/漂移」",
-        "仅用于采集**测试数据**（用户要求）。与默认的平滑背隙被控对象（τ_t = k[dz(Δ)+γΔ]+cΔ̇）"
+        "★ dry-run 仿真环境 2/3",
+        "环境 2（--sim-rigid）: 背隙「接触完全刚性 + 死区完全自由 + β 随机/漂移」，"
+        "仅用于采集**测试数据**。与默认的平滑背隙被控对象（τ_t = k[dz(Δ)+γΔ]+cΔ̇）"
         "不同: 死区内 τ_t≡0（连阻尼都没有）、接触后电机/云台**刚性锁定**（k = ∞）、"
         "撞击为完全非弹性冲击；且**每条数据**的背隙中心 β0 重新随机抽样并随时间微弱漂移。"
         "目的是把背隙建模逼到最不利情形: 死区内零刚度 ⇒ δ/k/c 几乎无梯度；k=∞ 只能用有限 k 近似；"
-        "β 每条数据都不同 ⇒ 单个全局 β 不可能对，必须用估计器的在线值（数据里的 backlash_center 列）。")
+        "β 每条数据都不同 ⇒ 单个全局 β 不可能对，必须用估计器的在线值（数据里的 backlash_center 列）。\n"
+        "环境 3（--sim-no-backlash）: **被控对象根本没有背隙**（δ=0），"
+        "用于可辨识性诊断 —— 看当前 16 参模型会不会在无背隙数据上\"认\"出一个假的死区。")
     sg.add_argument("--sim-rigid", action="store_true",
                     help="dry-run 用**刚性接触**环境（隐含: 记录 backlash_center / "
                          "backlash_beta_true 两列；实机也会记，实机真值恒 0）")
+    sg.add_argument("--sim-no-backlash", action="store_true",
+                    help="★ dry-run 用**没有背隙**的被控对象（δ = 0 ⇒ 电机与云台之间没有空行程，"
+                         "只剩一条刚度为 --sim-no-backlash-k 的同步带弹簧）。用途: 可辨识性诊断 —— "
+                         "喂给当前 16 参（含 δ/k/c/γ）模型，看它能不能识出'其实没有背隙'。"
+                         "与 --sim-rigid 互斥")
+    sg.add_argument("--sim-no-backlash-k", type=float, default=SIM_NO_BACKLASH_K,
+                    help=f"无背隙环境里那条同步带的刚度（N·m/rad，默认 {SIM_NO_BACKLASH_K:g}）；"
+                         "给大（如 1e4）就等价于'既无空行程、又近似刚性'")
     sg.add_argument("--sim-beta-random-frac", type=float, default=SIM_BETA_RANDOM_FRAC,
                     help="每条数据的 β0 随机幅度（占 δ 的比例，默认 0.30）")
     sg.add_argument("--sim-beta-drift-frac", type=float, default=SIM_BETA_DRIFT_FRAC,
@@ -2255,6 +2310,8 @@ def main(argv=None) -> int:
         log(f"  静态倾斜段: 开（tilted=1{'; 段间轮换倾角' if args.tilt_rolling else ''}）"
             f" —— 只提示静置姿态 + 记录 gravity_ax/ay，不做补偿、不改激励")
     log(f"  保存目录: {args.out}")
+    log(f"  保存格式: {'npz + csv' if args.save_csv else 'npz（默认，不写 csv）'}"
+        + ("  ← 也记静止保持段" if args.record_hold else "  ← 不记静止保持段"))
     if args.dry_run:
         log("  [DRY-RUN] 无硬件: 用内置仿真代替串口"
             f"（planar_yaw_model.h 同方程, λ={SIM_FRICTION_LAMBDA:g}, "
@@ -2266,13 +2323,22 @@ def main(argv=None) -> int:
                 f"漂移 ±{args.sim_beta_drift_frac:.2f}·δ / {args.sim_beta_drift_period:g}s")
             log(f"  [DRY-RUN] 注意: 这个环境里 k/c/γ **无效**；"
                 f"记录列 backlash_center(在线估计) / backlash_beta_true(真值)")
+        if getattr(args, "sim_no_backlash", False):
+            log(f"  [DRY-RUN] ★ 仿真环境 3: **没有背隙**（δ=0）—— 电机与云台之间没有空行程，"
+                f"只剩 τ_t = k·Δ + c·Δ̇（k={args.sim_no_backlash_k:g} N·m/rad, "
+                f"c=defaultModelParams 的 {2.0:g}）")
+            log(f"  [DRY-RUN] 用途: 可辨识性诊断 —— 喂给当前 16 参（含 δ）模型，"
+                f"看它能不能识出'其实没有背隙'；npz 里记 no_backlash=1")
     log("=" * 78)
 
     args._held_base = None          # --held-big-stratified 的基准平台方位角（首个小 yaw 段时确定）
     link = (SimRobotLink(rng, rigid=args.sim_rigid,
                          beta_random_frac=args.sim_beta_random_frac,
                          beta_drift_frac=args.sim_beta_drift_frac,
-                         beta_drift_period=args.sim_beta_drift_period)
+                         beta_drift_period=args.sim_beta_drift_period,
+                         no_backlash=getattr(args, "sim_no_backlash", False),
+                         no_backlash_k=getattr(args, "sim_no_backlash_k",
+                                               SIM_NO_BACKLASH_K))
             if args.dry_run else HwRobotLink())
     saved, attempts = 0, 0
     exit_code = 0

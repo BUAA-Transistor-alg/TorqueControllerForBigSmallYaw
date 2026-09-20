@@ -90,16 +90,18 @@ python3 python/scripts/collect_sysid.py --tag=big   --segments=6 --tilted --held
 python3 python/scripts/collect_sysid.py --tag=small --segments=6 --tilted
 # ↑ 默认还会把每个"静止保持段"也落盘（文件名后缀 _hold，首段除外）并参与辨识 ——
 #   它补的是采样轨迹里稀缺的**大角度阶跃**激励；不要就用 --no-record-hold
+# ★ 默认**只写 npz**（列是 csv 的超集、体积约为一半；辨识只读 npz，同名成对时也只读 npz）；
+#   确实要留一份 csv 给人看/给老脚本用，加 --save-csv
 # ①' 只采**测试数据**（无硬件）: 用"刚性接触 + 死区完全自由 + β 每条数据随机/漂移"的仿真环境
 #    python3 python/scripts/collect_sysid.py --dry-run --sim-rigid --segments=100 \
 #            --duration-sec=3 --no-record-hold --out=/tmp/rigid
 # ② 拟合（torch 输出误差法；λ 固定 100，不改。拟合 15 参：平面 8 + 背隙/电机侧 8 里去掉了
 #   **默认冻结**的直通项 γ；保持段默认只取前 3 s，见 --hold-max-sec）
 #   需要数据里同时有 theta_big_motor（电机侧）与 theta_big_platform（云台侧）两列
-#   δ 的独立校验/初值: python3 python/scripts/calibrate_backlash.py --data='data/sysid/*.csv'
+#   δ 的独立校验/初值: python3 python/scripts/calibrate_backlash.py --data='data/sysid/*.npz'
 # ★ 几何已按实测填好（(dx, dy) = (0, 0.07)），实机数据**不需要**再给 --dx/--dy；
 #   只有换机械或跑旧归档数据（用 (0.10, 0) 生成的那批）时才显式覆盖
-python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' \
+python3 python/scripts/identify_params_torch.py --data='data/sysid/*.npz' \
         --truth-params=<若有真值> --epochs=1000
 # ③ 结果填进 include/tcbs/mpc/planar_yaw_params.h 的 defaultModelParams()（或运行时 setModelParams）
 ```
@@ -146,7 +148,7 @@ cd build && ctest --output-on-failure
 # 参数辨识: 采集（Python，无硬件可 --dry-run）+ 拟合（C++ 线性最小二乘 / torch 可导仿真）
 python3 python/scripts/collect_sysid.py --tag=big --segments=6      # 大 yaw 被激励
 python3 python/scripts/collect_sysid.py --tag=small --segments=6    # 小 yaw 被激励
-python3 python/scripts/identify_params_torch.py --data='data/sysid/sysid_*.csv'   # 唯一辨识路径
+python3 python/scripts/identify_params_torch.py --data='data/sysid/sysid_*.npz'   # 唯一辨识路径
 
 # pitch 映射标定（两段线性拟合）: ★ 需把 IMU 临时装到头上（ON_HEAD）
 ./tcbs_pitch_calibration --sim                # 无硬件自检（虚拟台架 + 断言，秒级）

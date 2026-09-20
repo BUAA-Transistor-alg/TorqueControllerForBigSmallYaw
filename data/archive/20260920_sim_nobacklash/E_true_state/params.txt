@@ -1,0 +1,18 @@
+# identify_params_torch.py 输出（输出误差法）
+# 配方: ★ 全批配方(epochs=1500 个**全批** Adam 步, 每步 batch=全部段)—— 同一损失，只是把原配方的'每段一次更新'合并成'每 epoch 一次'
+Jbig_eff = 0.053717492
+Js = 0.020693632
+Px = 0.003604441
+Py = -0.015210323
+fc_big = 0.208645935
+fv_big = 0.052872115
+fc_small = 0.091996544
+fv_small = 0.027845206
+backlash_delta = 0.001682342
+backlash_k = 158.265953406
+backlash_c = 2.455517753
+backlash_through = 0.002000000
+Jmotor = 0.005000058
+fc_motor = 0.019986737
+fv_motor = 0.012327244
+backlash_beta = 0.000000000

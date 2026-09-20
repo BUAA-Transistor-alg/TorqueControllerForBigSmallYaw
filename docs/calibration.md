@@ -423,7 +423,7 @@ d·R(θ_s)P = (d·P)·cosθ_s + (d×P)·sinθ_s
 ### 4.3 辨识方法: **只有 torch 输出误差法**
 
 ```bash
-python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' --epochs=1000
+python3 python/scripts/identify_params_torch.py --data='data/sysid/*.npz' --epochs=1000
 ```
 
 | 方法 | 做法 | 为什么用它 |
@@ -454,10 +454,10 @@ python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' --epoc
 # 1) 采集（分轴、录制序列+增强+PID、100Hz、pitch=0、另一轴 PID 保持到随机位置）
 python3 python/scripts/collect_sysid.py --segments=6 --tag=big     # 大 yaw 被激励
 python3 python/scripts/collect_sysid.py --segments=6 --tag=small   # 小 yaw 被激励
-# 输出: data/sysid/sysid_<tag>_*.npz + *.csv
+# 输出: data/sysid/sysid_<tag>_*.npz（默认只写 npz；--save-csv 才另写 csv）
 
 # 2) 辨识（唯一路径: torch 可导仿真输出误差法）
-python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' --epochs=1000
+python3 python/scripts/identify_params_torch.py --data='data/sysid/*.npz' --epochs=1000
 # 3) 把结果填进 planar_yaw_params.h（或运行时 setModelParams）后跑闭环验证
 ./build/tcbs_test_dual_yaw_mpc
 ./build/tcbs_mpc_param_eval --phi=<辨识参数> --lambda=100 --substeps=4

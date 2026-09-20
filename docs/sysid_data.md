@@ -80,12 +80,12 @@
 ```
 data/sysid/
 ├── sysid_big_20260914_181434_00.npz      # 段 0：driven = 大 yaw
-├── sysid_big_20260914_181434_00.csv      # 同一段的 CSV（与 npz 同时写）
 ├── sysid_small_20260914_181447_01.npz    # 段 1：driven = 小 yaw
-└── sysid_small_20260914_181447_01.csv
+└── sysid_small_20260914_181447_01_hold.npz   # 该段前面的静止保持段（--record-hold，默认开）
 ```
 
-`sysid_<tag>_<时间戳>_<序号>[<后缀>].{npz,csv}`
+`sysid_<tag>_<时间戳>_<序号>[<后缀>].npz`（★ **默认只写 npz**；`--save-csv` 才额外写一份
+同名 `.csv`，仅供人眼看/老脚本用 —— npz 的列是 csv 的**超集**，辨识脚本只读 npz）
 
 | 字段 | 含义 |
 |---|---|
@@ -356,7 +356,7 @@ python3 python/scripts/collect_sysid.py --dry-run --segments=1
   `big_joint_angle`（**延迟补偿**估计 = 最近一次链路新样本 + 平台角速度×年龄）、
   `mcu2_seq` / `big_enc_age`（模拟 ~10 Hz、间隔 80~120 ms 不规则、值被保持的 MCU2 链路）。
 - 因此 **dry-run 与实机走同一条采集代码路径**，可用来验证脚本逻辑、时序与输出格式；
-  生成的 npz/csv 列头、行数与实机完全一致。
+  生成的 npz 列（以及 --save-csv 时的 csv 列头）、行数与实机完全一致。
 
 ---
 

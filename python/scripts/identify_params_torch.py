@@ -119,9 +119,9 @@ identify_params_torch.py — **三维（含大 yaw 背隙）**模型的 **PyTorc
 用法::
 
     # 多段一起拟合（.csv 与 .npz 都支持；--data 可重复或用逗号分隔）
-    python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv'
+    python3 python/scripts/identify_params_torch.py --data='data/sysid/*.npz'
     # 只拟合大 yaw（小 yaw 摩擦参数冻结在初值）
-    python3 python/scripts/identify_params_torch.py --data='data/sysid/*.csv' --fit-axis=big
+    python3 python/scripts/identify_params_torch.py --data='data/sysid/*.npz' --fit-axis=big
     # 模型自检（回归矩阵 / numpy vs torch / 3-DOF 装配一致性 / 梯度）
     python3 python/scripts/identify_params_torch.py --selftest
 
@@ -1231,7 +1231,12 @@ def _read_csv(path: str) -> list:
 
 
 def load_segments(patterns, dt_override: float | None = None, verbose: bool = True) -> list:
-    """读入若干 csv/npz（glob 或显式路径），返回 Segment 列表。"""
+    """读入若干 **npz**（推荐，采集脚本默认格式）/ csv（老数据）（glob 或显式路径）。
+
+    ★ 同一段的多种格式只读一份（优先 npz > csv）: 老目录里 ``x.csv`` 与 ``x.npz`` 常常成对
+      存在（``--save-csv`` 时代的产物），若都读进来会把同一段数据加载两次 —— 既污染留出集
+      统计，也白费算力。这里按**去掉扩展名的同名文件**去重并打印跳过了哪些。
+    """
     if isinstance(patterns, str):
         patterns = [patterns]
     files = []
@@ -1246,6 +1251,28 @@ def load_segments(patterns, dt_override: float | None = None, verbose: bool = Tr
             files.extend(hit)
     seen = set()
     files = [f for f in files if not (f in seen or seen.add(f))]
+
+    # ── ★ 同一段的多种格式去重: 优先 npz（列是 csv 的超集），其次 csv ──
+    _pref = {".npz": 0, ".csv": 1}
+    by_stem: dict = {}
+    order: list = []
+    dropped: list = []
+    for f in files:
+        stem, ext = os.path.splitext(f)
+        cur = by_stem.get(stem)
+        if cur is None:
+            by_stem[stem] = f
+            order.append(stem)
+        elif _pref.get(ext, 9) < _pref.get(os.path.splitext(cur)[1], 9):
+            by_stem[stem] = f
+            dropped.append(cur)
+        else:
+            dropped.append(f)
+    if dropped and verbose:
+        print(f"[load] 同一段有 {len(dropped)} 个重复格式，只读优先的那份"
+              f"（npz > csv）: " + ", ".join(os.path.basename(d) for d in dropped[:3])
+              + (" …" if len(dropped) > 3 else ""))
+    files = [by_stem[s] for s in order]
 
     segs = []
     skipped = []
@@ -2647,7 +2674,9 @@ def _build_argparser():
         description="平面 3-DOF（含大 yaw 背隙）16 参模型 —— PyTorch 可导前向仿真参数辨识（输出误差法）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--data", action="append", default=None,
-                    help="数据 glob（可重复/逗号分隔）；默认 data/sysid/*.csv 和 *.npz")
+                    help="数据 glob（可重复/逗号分隔）；默认 data/sysid/*.npz"
+                         "（采集脚本默认只写 npz）。老 csv 数据仍可读: --data='.../*.csv'；"
+                         "同名 npz+csv 同时命中时只读 npz 那一份")
     ap.add_argument("--fit-axis", choices=["both", "big", "small"], default="both",
                     help="both=三个状态通道（电机/云台/小 yaw）一起拟合；"
                          "big=只算电机+云台通道（小 yaw 摩擦冻结）；"
@@ -2850,7 +2879,7 @@ def main(argv=None) -> int:
         print(f"[error] 需要 torch: {_TORCH_IMPORT_ERROR}", file=sys.stderr)
         return 2
 
-    patterns = args.data or ["data/sysid/*.csv", "data/sysid/*.npz"]
+    patterns = args.data or ["data/sysid/*.npz"]
     # ── 新增参数的初值（全部参与拟合；这里只是**初值**）──
     phi0 = default_param_vector()
     d_init = args.backlash_delta
