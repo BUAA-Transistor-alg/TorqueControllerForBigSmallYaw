@@ -37,6 +37,9 @@ mcu::ReceivePacket McuDataPreprocessor::processReceive(const mcu::ReceivePacket&
     r.yaw_small_angle = static_cast<float>(
         params_.recv_small_yaw_scale * packet.yaw_small_angle + params_.recv_small_yaw_offset);
     r.yaw_small_omega = static_cast<float>(params_.recv_small_omega_scale * packet.yaw_small_omega);
+    
+    r.chassis_imu_omega = -r.chassis_imu_omega;
+    
     return r;
 }
 

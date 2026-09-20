@@ -124,11 +124,11 @@ inline DualYawMpcConfig defaultMpcConfig() {
     c.w_small_azimuth = 1.0;
     c.w_small_center = 0.0;
     c.w_small_limit = 1e4;
-    c.small_limit_soft_ratio = 0.75;
-    c.r_big_torque = 0.01;
+    c.small_limit_soft_ratio = 0.9;
+    c.r_big_torque = 1.0;
     c.r_small_torque = 0.01;
-    c.rd_big_rate = 10.0;
-    c.rd_small_rate = 10.0;
+    c.rd_big_rate = 100.0;
+    c.rd_small_rate = 100.0;
     c.smooth_eps = 1e-6;
     c.ref_delay_steps = 0;
 
@@ -145,8 +145,8 @@ inline DualYawMpcConfig defaultMpcConfig() {
     //     以及采集脚本的 SMALL_TRAVEL_MIN/MAX 保持一致；改行程要三处一起改。
     //   ★ 软限位区: 两侧各自从硬限位向行程内缩 (1−small_limit_soft_ratio)·总行程
     //     = 0.25·60° = 15° ⇒ 软限位区 [−15°, +15°]（见 dual_yaw_mpc.cpp 的 smallSoftLimits）。
-    c.small.min_angle = -30.0 * M_PI / 180.0;  // −30°
-    c.small.max_angle =  30.0 * M_PI / 180.0;  // +30°
+    c.small.min_angle = -40.0 * M_PI / 180.0;  // −30°
+    c.small.max_angle =  40.0 * M_PI / 180.0;  // +30°
     // 回中（冗余自由度分配）目标角 = 行程中心。**显式给出**, 而不是让 MPC 内部按
     // 0.5·(min+max) 隐式推算 —— 换机械后必须在这里改（0 = 回中到关节零位）。
     // 当前行程对称 ⇒ 中心 = 0。**若哪天行程又变成非对称**（例如 [−25°,+20°] ⇒ −2.5°），

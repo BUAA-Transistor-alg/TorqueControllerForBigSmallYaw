@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
         // 目标: 大 yaw 平台方位保持当前值；小 yaw 方位做正弦（±amp）
         const double psi_big_target = psi_big_now;                 // 大 yaw 不动
         const auto smallTargetAt = [&](double tt) {
-            return psi_big_now + opt.amp * std::sin(omega * tt);
+            return opt.amp * std::sin(omega * tt);
         };
         const double psi_small_target = smallTargetAt(t);
         const double pitch_target = (5.0 + 15.0 * std::sin(omega * t - M_PI / 2.0)) * kDeg;
@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
             std::vector<double> big_seq(N), small_seq(N), pitch_seq(N);
             for (int k = 0; k < N; ++k) {
                 const double tk = t + (k + 1) * cfg.mpc.dt_control;
-                big_seq[k] = psi_big_now;
+                big_seq[k] = 0;psi_big_now;
                 small_seq[k] = smallTargetAt(tk);
                 pitch_seq[k] = pitch_target;
             }
