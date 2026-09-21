@@ -237,10 +237,10 @@ def default_param_vector() -> np.ndarray:
     log 参数化下从 CAD 占位值（Jbig_eff 0.024 vs 实车 0.0456）爬到真值要几百个 epoch，
     纯属浪费算力。要复现"从零辨识"就用 `--init-vector=<CAD 占位值>`。
     """
-    return np.array([0.045614, 0.008116, 0.021348, -0.007430, 0.096245, 0.237374,
-                     0.033434, 0.048466,          # ← 与 planar_yaw_params.h 一致
-                     0.096463, 157.8279, 2.591145, 0.002, 0.005455, 0.004139, 0.030332, 0.0,
-                     0.0, 0.0],                   # ← Pbx / Pby（默认 0 = 未知）
+    return np.array([0.051663, 0.004578, 0.000288, 0.021925, 0.261903, 0.116187,
+                     0.021027, 0.038137,          # ← 与 planar_yaw_params.h 一致
+                     0.018163, 23.450883, 7.702286, 0.002, 0.025028, 0.059399, 0.066934, 0.0,
+                     -0.013844, 0.133088],        # ← Pbx / Pby（本次倾斜数据已能辨识）
                     dtype=np.float64)
 
 
@@ -1499,7 +1499,12 @@ class FitConfig:
                                     #   角速度项同量级 ⇒ 会去"拟合积分器"）；
                                     #   rk4 同子步数把该误差降到 4e-3，代价 ×2。
                                     #   "原仓库同款"消融仍可用 --integrator=euler --substeps=1。
-    lr_schedule: str = "none"       # none = 常数 lr（原仓库）| cosine = 旧配方
+    lr_schedule: str = "none"       # none = 常数 lr（原仓库）| cosine = 从第 0 步就开始余弦退火
+    # ★ 用户要求（2026-09-21）: **最后 n 步**用余弦把 lr 从 `lr` 衰减到 0（前面的步保持常数）。
+    #   n > 0 时优先于 `lr_schedule`（两者同时给会打一条提示并忽略 lr_schedule）——
+    #   典型用法: `--epochs=2000 --lr=1e-2 --cos-decay-steps=1000`
+    #   = 前 1000 epoch 常数 1e-2、后 1000 epoch 余弦衰减到 0。
+    cos_decay_steps: int = 0        # 0 = 关闭（默认，行为与以前逐字相同）
     # ── 旧配方（显式给 iters>0 才启用；或 --legacy-recipe 一键预设）──
     iters: int = 0                  # >0 ⇒ 旧配方：精确跑 iters 个 Adam 步（分窗 mini-batch）
     lbfgs_iters: int = 0            # LBFGS 迭代数（0 = 关闭 ⇒ 原仓库没有 LBFGS）
@@ -1564,6 +1569,11 @@ class FitConfig:
         self.integrator = str(self.integrator).lower()
         self.lr_schedule = str(self.lr_schedule).lower()
         self.beta_mode = str(self.beta_mode).lower()
+        self.cos_decay_steps = max(0, int(self.cos_decay_steps))
+        if self.cos_decay_steps > 0 and self.lr_schedule not in ("none", ""):
+            print(f"[torch] [WARN] 同时给了 --cos-decay-steps={self.cos_decay_steps} 与 "
+                  f"--lr-schedule={self.lr_schedule} ⇒ 以 cos-decay 为准（忽略 lr_schedule）")
+            self.lr_schedule = "none"
 
     # ── 便捷判断/预设 ──
     @property
@@ -1686,6 +1696,27 @@ def _pack_windows(segs, cfg: FitConfig, chan_sel, dtype, dev):
             "seg_of_window": [sp[0] for sp in specs]}
 
 
+def lr_at_step(step: int, total: int, base_lr: float, decay_steps: int) -> float:
+    """分段学习率: 前 `total − decay_steps` 步 = `base_lr`（常数），
+    最后 `decay_steps` 步按**余弦**从 `base_lr` 衰减到 0::
+
+        p = (step − (total − n)) / n ∈ [0, 1]
+        lr = base_lr · ½(1 + cos(π·p))          # p=0 → base_lr, p=1 → 0
+
+    `decay_steps ≤ 0` ⇒ 恒为 `base_lr`（= 关闭，与旧行为一致）；
+    `decay_steps ≥ total` ⇒ 全程余弦（等价于 `--lr-schedule=cosine`）。
+    """
+    n = int(decay_steps)
+    if n <= 0:
+        return float(base_lr)
+    total = max(1, int(total))
+    start = total - n
+    if step < start:
+        return float(base_lr)
+    p = min(1.0, max(0.0, (step - start) / float(n)))
+    return float(base_lr) * 0.5 * (1.0 + math.cos(math.pi * p))
+
+
 def _config_summary(cfg: FitConfig, space: "ParamSpace", W: int, dt: float,
                     n_free: int) -> dict:
     """配置摘要（打印 + 存进 FitResult，供收敛曲线标题/报告使用）。"""
@@ -1695,9 +1726,12 @@ def _config_summary(cfg: FitConfig, space: "ParamSpace", W: int, dt: float,
             recipe += f" + LBFGS {cfg.lbfgs_iters} 步"
         recipe += f"，{cfg.loss_mode} 损失，{cfg.integrator.upper()} 积分"
     else:
+        _lr_desc = (f"lr={cfg.lr:g}（常数）"
+                    + (f"，最后 {cfg.cos_decay_steps} epoch 余弦衰减到 0"
+                       if cfg.cos_decay_steps > 0 else ""))
         recipe = (f"原仓库配方：epochs={cfg.epochs} × 段数{W} 个 Adam 步"
                   f"（= 原仓库 num_epochs 同轮数），每次 {cfg.seg_steps} 步(0.1 s)随机片段，"
-                  f"lr={cfg.lr:g}（常数），损失 = 角度wrap MSE + 角速度 MSE(等权)，"
+                  f"{_lr_desc}，损失 = 角度wrap MSE + 角速度 MSE(等权)，"
                   f"3-DOF {cfg.integrator.upper()} 积分(substeps={cfg.substeps})，"
                   f"无限位(log 参数化)")
     return {"recipe": recipe, "epochs": int(cfg.epochs), "iters": int(cfg.iters),
@@ -1706,6 +1740,7 @@ def _config_summary(cfg: FitConfig, space: "ParamSpace", W: int, dt: float,
             "seg_steps": int(cfg.seg_steps), "lr": float(cfg.lr), "loss_mode": cfg.loss_mode,
             "integrator": cfg.integrator, "substeps": int(cfg.substeps),
             "lr_schedule": cfg.lr_schedule, "lbfgs_iters": int(cfg.lbfgs_iters),
+            "cos_decay_steps": int(cfg.cos_decay_steps),
             "fit_axis": cfg.fit_axis, "p_constraint": cfg.p_constraint,
             "n_free": int(n_free), "n_sample": int(W), "dt": float(dt),
             "limits": "无（无上下界 / 无 clamp / 无投影 / 无惩罚项）",
@@ -1966,8 +2001,14 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
             if len(valid) < W and cfg.verbose:
                 print(f"[torch] {W - len(valid)} 段短于 seg_steps={seg_steps}，已跳过")
             opt = torch.optim.Adam(params, lr=cfg.lr)
-            sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs))
-                     if cfg.lr_schedule == "cosine" else None)     # ★ 默认无 scheduler
+            # ★ 最后 cos_decay_steps 步余弦衰减（用户要求）优先；否则才看 lr_schedule
+            cos_n = int(cfg.cos_decay_steps)
+            sched = (None if cos_n > 0 else
+                     (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs))
+                      if cfg.lr_schedule == "cosine" else None))
+            if cfg.verbose and cos_n > 0:
+                print(f"[torch] ★ lr 调度: 前 {max(0, epochs - cos_n)} epoch 常数 lr="
+                      f"{cfg.lr:g}，最后 {min(cos_n, epochs)} epoch 余弦衰减到 0")
             rng = np.random.RandomState(cfg.seed)
             print_every = max(1, int(cfg.print_every))
             if cfg.batch_segments:
@@ -1987,6 +2028,10 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
                     print(f"[torch] ★ --batch-segments: 每 epoch {n_group} 次 Adam 步"
                           f"（每步 batch={bs}/{nv} 段 × {seg_steps} 步；损失 = 组内各段损失均值）")
                 for ep in range(epochs):
+                    if cos_n > 0:
+                        _lr = lr_at_step(ep, epochs, cfg.lr, cos_n)
+                        for _g2 in opt.param_groups:
+                            _g2["lr"] = _lr
                     ep_loss = 0.0
                     for _g in range(n_group):
                         sel = (ar if n_group == 1
@@ -2087,13 +2132,19 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
         # 旧精细配方（iters>0 才走这里）: 分窗 mini-batch Adam（+ 可选 LBFGS）
         # ════════════════════════════════════════════════════════════════════
         opt = torch.optim.Adam(params, lr=cfg.lr)
-        sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, cfg.iters))
-                 if cfg.lr_schedule == "cosine" else None)
+        cos_n = int(cfg.cos_decay_steps)
+        sched = (None if cos_n > 0 else
+                 (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, cfg.iters))
+                  if cfg.lr_schedule == "cosine" else None))
         n_batch = W if cfg.batch_size <= 0 else min(W, int(cfg.batch_size))
         if cfg.verbose:
             print(f"[torch] 旧配方: 窗口数 W={W}（每窗 {L} 点 = {L*dt:.2f} s）, "
                   f"Adam 批={n_batch}/{W} 窗")
         for it in range(cfg.iters):
+            if cos_n > 0:
+                _lr = lr_at_step(it, cfg.iters, cfg.lr, cos_n)
+                for _g2 in opt.param_groups:
+                    _g2["lr"] = _lr
             opt.zero_grad(set_to_none=True)
             if n_batch < W:
                 idx = torch.from_numpy(np.random.choice(W, size=n_batch, replace=False)).to(dev)
@@ -2739,6 +2790,11 @@ def _build_argparser():
     g.add_argument("--integrator", choices=["euler", "rk4"], default=FitConfig.integrator,
                    help="★ 默认 rk4（3-DOF 背隙接触模态很硬: 同子步数下 euler 的数值角速度"
                         "误差可达 0.13 rad/s，会污染摩擦/k 的拟合）；euler = 原仓库同款消融")
+    g.add_argument("--cos-decay-steps", type=int, default=FitConfig.cos_decay_steps,
+                   help="★ **最后 N 步**用余弦把学习率从 `--lr` 衰减到 0（前面保持常数）。"
+                        "典型: `--epochs=2000 --lr=1e-2 --cos-decay-steps=1000` = 前 1000 epoch "
+                        "常数 1e-2、后 1000 epoch 余弦衰减到 0。0 = 关闭（默认，与以前逐字相同）；"
+                        "给了它就不再走 --lr-schedule。")
     g.add_argument("--lr-schedule", choices=["none", "cosine"], default=FitConfig.lr_schedule,
                    help="★ none = 常数学习率（原仓库没有 scheduler，默认）；cosine = 旧配方")
     ap.add_argument("--legacy-recipe", action="store_true",
@@ -2834,6 +2890,12 @@ def _build_argparser():
                     help="★ 状态目标来源: est（默认）= 记录/估计值（控制器真正看到的）；"
                          "true = 仿真真值列 `theta_true_*`（**只有 dry-run 数据有**）——"
                          "上限对照，用来把'模型误差'与'电机状态估计误差'分开")
+    ap.add_argument("--eval-max-segs", type=int, default=0,
+                    help="★ **只限制评测/学习曲线用的段数**（默认 0 = 用全部）：训练集不受影响。"
+                         "后处理里两遍**全量开环评测**（估计参数 + 初值对照）是大头: 240 段 ≈ 3 min、"
+                         "一行都不打印（容易被误认为卡死）。给 40 ⇒ 约 30 s；抽样是确定性的"
+                         "（按 --seed），同一 seed 结果可复现。给了 --val-data 时它同时作用于"
+                         "`--eval-every` 的学习曲线（那里每 N 个 epoch 都要跑一遍全量评测）")
     ap.add_argument("--hold-max-sec", type=float, default=HOLD_KEEP_SEC,
                     help="★ **保持段**（`collect_sysid.py --record-hold` 落盘、文件名带 `_hold` "
                          "后缀的段）只取前 N 秒（默认 3.0）：后面的基本是静止，白费算力、"
@@ -2953,6 +3015,18 @@ def main(argv=None) -> int:
         if not val_segs:
             print(f"[error] --val-data={args.val_data} 没读到数据", file=sys.stderr)
             return 2
+    # ── ★ 评测段数上限（--eval-max-segs，只影响评测/画图/学习曲线；确定性子集）──
+    def _cap_eval(lst):
+        n_cap = int(getattr(args, "eval_max_segs", 0) or 0)
+        if not lst or n_cap <= 0 or len(lst) <= n_cap:
+            return lst
+        pick = np.sort(np.random.RandomState(int(args.seed)).choice(len(lst), size=n_cap,
+                                                                   replace=False))
+        print(f"[eval] --eval-max-segs={n_cap}: 评测集用 {n_cap}/{len(lst)} 段"
+              f"（确定性子集，训练集不变）", flush=True)
+        return [lst[int(i)] for i in pick]
+    val_segs = _cap_eval(val_segs)
+
     # ── ★ 训练/留出重合检查（防止"留出集"其实是训练集的一部分）──
     if val_segs:
         tr_fp = {seg_fingerprint(sg) for sg in segs}
@@ -2986,6 +3060,7 @@ def main(argv=None) -> int:
                     free_init_vel=args.free_init_vel, p_bound=args.p_bound,
                     epochs=args.epochs, seg_steps=args.seg_steps, loss_mode=args.loss_mode,
                     integrator=args.integrator, lr_schedule=args.lr_schedule,
+                    cos_decay_steps=args.cos_decay_steps,
                     init_vector=(phi0 if args.init_vector is None
                                  else _parse_vecN(args.init_vector, "--init-vector")),
                     truth_vector=(None if args.truth_params is None
@@ -3034,12 +3109,21 @@ def main(argv=None) -> int:
     # ── ★ 全批开环前向仿真误差（比 loss 好读；口径 = 整段、同一起点、同一积分器）──
     use_beta_eval = bool(res.config.get("use_beta_column"))
     eval_segs = val_segs if val_segs is not None else segs
+    eval_segs = _cap_eval(eval_segs)
     tag = "留出集" if val_segs is not None else "训练集"
+    print(f"[eval] 开环评测 {len(eval_segs)} 段（窗口 0.1 s + 整段）× 2 遍（估计参数 / 初值对照）…"
+          f"  240 段约 3 min —— **这里会静默一会儿，不是卡死**；"
+          f"想快就用 --eval-max-segs", flush=True)
+    import time as _time
+    _t0 = _time.time()
     rm = channel_rmse(eval_segs, res.phi, base, integrator=cfg.integrator, substeps=cfg.substeps,
                       use_beta=use_beta_eval, state_mode=cfg.state_mode)
+    _t1 = _time.time()
     rm0 = channel_rmse(eval_segs, res.phi0, base, integrator=cfg.integrator,
                        substeps=cfg.substeps, use_beta=use_beta_eval,
                        state_mode=cfg.state_mode)
+    print(f"[eval] 完成: 估计参数 {_t1 - _t0:.1f}s + 初值对照 {_time.time() - _t1:.1f}s",
+          flush=True)
     print(f"全批前向仿真 val_loss = {res.val_loss:.6e}")
     print(f"  ★ 估计参数（{tag}）: {_fmt_rmse(rm)}")
     print(f"               {_fmt_rmse_full(rm)}")

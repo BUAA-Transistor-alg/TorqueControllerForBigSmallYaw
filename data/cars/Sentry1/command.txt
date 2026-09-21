@@ -1,0 +1,14 @@
+python3 python/scripts/identify_params_torch.py \
+  --data='data/cars/Sentry1/sysid/*.npz' \
+  --epochs=10000 --batch-segments --substeps=2 --threads=4 \
+  --eval-every=100 --print-every=100 \
+  --plot-out=data/cars/Sentry1/ident18/ident \
+  --out=data/cars/Sentry1/ident18/params.txt
+
+python3 python/scripts/identify_params_torch.py \
+  --data='data/cars/Sentry1/sysid/*.npz' \
+  --epochs=2000 --lr=1e-2 --cos-decay-steps=1000 \
+  --batch-segments --substeps=2 --threads=4 \
+  --eval-every=100 --print-every=100 \
+  --plot-out=data/cars/Sentry1/ident18_cos/ident \
+  --out=data/cars/Sentry1/ident18_cos/params.txt

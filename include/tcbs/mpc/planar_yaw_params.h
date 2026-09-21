@@ -34,16 +34,12 @@ inline ModelParams defaultModelParams() {
     p.m_u_known = 0.0;    // 不称重 ⇒ 保持 0（仅倾斜时 m_u·d·g⊥ 项受影响）
 
     // ── 16 个待辨识参数（★ 已由实车数据辨识；来源见下方注释）──
-    // 数据: data/cars/Sentry1/sysid/ 的 **279 训练段**（140 激励 + 139 保持段，保持段只取前 3 s）
-    //       + 80 留出段（全局段号 ≥140，不参与拟合；大 90 + 小 90 激励段 + 179 保持段）
-    // 方法: python/scripts/identify_params_torch.py --epochs=10000 --batch-segments
-    //       --substeps=2 --threads=4 --eval-every=100 --beta-mode=auto --state-mode=est
-    //       （λ=100，输出误差法，16 参一起拟合、γ 冻结在 0.002）
-    // 结果: data/cars/Sentry1/ident/params.txt（用时 2604.8 s；loss 前 5 均值 0.1063 → 后 5 均值 0.0934）
-    //       图: ident_convergence.png / ident_traj.png / ident_convergence_learning.png
-    //       留出集窗口(0.1 s) RMSE: 角度 1.325/0.476/0.583°、角速度 0.440/0.193/0.230 rad/s
-    //       （对照初值 1.332/0.455/0.591°、0.479/0.190/0.232）
-    //       整段 3 s 开环 RMSE 13.1/13.0/16.9°（换向接触事件时序误差累积，属预期，不要按它判好坏）
+    // 数据: data/cars/Sentry1/sysid/ 的 **240 段**（大 122 + 小 118；其中 **~103 段是 6~13.6° 的
+    //       斜坡数据**（由 gravity_ax/ay 实测，`tilted` 标记当时没打开）；保持段只取前 3 s）
+    // 方法: python/scripts/identify_params_torch.py --epochs=2000 --batch-segments
+    //       --lr=1e-2 --cos-decay-steps=1000 --substeps=2 --threads=4 ...
+    //       （λ=100，输出误差法，18 参一起拟合、γ 冻结在 0.002；前 1000 epoch 常数 lr、后 1000 余弦到 0）
+    // 结果: 用时 420.8 s（★ 本次为该命令的输出，见 data/cars/Sentry1/ident18_cos/）
     // ⚠ **可信度分级**（同一批数据换 seed/epochs 复跑仍会漂的参数不要当真）:
     //   · 较可信: Jbig_eff、Js、fc_small、fv_small、backlash_delta、Jmotor
     //   · 可疑:   fv_big = 0.2374 是 fc_big = 0.0962 的 **2.47 倍** —— "粘滞 > 库仑" 在云台上
@@ -54,17 +50,17 @@ inline ModelParams defaultModelParams() {
     //   · **不可信: Px/Py**（本批数据 `tilted=0`，A 系重力只剩 ~0.28 m/s² 的残余倾斜，
     //            而辨识 P 需要固定 ~10°（1.70 m/s²）⇒ 拟合出的 |P|=0.0226 是噪声/垃圾桶。
     //            要定 P 必须补一批**固定 ~10° 倾角**的数据（`--tilted`/`--tilt-rolling`）一起拟合。）
-    p.Jbig_eff = 0.045614;  // 大 yaw 侧惯量（含 m_u|d|²）
-    p.Js       = 0.008116;  // 上装绕小 yaw 轴总惯量
-    p.Px       = 0.021348;  // 上装一阶矩（kg·m）★ 不可信（见上）
-    p.Py       = -0.007430; //                    ★ 不可信（见上）
-    p.fcBig    = 0.096245;  p.fvBig   = 0.237374;
-    p.fcSmall  = 0.033434;  p.fvSmall = 0.048466;
+    p.Jbig_eff = 0.051663;  // 大 yaw 侧惯量（含 m_u|d|²）
+    p.Js       = 0.004578;  // 上装绕小 yaw 轴总惯量
+    p.Px       = 0.000288;  // 上装一阶矩（kg·m）
+    p.Py       = 0.021925;  //
+    p.fcBig    = 0.261903;  p.fvBig   = 0.116187;
+    p.fcSmall  = 0.021027;  p.fvSmall = 0.038137;
     // ── ★ 大 yaw 侧一阶矩 Pb（kg·m）: "只随大 yaw 转、不随小 yaw 转"的质量偏心 ──
     //   重力矩 Gb = (Pbx + m_u_known·dx)·gy − (Pby + m_u_known·dy)·gx + Gs；只进大 yaw 行。
     //   ⚠ **只在倾斜数据里可辨识**（水平时 g_⊥≡0 ⇒ 梯度恒 0）；0 = "未知/未标定"，
     //     要标定它必须采固定倾角（`--tilted`/`--tilt-rolling`，或 dry-run 的 `--sim-tilt-deg`）数据。
-    p.Pbx = 0.0;  p.Pby = 0.0;
+    p.Pbx = -0.013844;  p.Pby = 0.133088;
 
     // ── 固定/可选 ──
     // ★ λ = 100（用户确认）: 软符号在 |ω| ≳ 1°/s ≈ 0.0175 rad/s 即饱和，足以逼近真实库仑摩擦。
@@ -96,15 +92,15 @@ inline ModelParams defaultModelParams() {
     //     （口径自洽）。所以运行期必须用估计器的在线值
     //     （`YawStateEstimator::Estimate::backlash_center`），离线拟合出的全局 β=0 无意义。
     //   起标定作用的是"全量数据"里的 `theta_big_motor` 与 `theta_big_platform` 两列。
-    p.backlash_delta   = 0.096463; // δ ≈ 5.53°（辨识值；上一批 0.0873）
-    p.backlash_k       = 157.8279; // 接触刚度（★ 与 c/δ 共线 ⇒ 数值可信度低；k 给太大会让 MPC 的
+    p.backlash_delta   = 0.018163; // δ ≈ 1.04°（辨识值）
+    p.backlash_k       = 23.450883; // 接触刚度（★ 与 c/δ 共线 ⇒ 数值可信度低；k 给太大会让 MPC 的
                                    //   Jacobian 求值失败 —— 试过 2000 会出现 trust_region 报错）
-    p.backlash_c       = 2.591145; // 接触阻尼（★ 同上，共线）
+    p.backlash_c       = 7.702286; // 接触阻尼（★ 同上，共线）
     p.backlash_smooth_eps = 1.0e-4;
     p.backlash_through    = 0.002; // 直通线性项 γ（死区内的微弱梯度引导；物理严格=0；默认冻结不辨识）
-    p.Jmotor           = 0.005455; // 电机侧惯量（关节侧）
-    p.fcMotor          = 0.004139; // 电机侧库仑摩擦（★ 与 fvMotor 严重互换，只有和值可信）
-    p.fvMotor          = 0.030332; // 电机侧粘滞摩擦（★ 同上）
+    p.Jmotor           = 0.025028; // 电机侧惯量（关节侧）
+    p.fcMotor          = 0.059399; // 电机侧库仑摩擦（★ 与 fvMotor 互换，只有和值可信）
+    p.fvMotor          = 0.066934; // 电机侧粘滞摩擦（★ 同上）
     p.tau_offset_motor = 0.0;
     // 稳定性自检: 接触刚度引入的快模态上限（k=158 在子步 2.5 ms 下余量 ≈39×；
     //   折合惯量 μ_red = J_motor·(J_big+J_s)/(J_motor+J_big+J_s) ≈ 0.00495 kg·m²
