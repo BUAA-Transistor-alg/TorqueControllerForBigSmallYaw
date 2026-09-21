@@ -279,7 +279,7 @@ PID_DEADBAND_DEG = 3.0            # [CLI] --pid-deadband-deg（见 PidController
 # ============================================================================
 SEGMENTS_DEFAULT = 1              # [CLI] --segments（偶数段激励大 yaw，奇数段激励小 yaw）
 DURATION_SEC = 3.0                # [CLI] --duration-sec：每段采样时长 s（3.0 s = 300 点 @100 Hz）
-SEED_DEFAULT = 42                 # [CLI] --seed（★ 确定性: 换 seed 才是另一批激励）
+SEED_DEFAULT = 571015                 # [CLI] --seed（★ 确定性: 换 seed 才是另一批激励）
 MAX_TEMP_C = 55.0                 # [CLI] --max-temp：电机过温阈值 ℃
 TAG_DEFAULT = None                # [CLI] --tag（None = 按 axis 自动取 big/small）
 RECORD_HOLD_DEFAULT = True        # [CLI] --record-hold / --no-record-hold
