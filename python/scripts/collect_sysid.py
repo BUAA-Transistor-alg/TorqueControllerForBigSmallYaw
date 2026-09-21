@@ -465,6 +465,11 @@ SIM_ENC_NOISE = 2e-5         # 编码器噪声标准差（rad），仅让 PID �
 #   δ = 0 ⇒ 电机与云台之间没有空行程，只剩一条刚度为 SIM_NO_BACKLASH_K 的"同步带"弹簧
 #   （τ_t = k·Δ + c·Δ̇）。它是"真实系统其实没有背隙"时当前 16 参模型的识别极限实验。
 SIM_NO_BACKLASH_K = 200.0     # 无背隙时那条"同步带"的刚度（N·m/rad）
+# ── ★ 随机重心偏置（--sim-com-random）: 每次运行抽一次（不是每段抽！）──
+#   为什么不是每段抽: P/Pb 是**全局**参数，逐段变化会让"拟合一个常数"这件事本身无解
+#   （真机重心也不会每段变）。所以每次采集运行抽一组，写进 npz 供诊断。
+SIM_COM_P_RANGE = (0.005, 0.020)      # |P| = |小 yaw 上装一阶矩| (kg·m)
+SIM_COM_PB_RANGE = (0.003, 0.015)     # |Pb| = |大 yaw 侧一阶矩|  (kg·m)
 
 
 def log(msg: str = "") -> None:
@@ -514,20 +519,33 @@ def _gravity_a_plane(est):
 class PidController:
     """位置式 PID: out = kp·e + ki·∫e + kd·ė，输出限幅 ±1.0 N·m，条件积分抗饱和。
 
-    与旧采集脚本**逐行同构**，便于两批数据合并。
+    ★ **误差死区**（`deadband` > 0 时启用，用户要求）:
+      · `|e| ≤ deadband` ⇒ P 与 D 项按 **e=0** 算（`kp·0 + kd·0`），**积分冻结**
+        （不清零、不累积）⇒ 输出恒为 `ki·∫e`（≈ 保持所需力矩），**不再追编码器噪声、
+        不再在背隙里来回蹭**；
+      · `|e| > deadband` ⇒ 正常 PID（积分继续累积、D 项用死区外误差）；
+      · 死区内**不清零积分**是有意的: 清零会让被保持轴"撒手"掉下来；
+      · 抗饱和判据仍用**原始误差**的符号（与死区无关）。
+      建议 `deadband` ≤ `--err-tol-deg`（稳定判据容差），否则两轴可能永远进不了稳定容差。
+
+    与旧采集脚本**逐行同构**（`deadband=0` 时逐字同构），便于两批数据合并。
     """
 
-    def __init__(self, kp, ki, kd, out_min, out_max, name="pid"):
+    def __init__(self, kp, ki, kd, out_min, out_max, name="pid", deadband: float = 0.0):
         self.kp, self.ki, self.kd = kp, ki, kd
         self.out_min, self.out_max = out_min, out_max
         self.name = name
+        self.deadband = max(0.0, float(deadband))
         self.integral = 0.0
         self.prev_error = 0.0
 
     def update(self, error: float, dt: float) -> float:
-        deriv = (error - self.prev_error) / dt if dt > 1e-6 else 0.0
-        self.prev_error = error
-        out = self.kp * error + self.ki * self.integral + self.kd * deriv
+        # ★ 死区内: P/D 看 "0"，积分冻结（抗饱和判据仍用原始 error 的符号）
+        in_deadband = (self.deadband > 0.0) and (abs(error) <= self.deadband)
+        e_pd = 0.0 if in_deadband else error
+        deriv = (e_pd - self.prev_error) / dt if dt > 1e-6 else 0.0
+        self.prev_error = e_pd
+        out = self.kp * e_pd + self.ki * self.integral + self.kd * deriv
         sat_hi = out > self.out_max
         sat_lo = out < self.out_min
         if sat_hi:
@@ -539,7 +557,7 @@ class PidController:
             do_int = False
         if sat_lo and error < 0:
             do_int = False
-        if do_int:
+        if do_int and not in_deadband:
             self.integral += error * dt
         return out
 
@@ -793,6 +811,16 @@ class SegmentPlan:
     held_strat_count: int = 0    # --held-big-stratified: 分层总数（0 = 未启用）
     held_strat_offset: float = 0.0   # 相对分层基准的偏移 rad
     no_backlash: int = 0      # 1 = dry-run 用的被控对象**没有背隙**（δ=0；诊断/可辨识性实验）
+    # 本段实际使用的 PID 配置（★ 记**真正用的参数**，而不是模块默认常量）
+    kp: float = PID_KP
+    ki: float = PID_KI
+    kd: float = PID_KD
+    pid_deadband: float = 0.0    # PID 误差死区（rad；0 = 关闭）
+    # dry-run 用的被控对象**重心真值**（kg·m；实机恒 0 = 未知，只用于诊断/出报告）
+    px_true: float = 0.0
+    py_true: float = 0.0
+    pbx_true: float = 0.0
+    pby_true: float = 0.0
     src_file: str = ""        # 参考来源（录制文件名）
     src_start: int = 0        # 参考在录制文件中的起点下标
     src_scale: float = 0.0    # 随机缩放系数
@@ -1034,6 +1062,9 @@ class PlanarYawPlant:
         p = dict(
             dx=0.0, dy=0.07, gravity=9.81, m_u_known=0.0,
             Jbig_eff=0.050, Js=0.020, Px=0.00866, Py=0.005,
+            # ★ 大 yaw 侧一阶矩（kg·m）: "只随大 yaw 转、不随小 yaw 转"的质量偏心。
+            #   默认 0；`--sim-com-random` 会给 P 与 Pb 都抽一个随机偏置（见 main）。
+            Pbx=0.0, Pby=0.0,
             fcBig=0.22, fvBig=0.055, fcSmall=0.0973, fvSmall=0.028,
             frictionLambda=SIM_FRICTION_LAMBDA,     # ★ 大 λ = 更接近真实库仑摩擦
             tau_offset_big=0.0, tau_offset_small=0.0)
@@ -1059,14 +1090,33 @@ class PlanarYawPlant:
         # 外生量 (g_x, g_y, ω_c, α_c)。默认底盘**水平静止** ⇒ 重力平面分量为 0、
         # 底盘角速度/角加速度为 0。两种给重力的方式（这**不是**底盘运动，只是静置姿态不同，
         # base_omega/base_alpha 仍为 0）:
-        #   · tilt_deg=X  : 绕 y 轴倾斜 X 度 ⇒ g_x = g·sinX, g_y = 0（采集脚本 --tilted 用）
+        #   · tilt_deg=X  : 绕 y 轴倾斜 X 度 ⇒ 底盘系平面分量 g_C = (g·sinX, 0)
         #   · gravity_a=(gx, gy): 直接给 A 系平面分量（标定脚本的"倾斜消融"需要 g_y ≠ 0）
+        # ★★ `tilt_deg ≠ 0` 时 A 系重力**随大 yaw 平台角旋转**（物理正确）:
+        #     g_A = Rz(−θ_p)·g_C ⇒ g_Ax = g_Cx·cosθ_p + g_Cy·sinθ_p, g_Ay = −g_Cx·sinθ_p + g_Cy·cosθ_p
+        #   实机由估计器/固件给出 A 系 gravity_a（本来就跟着转）；之前 dry-run 把它**冻结**在
+        #   `__init__` 的值上 ⇒ 倾斜 + 大 yaw 转动时动力学是错的（水平时 g_C=0，看不出问题）。
+        #   显式给 `gravity_a=` 的老用法（标定消融）仍保持"恒定 A 系分量"语义。
+        self._rot_grav = (gravity_a is None) and (abs(float(tilt_deg)) > 1e-12)
         if gravity_a is None:
             gx = p["gravity"] * math.sin(math.radians(float(tilt_deg)))
             gy = 0.0
         else:
             gx, gy = float(gravity_a[0]), float(gravity_a[1])
+        self._g_c = (gx, gy)                     # 底盘系（C）平面分量
         self.exo = (gx, gy, 0.0, 0.0)
+
+    def sync_exo(self) -> None:
+        """把 A 系重力按当前平台角刷新（`g_A = Rz(−θ_p)·g_C`）。
+
+        每个控制周期开头调用一次（与实机"每拍刷新一次 exo"的语义一致）。水平静置或
+        显式给了 `gravity_a=` 时不做任何事。
+        """
+        if not getattr(self, "_rot_grav", False):
+            return
+        cp, sp = math.cos(self.q[1]), math.sin(self.q[1])
+        gx, gy = self._g_c
+        self.exo = (gx * cp + gy * sp, -gx * sp + gy * cp, 0.0, 0.0)
 
     # ── 派生量 ──
     def _derived(self, qs):
@@ -1099,15 +1149,23 @@ class PlanarYawPlant:
         """云台+小 yaw 子块（与 C++ `eomBacklash` 内 `eom(qb, qdb, ...)` 同式）。
 
         ★ 3-DOF 下 q/qd 是 (电机, 云台, 小 yaw) ⇒ 子块的自变量是
-        ``q_b = q[1]``（云台角）、``qd_b = (qd[1], qd[2])``（云台/小 yaw 角速度）。
-        （早期版本误写成 ``qd[0], qd[1]``——把**电机**角速度当成了云台角速度，
-         相当于给云台行了电机摩擦/耦合项，必须用 `_accel` 与 C++ 对照才能发现。）
+        ``θ_small = q[2]``、``qd_b = (qd[1], qd[2])``（云台/小 yaw 角速度）——
+        因为 2-DOF 子块里的 ``q[1]`` 指的就是**小 yaw 关节角**（耦合项 M11/M12/μ 与
+        重力项 Gs 都按 R(θ_small)·P 算）。
+        ⚠ 两处历史 bug（都必须用"被控对象 vs 辨识模型/C++ 逐点比对"才发现）:
+          · 早期把 ``qd[0], qd[1]`` 当云台/小 yaw 角速度（用了**电机**角速度）；
+          · 早期把 ``q[1]``（云台角，大 yaw 多圈）当小 yaw 角 ⇒ 耦合项与 Gs 的
+            **θ 依赖整个错了**（Q 会随大 yaw 转好几圈），2026-09-20 修正为 ``q[2]``。
+          受影响的只有 **dry-run 仿真数据**里与 P 相关的结论（δ/k/c/β 那套不受影响：
+          τ_t 只依赖 Δ）；实机数据与 C++/辨识模型一直是对的。
         """
         p = self.p
-        Qx, Qy, M11, M12, mu = self._derived(q[1])
+        Qx, Qy, M11, M12, mu = self._derived(q[2])
         gx, gy, wc, ac = self.exo
         Gs = Qx * gy - Qy * gx
-        Gb = p["m_u_known"] * (p["dx"] * gy - p["dy"] * gx) + Gs
+        # ★ 大 yaw 侧: 已知上装质量那份 + 偏心 Pb（与 C++ eom/辨识模型逐字同式）
+        Gb = ((p["Pbx"] + p["m_u_known"] * p["dx"]) * gy
+              - (p["Pby"] + p["m_u_known"] * p["dy"]) * gx) + Gs
         tb, ts = qd[1], qd[2]          # ★ 云台 / 小 yaw 角速度（不是电机/云台）
         h0 = (mu * tb * ts + 0.5 * mu * ts * ts - Gb + mu * ts * wc + M11 * ac
               + self._fric(tb, p["fcBig"], p["fvBig"]) + p["tau_offset_big"])
@@ -1157,8 +1215,10 @@ class PlanarYawPlant:
         u = (float(tau[0]), 0.0, float(tau[1]))
         n = max(1, int(round(dt / self.int_step)))
         hh = dt / float(n)
+        self.sync_exo()                          # ★ 倾斜时 A 系重力随平台角旋转
         for _ in range(n):
             self._rk4(hh, u)
+        self.sync_exo()                          # 让"被读出的 exo"与步末状态同刻（记录一致）
 
 
 # ============================================================================
@@ -1381,6 +1441,7 @@ class RigidBacklashPlant(PlanarYawPlant):
         n = max(1, int(round(dt / self.int_step)))
         hh = dt / float(n)
         self.beta = self._beta(self.t)          # β 在一个控制周期内视为常数（漂移很慢）
+        self.sync_exo()                         # ★ 倾斜时 A 系重力随平台角旋转
         for _ in range(n):
             remaining = hh
             guard = 0
@@ -1393,6 +1454,7 @@ class RigidBacklashPlant(PlanarYawPlant):
                 else:
                     remaining = self._free_advance(remaining, u)
             self.t += hh
+        self.sync_exo()                          # 同上: 步末再同步一次
 
 
 class SimRobotLink:
@@ -1903,7 +1965,8 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
         axis=np.int32(axis),
         dt=np.float64(DT),
         held_target=np.float64(plan.held_target),
-        kp=np.float64(PID_KP), ki=np.float64(PID_KI), kd=np.float64(PID_KD),
+        kp=np.float64(plan.kp), ki=np.float64(plan.ki), kd=np.float64(plan.kd),
+        pid_deadband=np.float64(plan.pid_deadband),
         # ── 附加元数据（便于溯源；不影响拟合）──
         n_points=np.int32(len(rec)),
         rate=np.float64(RATE),
@@ -1920,6 +1983,9 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
         tilt_slot=np.int32(plan.tilt_slot),
         # ── ★ 无背隙仿真标记（--sim-no-backlash；诊断用，实机恒 0）──
         no_backlash=np.int32(plan.no_backlash),
+        # ── ★ 被控对象重心真值（kg·m；实机恒 0 = 未知，只给诊断/报告用）──
+        px_true=np.float64(plan.px_true), py_true=np.float64(plan.py_true),
+        pbx_true=np.float64(plan.pbx_true), pby_true=np.float64(plan.pby_true),
         # ── held 大 yaw 方位角分层（--held-big-stratified）──
         held_big_stratified=np.int32(1 if plan.held_strat_count else 0),
         held_strat_index=np.int32(plan.held_strat_index),
@@ -2018,8 +2084,15 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
 
     plan = build_segment_plan(rng, targets, axis, st, planners, samples,
                               held_big_override=held_override)
-    plan.tilted = 1 if args.tilted else 0
+    plan.tilted = 1 if (args.tilted or abs(getattr(args, "sim_tilt_deg", 0.0)) > 1e-12) else 0
     plan.no_backlash = 1 if getattr(args, "sim_no_backlash", False) else 0
+    plan.kp, plan.ki, plan.kd = float(args.kp), float(args.ki), float(args.kd)
+    plan.pid_deadband = math.radians(max(0.0, float(args.pid_deadband_deg)))
+    # 被控对象的重心真值（实机未知 ⇒ 0；dry-run 从 plant 读）
+    _pl = getattr(link, "plant", None)
+    if _pl is not None:
+        plan.px_true = float(_pl.p["Px"]); plan.py_true = float(_pl.p["Py"])
+        plan.pbx_true = float(_pl.p["Pbx"]); plan.pby_true = float(_pl.p["Pby"])
     plan.tilt_slot = tilt_slot
     plan.held_strat_index = strat_k
     plan.held_strat_count = (max(1, args.segments // 2)
@@ -2202,6 +2275,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ki", type=float, default=PID_KI, help=f"PID 积分增益（默认 {PID_KI}）")
     p.add_argument("--kd", type=float, default=PID_KD,
                    help=f"PID 微分增益（默认 {PID_KD}；注意用的是未滤波差分, 给大会抖）")
+    p.add_argument("--pid-deadband-deg", type=float, default=0.0,
+                   help="★ **PID 误差死区**（度，默认 0 = 关闭）: |e| ≤ 死区时 P/D 按 0 算、"
+                        "**积分冻结** ⇒ 被保持轴不再一直追编码器噪声、也不在背隙里来回蹭"
+                        "（对辨识的好处: 被保持轴的力矩更干净，Δ 的抖动更小）。"
+                        "建议取 0.3~0.5° 且 **≤ --err-tol-deg**，否则可能永远进不了稳定容差；"
+                        "记进 npz 的 `pid_deadband`。")
     p.add_argument("--record-hold", action=argparse.BooleanOptionalAction, default=True,
                    help="把每次的静止保持段（到位+稳定等待, 含大角度阶跃）也落盘并参与辨识"
                         "（文件名后缀 %s；**最开始的第一次不记**）。默认开；--no-record-hold 关闭"
@@ -2251,6 +2330,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sg.add_argument("--sim-no-backlash-k", type=float, default=SIM_NO_BACKLASH_K,
                     help=f"无背隙环境里那条同步带的刚度（N·m/rad，默认 {SIM_NO_BACKLASH_K:g}）；"
                          "给大（如 1e4）就等价于'既无空行程、又近似刚性'")
+    sg.add_argument("--sim-com-random", action="store_true",
+                    help="★ dry-run 给**小 yaw 上装 (P) 与大 yaw 转子 (Pb) 各抽一个随机重心偏置**"
+                         "（每次运行抽一次，由 --seed 决定；方向均匀、幅值 "
+                         f"|P|~U{SIM_COM_P_RANGE} / |Pb|~U{SIM_COM_PB_RANGE} kg·m），"
+                         "免得辨识只在某一组恰好方便的偏置上验证；真值写进 npz（*_true 标量）",
+                    )
+    sg.add_argument("--sim-com-seed", type=int, default=None,
+                    help="★ 随机重心偏置用**独立**的种子（默认 None = 用本次运行的 --seed）。"
+                         "train/val、水平/倾斜 几次运行要**共享同一组重心真值**时，"
+                         "都传同一个 --sim-com-seed（否则各自抽各自的，留出集与训练集物理对象不同）")
+    sg.add_argument("--sim-tilt-deg", type=float, default=0.0,
+                    help="★ dry-run 的**底盘静态倾角**（度，绕底盘 y 轴，默认 0 = 水平）。"
+                         "非 0 时被控对象的 A 系重力**随大 yaw 平台角旋转**"
+                         "（g_A = Rz(−θ_p)·g_C，与实机估计器给 gravity_a 的口径一致），"
+                         "并把 gravity_ax/ay 记进数据、元数据 tilted=1 ⇒ 用于验证'倾斜下 P 可辨识'。"
+                         "注意: 实机采倾斜数据用 --tilted（只提示静置姿态），两者互不影响")
     sg.add_argument("--sim-beta-random-frac", type=float, default=SIM_BETA_RANDOM_FRAC,
                     help="每条数据的 β0 随机幅度（占 δ 的比例，默认 0.30）")
     sg.add_argument("--sim-beta-drift-frac", type=float, default=SIM_BETA_DRIFT_FRAC,
@@ -2284,8 +2379,9 @@ def main(argv=None) -> int:
     targets = load_all_targets()
     planners = make_planners()
     rng = np.random.default_rng(args.seed)
-    pids = [PidController(args.kp, args.ki, args.kd, PID_OUT_MIN, PID_OUT_MAX, "big"),
-            PidController(args.kp, args.ki, args.kd, PID_OUT_MIN, PID_OUT_MAX, "small")]
+    _db = math.radians(max(0.0, float(args.pid_deadband_deg)))
+    pids = [PidController(args.kp, args.ki, args.kd, PID_OUT_MIN, PID_OUT_MAX, "big", _db),
+            PidController(args.kp, args.ki, args.kd, PID_OUT_MIN, PID_OUT_MAX, "small", _db)]
     limiters = [TorqueRateLimiter(), TorqueRateLimiter()]
 
     log("=" * 78)
@@ -2309,6 +2405,16 @@ def main(argv=None) -> int:
     if args.tilted:
         log(f"  静态倾斜段: 开（tilted=1{'; 段间轮换倾角' if args.tilt_rolling else ''}）"
             f" —— 只提示静置姿态 + 记录 gravity_ax/ay，不做补偿、不改激励")
+    if args.dry_run and abs(getattr(args, "sim_tilt_deg", 0.0)) > 1e-12:
+        log(f"  [DRY-RUN] ★ 底盘静态倾角 = {args.sim_tilt_deg:+.2f}°（绕 y）"
+            f" ⇒ A 系重力随大 yaw 平台角旋转，|g_A| = "
+            f"{9.81 * abs(math.sin(math.radians(args.sim_tilt_deg))):.2f} m/s²，记 tilted=1")
+    if _db > 0.0:
+        log(f"  ★ PID 误差死区: ±{args.pid_deadband_deg:g}°（{_db:.5f} rad）"
+            f" —— 死区内 P/D 按 0 算、积分冻结")
+        if args.pid_deadband_deg > args.err_tol_deg:
+            log(f"  [WARN] 死区 {args.pid_deadband_deg:g}° > 稳定容差 "
+                f"{args.err_tol_deg:g}° ⇒ 两轴可能永远进不了稳定判据，建议调小")
     log(f"  保存目录: {args.out}")
     log(f"  保存格式: {'npz + csv' if args.save_csv else 'npz（默认，不写 csv）'}"
         + ("  ← 也记静止保持段" if args.record_hold else "  ← 不记静止保持段"))
@@ -2333,6 +2439,7 @@ def main(argv=None) -> int:
 
     args._held_base = None          # --held-big-stratified 的基准平台方位角（首个小 yaw 段时确定）
     link = (SimRobotLink(rng, rigid=args.sim_rigid,
+                         tilt_deg=getattr(args, "sim_tilt_deg", 0.0),
                          beta_random_frac=args.sim_beta_random_frac,
                          beta_drift_frac=args.sim_beta_drift_frac,
                          beta_drift_period=args.sim_beta_drift_period,
@@ -2340,6 +2447,25 @@ def main(argv=None) -> int:
                          no_backlash_k=getattr(args, "sim_no_backlash_k",
                                                SIM_NO_BACKLASH_K))
             if args.dry_run else HwRobotLink())
+    # ── ★ 随机重心偏置（--sim-com-random）: **每次运行抽一次**（由 --seed 决定）──
+    #   小 yaw 上装 P 与大 yaw 转子 Pb 各抽一个（方向均匀、幅值在 SIM_COM_*_RANGE）——
+    #   免得"辨识成功"只发生在某一组恰好方便的偏置上。真值由 plan.*_true 落进 npz。
+    if args.dry_run and getattr(args, "sim_com_random", False):
+        _com_seed = getattr(args, "sim_com_seed", None)
+        com_rng = np.random.default_rng(_com_seed) if _com_seed is not None else rng
+        if _com_seed is not None:
+            log(f"  [DRY-RUN] 随机重心偏置用独立种子 --sim-com-seed={_com_seed}"
+                f"（train/val、水平/倾斜 共享同一组真值）")
+        for key, mag_range, tag in (("P", SIM_COM_P_RANGE, "P  (小 yaw 上装一阶矩)"),
+                                    ("Pb", SIM_COM_PB_RANGE, "Pb (大 yaw 转子一阶矩)")):
+            mag = float(com_rng.uniform(*mag_range))
+            ang = float(com_rng.uniform(0.0, TWO_PI))
+            link.plant.p[key + "x"] = mag * math.cos(ang)
+            link.plant.p[key + "y"] = mag * math.sin(ang)
+            log(f"  [DRY-RUN] ★ 随机重心偏置 {tag}: |{key}| = {mag:.5f} kg·m, "
+                f"方向 {math.degrees(ang):+7.1f}° ⇒ ({key}x, {key}y) = "
+                f"({link.plant.p[key + 'x']:+.5f}, {link.plant.p[key + 'y']:+.5f})")
+
     saved, attempts = 0, 0
     exit_code = 0
     interrupted = False

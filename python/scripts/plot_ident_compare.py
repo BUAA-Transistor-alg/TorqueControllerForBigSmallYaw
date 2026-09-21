@@ -32,7 +32,7 @@ _EPOCH_RE = re.compile(r"epoch\s+(\d+)/(\d+)\s+loss=([-\d.eE+]+)\s+\[([^\]]*)\]"
 
 
 def parse_log(path):
-    """→ (epochs [n], losses [n], params [n,16])"""
+    """→ (epochs [n], losses [n], params [n,NPARAM])"""
     ep, ls, ps = [], [], []
     with open(path, "r", errors="replace") as fh:
         for ln in fh:

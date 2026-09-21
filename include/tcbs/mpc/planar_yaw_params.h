@@ -60,6 +60,11 @@ inline ModelParams defaultModelParams() {
     p.Py       = -0.007430; //                    ★ 不可信（见上）
     p.fcBig    = 0.096245;  p.fvBig   = 0.237374;
     p.fcSmall  = 0.033434;  p.fvSmall = 0.048466;
+    // ── ★ 大 yaw 侧一阶矩 Pb（kg·m）: "只随大 yaw 转、不随小 yaw 转"的质量偏心 ──
+    //   重力矩 Gb = (Pbx + m_u_known·dx)·gy − (Pby + m_u_known·dy)·gx + Gs；只进大 yaw 行。
+    //   ⚠ **只在倾斜数据里可辨识**（水平时 g_⊥≡0 ⇒ 梯度恒 0）；0 = "未知/未标定"，
+    //     要标定它必须采固定倾角（`--tilted`/`--tilt-rolling`，或 dry-run 的 `--sim-tilt-deg`）数据。
+    p.Pbx = 0.0;  p.Pby = 0.0;
 
     // ── 固定/可选 ──
     // ★ λ = 100（用户确认）: 软符号在 |ω| ≳ 1°/s ≈ 0.0175 rad/s 即饱和，足以逼近真实库仑摩擦。
@@ -101,8 +106,10 @@ inline ModelParams defaultModelParams() {
     p.fcMotor          = 0.004139; // 电机侧库仑摩擦（★ 与 fvMotor 严重互换，只有和值可信）
     p.fvMotor          = 0.030332; // 电机侧粘滞摩擦（★ 同上）
     p.tau_offset_motor = 0.0;
-    // 稳定性自检: 接触刚度引入的快模态上限（k=158 在子步 2.5 ms 下余量 ≈390×）
-    //   上限 = recommendedBacklashStiffness(p, dt/substeps) ≈ 6.1e4；
+    // 稳定性自检: 接触刚度引入的快模态上限（k=158 在子步 2.5 ms 下余量 ≈39×；
+    //   折合惯量 μ_red = J_motor·(J_big+J_s)/(J_motor+J_big+J_s) ≈ 0.00495 kg·m²
+    //   ⇒ 接触模态 ω=√(k/μ_red) ≈ 178 rad/s ≈ 28 Hz）
+    //   上限 = recommendedBacklashStiffness(p, dt/substeps) ≈ 6.1e3；
     //   实际瓶颈仍是摩擦 λ（见上面的注释），背隙刚度不是限制项。
     return p;
 }

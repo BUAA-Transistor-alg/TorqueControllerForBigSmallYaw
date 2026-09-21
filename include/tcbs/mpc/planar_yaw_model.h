@@ -46,7 +46,8 @@
 // ── 摩擦 ───────────────────────────────────────────────────────────────────
 //   fric_k = fc_k·tanh(λ·θ̇_k) + fv_k·θ̇_k ，λ 固定 10（受数值可积性上限约束）
 //
-// ── 8 个待辨识参数（顺序与 paramsToVector / regressor 列一致）────────────────
+// ── 待辨识参数（顺序与 paramsToVector / regressor 列一致）: 前 8 个平面 2-DOF 参数
+//    + 2 个大 yaw 侧一阶矩 Pbx/Pby（缺省 0；只有**倾斜**数据才可辨识）──────────────
 //   0 Jbig_eff   1 J_s   2 Px   3 Py   4 fc_big   5 fv_big   6 fc_small   7 fv_small
 //   实测几何 d（2 个分量）与重力不属于辨识参数；可选 τ_offset（默认 0 = 关闭）
 // ============================================================================
@@ -61,7 +62,7 @@ namespace tcbs {
 namespace dual_yaw {
 
 // 参数向量长度（可辨识参数个数）
-constexpr int kNumParams = 8;
+constexpr int kNumParams = 10;
 
 struct ModelParams {
     // ── 实测几何（★ 必须与 dual_yaw::defaultModelParams() 保持一致，实际使用请改那里）──
@@ -79,6 +80,14 @@ struct ModelParams {
     double Py       = -0.007430;     // 上装一阶矩 m_u·ρ_y               kg·m（★ 同上）
     double fcBig    = 0.096245, fvBig   = 0.237374;   // 大 yaw 库仑/粘滞摩擦（fv 可疑）
     double fcSmall  = 0.033434, fvSmall = 0.048466;   // 小 yaw 库仑/粘滞摩擦（fv 可疑）
+    // ── ★ 大 yaw 侧一阶矩 Pb = (Pbx, Pby)（kg·m）: "只随大 yaw 转、不随小 yaw 转"的
+    //    那部分质量偏心（上装被偏移 d 带着走的那份 + 转子/支架自身偏心）──
+    //    重力矩: Gb = (Pbx + m_u_known·dx)·gy − (Pby + m_u_known·dy)·gx + Gs
+    //    · 与 Gs（上装相对**小 yaw 轴**的一阶矩，随 θs 转）区分: Pb 在 A 系里是**常矢量**；
+    //    · 它**只进大 yaw（云台）行**，小 yaw 行只有 Gs ⇒ 两行联立时 Pb 与 P 可分
+    //      （小 yaw 行是 Pb 的参照；只拟合大 yaw 通道时才需要小 yaw 摆开来分）；
+    //    · ⚠ **水平底盘（g_⊥=0）时这一项恒为 0、梯度恒为 0** ⇒ 只采水平数据时它一定是初值。
+    double Pbx = 0.0, Pby = 0.0;
     // ── ★ 大 yaw 传动背隙（3-DOF 模型用；2-DOF 的 eom() 不受影响）──
     //   物理（用户实测）: 传动里一部分是**同步带**（两侧接触有弹性、范围很小），
     //   大部分是**齿轮背隙**（中间几乎完全自由）。因此:
@@ -158,7 +167,9 @@ inline void eom(const T q[2], const T qd[2], const ModelParams& p, const ModelEx
     // 重力项（底盘水平时为 0）
     const T gx = T(e.gravity_a[0]), gy = T(e.gravity_a[1]);
     const T Gs = Qx * gy - Qy * gx;
-    const T Gb = T(p.m_u_known) * (T(p.dx) * gy - T(p.dy) * gx) + Gs;
+    // ★ 大 yaw 侧一阶矩: 已知上装质量那份（m_u_known·d）+ 待辨识偏心 Pb（相加不重复计数）
+    const T Gb = (T(p.Pbx) + T(p.m_u_known) * T(p.dx)) * gy
+               - (T(p.Pby) + T(p.m_u_known) * T(p.dy)) * gx + Gs;
 
     // 科氏/离心 + 重力 + 底盘耦合 + 摩擦 + 可选常数负载
     const T wc = T(e.base_omega), ac = T(e.base_alpha);
@@ -288,16 +299,19 @@ inline void inverseDynamics(const double q[2], const double qd[2], const double 
 inline void paramsToVector(const ModelParams& p, double out[kNumParams]) {
     out[0] = p.Jbig_eff; out[1] = p.Js; out[2] = p.Px; out[3] = p.Py;
     out[4] = p.fcBig; out[5] = p.fvBig; out[6] = p.fcSmall; out[7] = p.fvSmall;
+    out[8] = p.Pbx; out[9] = p.Pby;          // ★ 大 yaw 侧一阶矩（前 8 个之外的扩展）
 }
 
 inline void vectorToParams(const double in[kNumParams], ModelParams& p) {
     p.Jbig_eff = in[0]; p.Js = in[1]; p.Px = in[2]; p.Py = in[3];
     p.fcBig = in[4]; p.fvBig = in[5]; p.fcSmall = in[6]; p.fvSmall = in[7];
+    p.Pbx = in[8]; p.Pby = in[9];
 }
 
 inline const char* const* paramNames() {
     static const char* names[kNumParams] = {
-        "Jbig_eff", "Js", "Px", "Py", "fc_big", "fv_big", "fc_small", "fv_small"};
+        "Jbig_eff", "Js", "Px", "Py", "fc_big", "fv_big", "fc_small", "fv_small",
+        "Pbx", "Pby"};
     return names;
 }
 
@@ -345,6 +359,11 @@ inline void regressor(const double q[2], const double qd[2], const double qdd[2]
     Y[0][2] = col[0]; Y[1][2] = col[1];
     pTerm(dM11dPy, dM12dPy, mudPy, dGsdPy, col);
     Y[0][3] = col[0]; Y[1][3] = col[1];
+    // ── 8,9: Pbx, Pby —— 只进大 yaw（云台）行的重力项
+    //   Gb = (Pbx+m_u·dx)·gy − (Pby+m_u·dy)·gx + Gs；τ_b = ... − Gb
+    //   ⇒ ∂τ_b/∂Pbx = −gy, ∂τ_b/∂Pby = +gx；小 yaw 行不含 Pb（⇒ 与 P 可分）
+    Y[0][8] = -gy;
+    Y[0][9] = gx;
     // ── 4..7: 摩擦（∂/∂fc = tanh(λθ̇)，∂/∂fv = θ̇）──
     Y[0][4] = std::tanh(p.frictionLambda * tb);
     Y[0][5] = tb;

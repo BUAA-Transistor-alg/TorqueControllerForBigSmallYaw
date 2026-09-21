@@ -60,7 +60,7 @@ identify_params_torch.py — **三维（含大 yaw 背隙）**模型的 **PyTorc
 ★ 默认配方 = **原仓库 TorqueController/python/scripts/param_ident.py 的同款配方**
 ================================================================================
 （原仓库是单 yaw 4 参 `J·dω/dt = τ − τ_c·tanh(λ·ω) − b·ω + τ_d`；本仓库是平面 3 自由度
- 16 参模型，所以"同款配方"指的是**同一套训练/损失/积分/参数化/收敛曲线做法**，而不是同几个
+ 18 参模型（含大 yaw 侧一阶矩 Pbx/Pby），所以"同款配方"指的是**同一套训练/损失/积分/参数化/收敛曲线做法**，而不是同几个
  魔数。逐条对齐如下:)
 
   1. **无任何参数限位**：没有 sigmoid 软边界 / clamp / 投影 / 惩罚项。
@@ -112,7 +112,7 @@ identify_params_torch.py — **三维（含大 yaw 背隙）**模型的 **PyTorc
 
 收敛曲线（默认保存文件，不依赖显示环境）::
 
-    data/sysid/ident_torch_convergence.png   # loss(log 纵轴) + 16 个参数各自的收敛曲线
+    data/sysid/ident_torch_convergence.png   # loss(log 纵轴) + 18 个参数各自的收敛曲线
     data/sysid/ident_torch_traj.png          # 实测 vs 仿真（大 yaw 段 + 小 yaw 段，3 通道 θ 与 θ̇）
     --plot-out=PREFIX|DIR|xxx.png 改路径/前缀；--no-plot 关闭；--show-plot 交互显示。
 
@@ -170,9 +170,18 @@ NCORE = len(CORE_PARAM_NAMES)
 EXTRA_PARAM_NAMES = ("backlash_delta", "backlash_k", "backlash_c", "backlash_through",
                      "Jmotor", "fc_motor", "fv_motor", "backlash_beta")
 EXTRA_PARAM_UNITS = ("rad", "N·m/rad", "N·m·s/rad", "—", "kg·m²", "N·m", "N·m·s/rad", "rad")
-PARAM_NAMES = CORE_PARAM_NAMES + EXTRA_PARAM_NAMES
-PARAM_UNITS = CORE_PARAM_UNITS + EXTRA_PARAM_UNITS
-NPARAM = len(PARAM_NAMES)                 # 16
+# ── ★ 新增（大 yaw 侧一阶矩）: **只随大 yaw 转、不随小 yaw 转**的那部分质量偏心 ──
+#   物理: 上装被小 yaw 轴以偏移 d 带着走 ⇒ 绕大 yaw 轴的重力矩里有一项 **与 θ_s 无关**:
+#         Pb×g_A（Pb = m_u·d + 转子/支架自身偏心）。它只进大 yaw（云台）行，`Gs` 才同时进两行。
+#   为什么能辨识（且比 P 好辨识）: 小 yaw 行**只看见 Gs**（不含 Pb）⇒ 大小两行联立时 Pb 与 P
+#   天然可分（实测条件数 ~2.6）；而 Pb 的签名是 θ_p 的"一周正弦"，与速度相关的摩擦不同源。
+#   ⚠ 水平数据里 g_A ≡ 0 ⇒ **Pb 的梯度恒为 0**，拟合值必然 = 初值（这是判据，不是 bug）。
+PB_PARAM_NAMES = ("Pbx", "Pby")
+PB_PARAM_UNITS = ("kg·m", "kg·m")
+PARAM_NAMES = CORE_PARAM_NAMES + EXTRA_PARAM_NAMES + PB_PARAM_NAMES
+PARAM_UNITS = CORE_PARAM_UNITS + EXTRA_PARAM_UNITS + PB_PARAM_UNITS
+NPARAM = len(PARAM_NAMES)                 # 18
+NPB = len(PB_PARAM_NAMES)
 DT_DEFAULT = 0.01                      # 100 Hz
 FRICTION_LAMBDA = 100.0                # ★ 辨识模型固定 λ = 100（不辨识）
                                        #   λ=100 ⇒ |ω|≳1°/s 即饱和，逼近真库仑; 前向仿真须细子步
@@ -184,11 +193,12 @@ AXIS_CHANNELS = {AXIS_BIG: (0, 1), AXIS_SMALL: (2,)}
 
 # ★ 无参数限位（与原仓库 `param_ident.py` 一致）：不存在任何上下界 / clamp / 投影。
 #   · 天然为正的 12 个参数用 **log 参数化** φ = exp(raw) ⇒ 正性隐式保证；
-#   · Px / Py / backlash_through / backlash_beta 可正可负 ⇒ **直接自由参数** φ = raw。
+#   · Px / Py / Pbx / Pby / backlash_through / backlash_beta 可正可负 ⇒ **直接自由参数** φ = raw。
 POSITIVE_PARAM = np.array(
     [True, True, False, False, True, True, True, True,     # 前 8 个（同旧版）
      True, True, True, False,                             # δ, k, c 正；γ 自由
-     True, True, True, False],                            # J_motor, fc_motor, fv_motor 正；β 自由
+     True, True, True, False,                             # J_motor, fc_motor, fv_motor 正；β 自由
+     False, False],                                       # Pbx / Pby 自由（可正可负）
     dtype=bool)
 POSITIVE_IDX = tuple(int(i) for i in np.nonzero(POSITIVE_PARAM)[0])
 FREE_IDX = tuple(int(i) for i in np.nonzero(~POSITIVE_PARAM)[0])
@@ -219,7 +229,7 @@ def default_param_vector() -> np.ndarray:
 
     前 8 个 = 平面 8 参（本仓库实车辨识值，见 data/cars/Sentry1/ident/params.txt；
     Px/Py 因缺固定倾角而**不可信**，这里照抄头文件里的值，让拟合自己去动）；
-    后 8 个 = 背隙/电机侧（**由同一批数据、同一次 16 参拟合一起给出**，不再是 CAD 占位值；
+    后 8 个 = 背隙/电机侧（**由同一批数据、同一次拟合一起给出**，不再是 CAD 占位值；
     γ 固定 0.002、β 固定 0 —— 运行期 β 由估计器在线给）。
 
     ★ 为什么默认初值用"已在用的那组"而不是 CAD 占位值: 实机辨识的日常用法是
@@ -229,7 +239,8 @@ def default_param_vector() -> np.ndarray:
     """
     return np.array([0.045614, 0.008116, 0.021348, -0.007430, 0.096245, 0.237374,
                      0.033434, 0.048466,          # ← 与 planar_yaw_params.h 一致
-                     0.096463, 157.8279, 2.591145, 0.002, 0.005455, 0.004139, 0.030332, 0.0],
+                     0.096463, 157.8279, 2.591145, 0.002, 0.005455, 0.004139, 0.030332, 0.0,
+                     0.0, 0.0],                   # ← Pbx / Pby（默认 0 = 未知）
                     dtype=np.float64)
 
 
@@ -269,6 +280,11 @@ class PlanarParams:
     fc_motor: float = 0.030             # 电机侧库仑摩擦 (N·m)
     fv_motor: float = 0.010             # 电机侧粘滞摩擦 (N·m·s/rad)
     backlash_beta: float = 0.0          # β: 死区中心偏置（Δ = θ_m − θ_p − β）
+    # ── ★ 2 个新增大 yaw 侧一阶矩（kg·m）: Pbx/Pby ──
+    #   Gb = (Pbx + m_u_known·dx)·gy − (Pby + m_u_known·dy)·gx + Gs
+    #   （m_u_known 是"已称重的上装质量"那份已知贡献；Pb 是其余未知偏心 ⇒ 两者相加不重复计数）
+    Pbx: float = 0.0
+    Pby: float = 0.0
     # ── 固定量（**不**辨识）──
     backlash_smooth_eps: float = 1.0e-4  # 平滑死区 ε（= C++ ModelParams 默认）
     tau_offset_motor: float = 0.0        # 电机侧力矩偏置（默认关）
@@ -279,7 +295,8 @@ class PlanarParams:
             [self.Jbig_eff, self.Js, self.Px, self.Py,
              self.fc_big, self.fv_big, self.fc_small, self.fv_small,
              self.backlash_delta, self.backlash_k, self.backlash_c, self.backlash_through,
-             self.Jmotor, self.fc_motor, self.fv_motor, self.backlash_beta],
+             self.Jmotor, self.fc_motor, self.fv_motor, self.backlash_beta,
+             self.Pbx, self.Pby],
             dtype=np.float64,
         )
 
@@ -295,7 +312,7 @@ class PlanarParams:
             backlash_delta=float(phi[8]), backlash_k=float(phi[9]),
             backlash_c=float(phi[10]), backlash_through=float(phi[11]),
             Jmotor=float(phi[12]), fc_motor=float(phi[13]), fv_motor=float(phi[14]),
-            backlash_beta=float(phi[15]),
+            backlash_beta=float(phi[15]), Pbx=float(phi[16]), Pby=float(phi[17]),
         )
 
     def geometry_copy(self, **kw) -> "PlanarParams":
@@ -398,7 +415,9 @@ def eom_np(q, qd, p: PlanarParams, exo: Exo = EXO_ZERO):
     if exo.gravity_on:
         gx, gy = exo.gravity_a
         Gs = Qx * gy - Qy * gx
-        Gb = p.m_u_known * (p.dx * gy - p.dy * gx) + Gs
+        # ★ 大 yaw 侧: 已知上装质量那份 (m_u_known·d) + 待辨识的偏心 Pb，两者相加不重复计数
+        Gb = ((p.Pbx + p.m_u_known * p.dx) * gy
+              - (p.Pby + p.m_u_known * p.dy) * gx) + Gs
         h0 = h0 - Gb
         h1 = h1 - Gs
     h = np.stack([h0, h1], axis=-1)
@@ -475,9 +494,11 @@ def integrate_step_np(q, qd, tau, p: PlanarParams, exo: Exo, dt, substeps: int =
 
 
 def regressor_np(q, qd, qdd, p: PlanarParams, exo: Exo = EXO_ZERO):
-    """解析回归矩阵 Y（形状 [...,2,8]），满足 τ = Y·φ。
+    """解析回归矩阵 Y（形状 [...,2,NPARAM=18]），满足 τ = Y·φ。
 
-    列顺序: 0 Jbig_eff, 1 Js, 2 Px, 3 Py, 4 fc_big, 5 fv_big, 6 fc_small, 7 fv_small
+    列顺序: 0 Jbig_eff, 1 Js, 2 Px, 3 Py, 4 fc_big, 5 fv_big, 6 fc_small, 7 fv_small,
+             8..15 = 背隙/电机侧（在 3-DOF 的 `eomBacklash` 里，不属于本 2-DOF 子块 ⇒ 恒 0），
+             16 Pbx, 17 Pby（只出现在大 yaw 行）。
     （与 include/tcbs/mpc/planar_yaw_model.h::regressor() 完全一致；重力/底盘项为通用写法）
     """
     q = np.asarray(q, dtype=np.float64)
@@ -521,6 +542,11 @@ def regressor_np(q, qd, qdd, p: PlanarParams, exo: Exo = EXO_ZERO):
 
     _p_term(2, dQdPx, mudPx, dGsdPx)
     _p_term(3, dQdPy, mudPy, dGsdPy)
+    # 16,17: Pbx, Pby（**列号 = PARAM_NAMES 的下标**，Pb 排在背隙/电机侧 8 参之后）——
+    #   只进大 yaw（云台）行的重力项: Gb = (Pbx+m_u·dx)·gy − (Pby+m_u·dy)·gx + Gs
+    #   ⇒ ∂τ_b/∂Pbx = −gy, ∂τ_b/∂Pby = +gx；小 yaw 行不含 Pb
+    Y[..., 0, 16] = -gy
+    Y[..., 0, 17] = gx
     # 4..7: 摩擦（只作用于本轴）
     Y[..., 0, 4] = np.tanh(lam * tb)
     Y[..., 0, 5] = tb
@@ -719,7 +745,9 @@ def torch_eom(q, qd, p: PlanarParams, exo: Exo = EXO_ZERO):
     if exo.gravity_on:
         gx, gy = exo.gravity_a
         Gs = Qx * gy - Qy * gx
-        Gb = p.m_u_known * (p.dx * gy - p.dy * gx) + Gs
+        # ★ 大 yaw 侧: 已知上装质量那份 (m_u_known·d) + 待辨识的偏心 Pb，两者相加不重复计数
+        Gb = ((p.Pbx + p.m_u_known * p.dx) * gy
+              - (p.Pby + p.m_u_known * p.dy) * gx) + Gs
         h0 = h0 - Gb
         h1 = h1 - Gs
     wc = exo.base_omega
@@ -1426,9 +1454,11 @@ class ParamSpace:
 
 
 def params_from_torch(phi_vec, base: PlanarParams) -> PlanarParams:
-    """用长度 16 的参数向量构造 PlanarParams。
+    """用长度 18 的参数向量构造 PlanarParams。
 
     参数可以是 numpy 数组**或 torch 张量**（后者保持可导 —— 训练路径就靠它）。
+    ⚠ 这里必须把 **全部 18 个**字段都从 `phi_vec` 取: 漏掉哪个，那个参数在训练里就
+      永远是 `base` 的**常量**、梯度恒 0（Pbx/Pby 曾经就这样被漏掉，靠 --selftest 抓到）。
     """
     return replace(
         base,
@@ -1436,7 +1466,8 @@ def params_from_torch(phi_vec, base: PlanarParams) -> PlanarParams:
         fc_big=phi_vec[4], fv_big=phi_vec[5], fc_small=phi_vec[6], fv_small=phi_vec[7],
         backlash_delta=phi_vec[8], backlash_k=phi_vec[9], backlash_c=phi_vec[10],
         backlash_through=phi_vec[11], Jmotor=phi_vec[12], fc_motor=phi_vec[13],
-        fv_motor=phi_vec[14], backlash_beta=phi_vec[15])
+        fv_motor=phi_vec[14], backlash_beta=phi_vec[15],
+        Pbx=phi_vec[16], Pby=phi_vec[17])
 
 
 # ============================================================================
@@ -2145,13 +2176,14 @@ def loss_trend(loss_history) -> dict:
 def model_self_test(verbose: bool = True) -> bool:
     """检查: (1) Y·φ == ID(φ)；(2) Y == ∂ID/∂φ（数值偏导）；(3) torch 与 numpy 一致；
     (13) 3-DOF 装配与 2-DOF 子块严格一致；(14) 正/逆动力学往返；(15) 3-DOF torch vs numpy；
-    (16) 全部 16 个参数（含背隙那 8 个）的梯度有限且非零；(17) β 确实影响轨迹。"""
+    (16) 全部 18 个参数（含背隙 8 个 + Pb 2 个）的梯度有限且非零；(17) β 确实影响轨迹。"""
     rng = np.random.default_rng(0)
     ok = True
     p = PlanarParams(dx=0.037, dy=-0.011, gravity=9.81, m_u_known=0.25,
                      friction_lambda=10.0).with_vector(
         np.array([0.0243, 0.0132, 0.0042, -0.0018, 0.092, 0.031, 0.028, 0.0085,
-                  0.0701, 320.0, 1.7, 0.0031, 0.0075, 0.041, 0.012, 0.0042]))
+                  0.0701, 320.0, 1.7, 0.0031, 0.0075, 0.041, 0.012, 0.0042,
+                  0.0061, -0.0034]))      # ← 18 参（末两个 = Pbx/Pby）
     exo = Exo(gravity_a=(0.31, -0.17), base_omega=0.42, base_alpha=-0.9)
     q = rng.normal(size=(5, 2)) * 0.6
     qd = rng.normal(size=(5, 2)) * 2.0
@@ -2305,12 +2337,16 @@ def model_self_test(verbose: bool = True) -> bool:
             e15b = max(e15b if np.isfinite(e15b) else 0.0,
                        float(np.max(np.abs(th_tt[:, 0, :].numpy() - th_n))),
                        float(np.max(np.abs(dth_tt[:, 0, :].numpy() - dth_n))))
-    # (16) ★ 梯度: 3-DOF rollout 损失对**全部 16 个参数**都必须有有限且非零的梯度
+    # (16) ★ 梯度: 3-DOF rollout 损失对**全部 18 个参数**都必须有有限且非零的梯度
     #      （背隙死区里 dz 的梯度≈0，靠 γ·Δ 那条直通项引导 ⇒ 这里正是它的验收条件）
     e16 = float("nan")
     grad_min = float("nan")
     grad_max = float("nan")
     if torch is not None:
+        # ★ 显式开重力再查梯度: Pbx/Pby **只**通过重力项进入模型，重力关掉时它们恒为 0 梯度
+        #   （`Exo.__post_init__` 会按 gravity_a 是否非零自动判定，这里显式写出以表明意图）
+        exo_g = Exo(gravity_a=exo.gravity_a, base_omega=exo.base_omega,
+                    base_alpha=exo.base_alpha, gravity_on=True)
         raw_t = torch.tensor(ParamSpace().to_raw_init(p.vector()), dtype=torch.float64,
                              requires_grad=True)
         sp_ = ParamSpace()
@@ -2319,7 +2355,7 @@ def model_self_test(verbose: bool = True) -> bool:
             p_t, torch.tensor(q3[0:1], dtype=torch.float64),
             torch.tensor(qd3[0:1], dtype=torch.float64),
             torch.tensor(tau3_in[:, None, :], dtype=torch.float64),
-            0.01, exo, 4, integrator="euler")
+            0.01, exo_g, 4, integrator="euler")
         loss = (th_rt ** 2).mean() + (dth_rt ** 2).mean()
         g = torch.autograd.grad(loss, raw_t)[0]
         gv = np.abs(g.detach().numpy())
@@ -2347,7 +2383,7 @@ def model_self_test(verbose: bool = True) -> bool:
         print("[selftest] 3-DOF 正/逆动力学往返 max err =", f"{e14:.3e}")
         print("[selftest] 3-DOF 加速度 torch vs numpy =", f"{e15:.3e}")
         print("[selftest] 3-DOF rollout(rk4/euler) torch vs numpy =", f"{e15b:.3e}")
-        print("[selftest] 16 参梯度 |∂loss/∂raw| ∈ [%.3e, %.3e] :" % (grad_min, grad_max),
+        print("[selftest] 18 参梯度 |∂loss/∂raw| ∈ [%.3e, %.3e] :" % (grad_min, grad_max),
               "OK" if e16 == 0.0 else "FAIL")
         print("[selftest] β 影响轨迹 max|Δθ| =", f"{e17:.3e}", "(应 > 0)")
     ok = (e1 < 1e-9 and e2 < 1e-5 and e5 > 1e-4 and e6 < 1e-12 and e8 < 1e-12
@@ -2429,7 +2465,7 @@ def plot_convergence(res: FitResult, out_path: str, show_plot: bool = False,
     steps = np.arange(hist.shape[0])
     xlabel = "epoch" if not str(res.recipe).startswith("旧") else "Adam/LBFGS 步"
 
-    n_panel = 1 + NPARAM                     # loss + 16 个参数
+    n_panel = 1 + NPARAM                     # loss + 18 个参数
     ncol = 4
     nrow = int(math.ceil(n_panel / ncol))
     fig, axes = plt.subplots(nrow, ncol, figsize=(4.4 * ncol, 2.6 * nrow), squeeze=False)
@@ -2671,7 +2707,7 @@ def _fmt_rmse_full(rm: dict) -> str:
 
 def _build_argparser():
     ap = argparse.ArgumentParser(
-        description="平面 3-DOF（含大 yaw 背隙）16 参模型 —— PyTorch 可导前向仿真参数辨识（输出误差法）",
+        description="平面 3-DOF（含大 yaw 背隙）18 参模型 —— PyTorch 可导前向仿真参数辨识（输出误差法）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--data", action="append", default=None,
                     help="数据 glob（可重复/逗号分隔）；默认 data/sysid/*.npz"
@@ -2983,12 +3019,17 @@ def main(argv=None) -> int:
         print(f"{j:>2} {PARAM_NAMES[j]:<16} {res.phi0[j]:>12.6f} {res.phi[j]:>12.6f} "
               f"{res.phi[j] - res.phi0[j]:>+12.6f}  {PARAM_UNITS[j]}")
     print(f"{'':>2} ---- ★ 新增: 大 yaw 背隙 / 电机侧 ----")
-    for j in range(NCORE, NPARAM):
+    for j in range(NCORE, NCORE + len(EXTRA_PARAM_NAMES)):
         extra = ""
         if j == 8:
             extra = f"   (= {math.degrees(res.phi[j]):.3f}°)"
         print(f"{j:>2} {PARAM_NAMES[j]:<16} {res.phi0[j]:>12.6f} {res.phi[j]:>12.6f} "
               f"{res.phi[j] - res.phi0[j]:>+12.6f}  {PARAM_UNITS[j]}{extra}")
+    print(f"{'':>2} ---- ★ 新增: 大 yaw 侧一阶矩 Pb（只在倾斜 + 大 yaw 转动时可辨识）----")
+    for j in range(NCORE + len(EXTRA_PARAM_NAMES), NPARAM):
+        note = ""
+        print(f"{j:>2} {PARAM_NAMES[j]:<16} {res.phi0[j]:>12.6f} {res.phi[j]:>12.6f} "
+              f"{res.phi[j] - res.phi0[j]:>+12.6f}  {PARAM_UNITS[j]}{note}")
     print("=" * 78)
     # ── ★ 全批开环前向仿真误差（比 loss 好读；口径 = 整段、同一起点、同一积分器）──
     use_beta_eval = bool(res.config.get("use_beta_column"))
@@ -3025,6 +3066,8 @@ def main(argv=None) -> int:
     print(f"  p.Jmotor = {res.phi[12]:.6f};  p.fcMotor = {res.phi[13]:.6f};")
     print(f"  p.fvMotor = {res.phi[14]:.6f};  // β 由估计器在线给（离线拟合值 "
           f"{res.phi[15]:+.6f} 仅供参考）")
+    print(f"  p.Pbx = {res.phi[16]:.6f};  p.Pby = {res.phi[17]:.6f};"
+          f"  // 大 yaw 侧一阶矩（只有倾斜数据才可辨识）")
 
     # ── 留出集学习曲线（--eval-every）──
     if res.eval_hist:

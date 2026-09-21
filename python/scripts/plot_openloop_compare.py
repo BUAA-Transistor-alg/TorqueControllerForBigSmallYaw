@@ -17,7 +17,7 @@
         --params=data/archive/.../fit4x/params_A400.txt \
         --n=6 --out=data/archive/.../fit4x/openloop_vs_measured.png
 
-    # 也可以用 --init-vector 直接给 16 个数（逗号分隔）
+    # 也可以用 --init-vector 直接给 18 个数（逗号分隔）
 """
 from __future__ import annotations
 
@@ -37,16 +37,17 @@ from identify_params_torch import (AXIS_BIG, AXIS_SMALL, EXO_ZERO, PARAM_NAMES, 
 CORE = ("Jbig_eff", "Js", "Px", "Py", "fc_big", "fv_big", "fc_small", "fv_small")
 EXTRA = ("backlash_delta", "backlash_k", "backlash_c", "backlash_through",
          "Jmotor", "fc_motor", "fv_motor", "backlash_beta")
+PB = ("Pbx", "Pby")          # ★ 大 yaw 侧一阶矩（追加在末尾；只随大 yaw 转）
 
 
 def parse_params(path):
-    """从 `--out` 写的参数文件里取 16 个数（按 PARAM_NAMES 顺序）。"""
+    """从 `--out` 写的参数文件里取 18 个数（按 PARAM_NAMES 顺序）。"""
     vals = {}
     for ln in open(path, errors="replace"):
         m = re.match(r"\s*([A-Za-z_]+)\s*=\s*([-+0-9.eE]+)", ln)
         if m:
             vals[m.group(1)] = float(m.group(2))
-    order = CORE + EXTRA
+    order = CORE + EXTRA + PB
     missing = [k for k in order if k not in vals]
     if missing:
         raise SystemExit(f"[error] {path} 里缺少这些参数: {missing}")
@@ -73,7 +74,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="开环仿真 vs 实际采集 曲线对比")
     ap.add_argument("--data", required=True, help="数据 glob（逗号分隔）")
     ap.add_argument("--params", default=None, help="辨识输出参数文件（--out 写的那个）")
-    ap.add_argument("--init-vector", default=None, help="或直接给 16 个数（逗号分隔）")
+    ap.add_argument("--init-vector", default=None, help="或直接给 18 个数（逗号分隔）")
     ap.add_argument("--n", type=int, default=6, help="画几段（默认 6，大小 yaw 各一半）")
     ap.add_argument("--substeps", type=int, default=2, help="开环仿真每控制步的子步（与训练一致）")
     ap.add_argument("--integrator", choices=["rk4", "euler"], default="rk4")
