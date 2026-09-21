@@ -131,7 +131,9 @@ inline DualYawMpcConfig defaultMpcConfig() {
     c.w_small_azimuth = 1.0;
     c.w_small_center = 0.0;
     c.w_small_limit = 1e4;
-    c.small_limit_soft_ratio = 0.9;
+    // ★ 软限位从 ±30° 开始（硬限位 ±35°，见下面的 min/max_angle）:
+    //   soft = max − (1−ratio)·(max−min) = 35° − 0.0714·70° = 30°
+    c.small_limit_soft_ratio = 0.9285714285714286;
     c.r_big_torque = 1.0;
     c.r_small_torque = 0.01;
     c.rd_big_rate = 100.0;
@@ -146,14 +148,16 @@ inline DualYawMpcConfig defaultMpcConfig() {
 
     c.small.max_torque = 1.0;        // N·m（★ 占位：小 yaw 电机力矩能力）
     c.small.max_torque_rate = 40.0;  // N·m/s
-    // ── 小 yaw 机械行程（**对称** ±30°）──
+    // ── 小 yaw 机械行程（**对称 ±35°**，软限位 ±30°）──
     // 大 yaw 可多圈自由转（min/max = ∓1e9 = 不限位）; 小 yaw 只能在这个区间内转动。
     //   ★ 该值必须与电控侧硬限位宏（mcu_code_demo 的 YAW_SMALL_MIN_RAD/MAX_RAD）
     //     以及采集脚本的 SMALL_TRAVEL_MIN/MAX 保持一致；改行程要三处一起改。
+    //   ★ 2026-09-21（用户要求）: 硬限位 ±40° → **±35°**，且软限位从 **±30°** 开始
+    //     （采集侧同步: 硬限位/中止 ±35°、软限位/参考包络 ±30°）。
     //   ★ 软限位区: 两侧各自从硬限位向行程内缩 (1−small_limit_soft_ratio)·总行程
-    //     = 0.25·60° = 15° ⇒ 软限位区 [−15°, +15°]（见 dual_yaw_mpc.cpp 的 smallSoftLimits）。
-    c.small.min_angle = -40.0 * M_PI / 180.0;  // −30°
-    c.small.max_angle =  40.0 * M_PI / 180.0;  // +30°
+    //     = 0.0714·70° = 5° ⇒ 软限位区 [−30°, +30°]（见 dual_yaw_mpc.cpp 的 smallSoftLimits）。
+    c.small.min_angle = -35.0 * M_PI / 180.0;  // −35°（机械行程下界）
+    c.small.max_angle =  35.0 * M_PI / 180.0;  // +35°（机械行程上界）
     // 回中（冗余自由度分配）目标角 = 行程中心。**显式给出**, 而不是让 MPC 内部按
     // 0.5·(min+max) 隐式推算 —— 换机械后必须在这里改（0 = 回中到关节零位）。
     // 当前行程对称 ⇒ 中心 = 0。**若哪天行程又变成非对称**（例如 [−25°,+20°] ⇒ −2.5°），

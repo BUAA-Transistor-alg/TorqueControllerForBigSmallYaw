@@ -39,7 +39,7 @@
    函数**。只有让 θ_s 在多个不同值上取数据，才能把它们辨识出来（只在一点标定只能定
    一个切片，Px/Py 与 μ 完全不可辨）。
 
-4) **两个关节在采样前都要像 driven 轴一样先 PID 到位并稳定**。
+4) **两个关节在采样前都要像 driven 轴一样先 PID 到位**（固定保持 --settle-sec，不判稳定判据）。
    原因: 采样段必须是"纯激励响应"。若保持轴在采样开始时还在大幅移动，它的加减速会给
    被激励轴注入额外的、未记录的扰动力矩，把数据污染成"激励 + 未知阶跃"；同理被激励轴
    也要从静止、无积分饱和的状态起步，这样数据段起点的状态是已知的（θ̇≈0）。
@@ -91,7 +91,7 @@
                             [−22°, +22°] 内，中心在可行中心区间内随机，见 §七）
         · held 目标 = 大 yaw: 现有方位角 ±π 随机；小 yaw: 行程中心 ± 0.7×包络半宽
           （当前行程对称 ±30° ⇒ 中心 0°、范围 ±15.4°；式子按区间运算，非对称行程也对）
-    到位: 两个 PID 把 driven 轴拉到 ref[0]、held 轴拉到 held_target，稳定 ~2 s
+    到位: 两个 PID 把 driven 轴拉到 ref[0]、held 轴拉到 held_target，固定保持 --settle-sec（默认 5 s）
           （移动参考同样由轨迹规划器整形 —— 直接给阶跃会饱和过冲，把小 yaw 顶到硬限位；
             未收敛最多再等 2 轮；到位后 PID 状态**不清零**，见"与旧脚本差异"）
     采样: 300 点 @100 Hz（3 s），每点:
@@ -107,7 +107,7 @@
 三、安全策略
 ================================================================================
 
-* **静止保持段也落盘**（`--record-hold`，默认开；文件名后缀 `_hold`）: 到位+稳定等待期间
+* **静止保持段也落盘**（`--record-hold`，默认开；文件名后缀 `_hold`）: 到位等待期间
   两轴都在走大角度阶跃，这段数据同样逐样本记录、同样参与辨识（首段除外）。
 * 小 yaw θ 超出**硬限位 [−30°, +30°]** → 立即中止本段（**不保存**被污染的数据）→ PID 回
   **行程中心**（当前 0°）→ 零力矩；距界限 < 3° 时只打印告警（见 §七）;
@@ -164,9 +164,10 @@
 
 | 档 | 区间 | 用途 |
 |---|---|---|
-| ① 硬限位（机械行程） | **[−30°, +30°]** | 电控侧也按它限位；`SMALL_TRAVEL_MIN/MAX` |
+| ① 硬限位（机械行程） | **[−35°, +35°]** | 电控侧也按它限位；`SMALL_TRAVEL_MIN/MAX`（2026-09-21 由 ±30° 放宽） |
 | ② 中止阈值（上位机） | 同上（触及即中止本段、数据不保存、PID 回中心） | 对应旧版的 ±45° 中止 |
-| ③ 参考包络 | **[−22°, +22°]**（两侧各留 8° 跟踪超调余量） | 激励参考、到位目标、held 保持目标都用它 |
+| ③ **软限位** | **[−30°, +30°]** | **±30° 之外才开始软限位**：越界只**告警**（每秒一句，报出离硬限位还剩多少），不中止 |
+| ④ 参考包络 | **[−22°, +22°]**（软限位两侧各留 8° 跟踪超调余量） | 激励参考、到位目标、held 保持目标都用它 |
 
 **中心 = 0°**（`SMALL_CENTER_RAD = (min+max)/2`，当前行程对称）。回中心/段尾保持/初始条件都用它；
 式子不假设对称 ⇒ 以后改成非对称行程（例如 [−20°,+25°] ⇒ +2.5°）会自动跟着走。
@@ -214,7 +215,7 @@
    ``held_target`` / ``mcu2_seq`` / 底盘数据 / ``big_enc_age`` 以及全部标量元数据
    （dt、PID 增益、参考来源与幅值）。
 8. **两个关节都要到位**: 旧脚本只有"把单轴 PID 到某角度"；新脚本 driven 与 held **两轴
-   都先 PID 到位并稳定**（未收敛最多再等 2 轮），否则段内会混入未记录的扰动力矩。
+   都先 PID 到位并保持 `--settle-sec`**（固定时长、不判稳定判据），否则段内会混入未记录的扰动力矩。
 9. **dry-run 内置仿真**: 旧脚本必须有硬件才能跑；新脚本用 ``planar_yaw_model.h`` 的同一
    组方程在 Python 里积分被控对象（λ=100、0.05 ms 步长），无硬件即可验证全流程与格式。
 """
@@ -268,40 +269,67 @@ PID_OUT_MIN, PID_OUT_MAX = -1.0, 1.0
 MAX_TORQUE_DELTA = 0.5             # 相邻两步力矩变化限幅 N·m（保护减速器）
 MAX_TX_FAIL = 50                   # 连续 50 帧发不出去 ⇒ 判定链路断开，报错退出（0.5 s）
 
-PID_DEADBAND_DEG = 3.0
+PID_DEADBAND_DEG = 3.0            # [CLI] --pid-deadband-deg（见 PidController 的死区说明）
 
-# ── 小 yaw 行程限位（**对称 ±30°**，机械行程）──
-#   三档含义（详见文件头 "七、小 yaw 行程三档" 与 docs/sysid_data.md §5）:
-#     ① 硬限位（机械行程, 电控侧也按它限位）: [SMALL_TRAVEL_MIN, SMALL_TRAVEL_MAX] = [−30°, +30°]
-#     ② 中止阈值（上位机）: 与硬限位同值 —— 一旦触碰立刻中止本段、数据不保存、PID 回中心
-#     ③ 参考包络（激励/到位/保持都用它）: [SMALL_ENV_MIN, SMALL_ENV_MAX] = [−22°, +22°]
-#        = 硬限位两侧各留 SMALL_TRACK_MARGIN(8°) 的跟踪超调余量
+# ============================================================================
+# ★★ 命令行默认值（**统一在这里管理**）
+#    · `build_arg_parser()` 只引用这些名字 ⇒ 改默认值只改这一处，不在 add_argument 里写裸字面量;
+#    · 命名约定: 只有 CLI 用的加 `[CLI]` 注释；别的代码也引用的沿用原名（RATE / DEFAULT_OUT_DIR /
+#      PID_KP… / SETTLE_SEC / SIM_* 等），它们同样是"默认值的唯一来源"。
+# ============================================================================
+SEGMENTS_DEFAULT = 1              # [CLI] --segments（偶数段激励大 yaw，奇数段激励小 yaw）
+DURATION_SEC = 3.0                # [CLI] --duration-sec：每段采样时长 s（3.0 s = 300 点 @100 Hz）
+SEED_DEFAULT = 42                 # [CLI] --seed（★ 确定性: 换 seed 才是另一批激励）
+MAX_TEMP_C = 55.0                 # [CLI] --max-temp：电机过温阈值 ℃
+TAG_DEFAULT = None                # [CLI] --tag（None = 按 axis 自动取 big/small）
+RECORD_HOLD_DEFAULT = True        # [CLI] --record-hold / --no-record-hold
+SAVE_CSV_DEFAULT = False          # [CLI] --save-csv / --no-save-csv
+SIM_TILT_DEG = 0.0                # [CLI] --sim-tilt-deg（dry-run 底盘静态倾角；0 = 水平）
+SIM_COM_SEED = None               # [CLI] --sim-com-seed（None = 用本次 --seed）
+
+# ── 小 yaw 行程限位（**对称: 软限位 ±30° / 硬限位 ±35°**）──
+#   四档含义（详见文件头 "七、小 yaw 行程三档" 与 docs/sysid_data.md §5）:
+#     ① 硬限位（机械行程, 电控侧也按它限位）: [SMALL_TRAVEL_MIN, SMALL_TRAVEL_MAX] = [−35°, +35°]
+#        ★ 用户要求（2026-09-21）: 限幅从 ±30° **放宽到 ±35°**，给超调留 5° 机械余量。
+#     ② 软限位（正常允许范围）: [SMALL_SOFT_MIN, SMALL_SOFT_MAX] = [−30°, +30°]
+#        ★ 用户要求: **±30° 之外才开始软限位** —— 采集时越过软限位只**告警**（每秒一句，
+#          并报出离硬限位还剩多少），**不中止**；只有碰到硬限位（±35°）才中止本段。
+#     ③ 中止阈值（上位机）: 与硬限位同值 —— 一旦触碰立刻中止本段、数据不保存、PID 回中心
+#     ④ 参考包络（激励/到位/保持都用它）: [SMALL_ENV_MIN, SMALL_ENV_MAX] = [−30°, +30°]
+#        ★ 用户要求（2026-09-21）: **包络 = 软限位**（SMALL_TRACK_MARGIN 改成 0°，
+#          不再留跟踪余量）⇒ 参考可以一直摆到 ±30°，超出部分（到 ±35° 硬限位）就是
+#          留给 PID 超调的余量。想再收回来就把 SMALL_TRACK_MARGIN 调大。
 #   ★ 改行程要**三处一起改**: 这里、C++ 的 defaultMpcConfig().small.min/max_angle、
 #     电控侧 mcu_code_demo 的 YAW_SMALL_MIN_RAD/MAX_RAD。
+#     C++ 侧（defaultMpcConfig）已同步: 硬限位 ±35°、small_limit_soft_ratio = 0.9286
+#       ⇒ 软限位 = max − (1−ratio)·(max−min) = 35° − 0.0714·70° = 30° ✓
 #   ★ 下面的取值全部写成基于 [min, max] 的**区间运算**（不假设对称），所以对称/非对称行程
 #     都能直接用；行程若是非对称（例如 [−20°,+25°]，中心 +2.5°），中心/包络会自动跟着走。
-SMALL_TRAVEL_MIN = math.radians(-30.0)   # 硬限位下界（机械行程）
-SMALL_TRAVEL_MAX = math.radians(30.0)    # 硬限位上界
+SMALL_TRAVEL_MIN = math.radians(-35.0)   # 硬限位下界（机械行程；中止阈值同值）
+SMALL_TRAVEL_MAX = math.radians(35.0)    # 硬限位上界
+SMALL_SOFT_MIN = math.radians(-30.0)     # 软限位下界（越界只告警，不中止）
+SMALL_SOFT_MAX = math.radians(30.0)      # 软限位上界
 SMALL_CENTER_RAD = 0.5 * (SMALL_TRAVEL_MIN + SMALL_TRAVEL_MAX)   # 0°（当前行程对称）
 #   ↑ 回中/段尾保持/初始条件都用**行程中心**而不是硬编码 0: 当前行程对称 ⇒ 中心就是 0，
 #     但一旦行程改成非对称（例如 [−20°,+25°] 的中心是 +2.5°），这个式子会自动跟着变，
 #     保证到两端的余量相等。
 SMALL_ABORT_MIN = SMALL_TRAVEL_MIN       # 中止阈值（规格: 触及硬界限即中止本段）
 SMALL_ABORT_MAX = SMALL_TRAVEL_MAX
-SMALL_WARN_MARGIN = math.radians(3.0)    # 距硬限位 < 3° 只**告警**（不中止）
-SMALL_TRACK_MARGIN = math.radians(8.0)   # 参考包络相对硬限位留的跟踪超调余量（原为 8°）
-SMALL_ENV_MIN = SMALL_TRAVEL_MIN + SMALL_TRACK_MARGIN   # −22°
-SMALL_ENV_MAX = SMALL_TRAVEL_MAX - SMALL_TRACK_MARGIN   # +22°
-SMALL_ENV_HALF = 0.5 * (SMALL_ENV_MAX - SMALL_ENV_MIN)  # 包络半宽 = 22°
-SMALL_REF_AMP = SMALL_ENV_HALF           # driven 参考的半幅上限（= 包络半宽）
+SMALL_WARN_MARGIN = math.radians(3.0)    # 距**软限位** < 3° 只**告警**（不中止）
+SMALL_TRACK_MARGIN = math.radians(0.0)   # 参考包络相对**软限位**留的跟踪超调余量（★ 0° = 包络与软限位同值）
+SMALL_ENV_MIN = SMALL_SOFT_MIN + SMALL_TRACK_MARGIN     # −30°（= 软限位，无额外收窄）
+SMALL_ENV_MAX = SMALL_SOFT_MAX - SMALL_TRACK_MARGIN     # +30°
+SMALL_ENV_HALF = 0.5 * (SMALL_ENV_MAX - SMALL_ENV_MIN)  # 包络半宽 = 30°
+SMALL_REF_AMP = SMALL_ENV_HALF           # driven 参考的半幅上限（= 包络半宽 = 30°）
 #   ↑ PID 跟带尖角（换向）的参考时实际角度会超出参考峰值（仿真实测 2°~14°）:
-#     参考只用到 ±(硬限位 − 8°) 的包络内，实际峰值才有余量不触碰中止阈值。
+#     现在余量由**软限位(30°) → 硬限位(35°)** 那 5° 提供（参考到 30°、超调落在 30~35°）。
 HELD_SMALL_MAX = 0.7 * SMALL_ENV_HALF    # held 小 yaw 随机目标半宽（保留 0.7 安全余量）
 #   ↑ driven 轴是**大 yaw** 时，held 小 yaw 的目标在包络内随机抽，但收进 0.7 倍:
 #     大 yaw 摆动会通过 M12 给小 yaw 注入扰动力矩（M12·θ̈_big 可达 ~0.3 N·m），
 #     PID 顶回来需要几度到十几度的瞬时偏差，收窄一点才有余量不触碰中止阈值。
 #     抽取范围 = SMALL_CENTER_RAD ± HELD_SMALL_MAX（⊂ 参考包络），见 docs/sysid_data.md §6.2。
-BIG_REF_AMP = math.radians(60.0)      # driven 大 yaw 参考半幅上限（大 yaw 多圈自由，仅防大摆）
+BIG_REF_AMP = math.radians(120.0)     # driven 大 yaw 参考**半幅**上限（★ 2026-09-21: 60°→120°
+                                      #   ⇒ 参考峰峰可达 240°；大 yaw 多圈自由，仅防大摆）
 BIG_CENTER_JITTER = math.radians(30.0)  # driven 大 yaw 参考中心相对当前方位角的随机抖动
 HELD_BIG_OFFSET = math.pi             # held 大 yaw 目标: 现有角度 ±π 内随机（多圈连续）
 # （到位判据已删: 与原仓库一样"PID 跑固定 2 s 就算到位"，不做收敛判定/多轮重试 ——
@@ -328,14 +356,9 @@ SMALL_PLANNER = dict(max_velocity=3.0, max_acceleration=15.0, max_jerk=400.0)
 
 # ── 时序 ──
 HOLD_SUFFIX = "_hold"                 # 静止保持段落盘文件名的后缀（见 --record-hold）
-SETTLE_SEC = 5.0                      # 采样前先 PID 到位并保持这么久（固定时长，不判据）
-STABLE_SEC = 3.0                      # 之后还需**连续**满足稳定条件这么久才开采
-# 稳定条件（四个量全部满足; 任何一个越界 ⇒ 连续计时**归零重计**）:
-#   ① 大 yaw 方位角误差 ② 小 yaw 关节角误差 都 ≤ STABLE_ERR_TOL
-#   ③ 大 yaw 平台角速度 ④ 小 yaw 关节角速度 都 < STABLE_VEL_TOL
-# ⇒ 两次采样至少间隔 SETTLE_SEC + STABLE_SEC = 8 s（不满足就一直保持稳定控制等下去）。
-STABLE_ERR_TOL_DEG = 6.0              # 误差容差（度；两轴共用）
-STABLE_VEL_TOL_DEG_S = 12.0            # 速度阈值（度/秒；两轴共用）
+# 采样前的**到位等待**（固定时长，**不判稳定性** —— 稳定判据已按用户要求删除，2026-09-20）。
+# 两次采样的间隔 = SETTLE_SEC（原来还要再等一段"连续稳定 STABLE_SEC"）。
+SETTLE_SEC = 5.0                      # 采样前 PID 到位并保持这么久（固定时长，不判据）
 ZERO_FRAMES_AT_EXIT = 20              # 退出前必发的零力矩帧数（规格: 连发几帧）
 MAX_COOL_WAIT_S = 600.0               # 过热等待上限（超过则退出）
 COOL_HYSTERESIS_C = 5.0               # 降温到 max_temp − 5 ℃ 才恢复
@@ -521,14 +544,19 @@ def _gravity_a_plane(est):
 class PidController:
     """位置式 PID: out = kp·e + ki·∫e + kd·ė，输出限幅 ±1.0 N·m，条件积分抗饱和。
 
-    ★ **误差死区**（`deadband` > 0 时启用，用户要求）:
-      · `|e| ≤ deadband` ⇒ P 与 D 项按 **e=0** 算（`kp·0 + kd·0`），**积分冻结**
-        （不清零、不累积）⇒ 输出恒为 `ki·∫e`（≈ 保持所需力矩），**不再追编码器噪声、
-        不再在背隙里来回蹭**；
-      · `|e| > deadband` ⇒ 正常 PID（积分继续累积、D 项用死区外误差）；
-      · 死区内**不清零积分**是有意的: 清零会让被保持轴"撒手"掉下来；
-      · 抗饱和判据仍用**原始误差**的符号（与死区无关）。
-      建议 `deadband` ≤ `--err-tol-deg`（稳定判据容差），否则两轴可能永远进不了稳定容差。
+    ★ **误差死区**（`deadband` = d > 0 时启用，用户要求）—— 用的是**「到死区边界的距离」**，
+      不是「到目标点的距离」::
+
+          e = 目标 − 实际
+          |e| ≤ d  ⇒  e_eff = 0          （死区内: 只保留积分项 ⇒ 不追噪声、不在背隙里蹭）
+          e >  +d  ⇒  e_eff = e − d      （到**正侧死区边界**的距离）
+          e <  −d  ⇒  e_eff = e + d      （到**负侧死区边界**的距离）
+
+      好处: `e_eff` 在 `|e| = d` 处**连续**（从 0 开始长起来）⇒ 输出不会像"死区内直接置 0"
+      那样在边界上跳变 `kp·d`（kp=5、d=3° 时那是 0.26 N·m 的阶跃，会激起背隙撞击/极限环）。
+      等价说法: 死区把**等效目标**从"目标点"变成了"离实际值最近的那个死区边界"。
+      · P / D / 积分**都用 e_eff**；死区内 `e_eff=0` ⇒ 积分自然冻结（不清零，否则会撒手）；
+      · 抗饱和判据用 `e_eff` 的符号（死区内为 0 ⇒ 不积分）。
 
     与旧采集脚本**逐行同构**（`deadband=0` 时逐字同构），便于两批数据合并。
     """
@@ -542,12 +570,20 @@ class PidController:
         self.prev_error = 0.0
 
     def update(self, error: float, dt: float) -> float:
-        # ★ 死区内: P/D 看 "0"，积分冻结（抗饱和判据仍用原始 error 的符号）
-        in_deadband = (self.deadband > 0.0) and (abs(error) <= self.deadband)
-        e_pd = 0.0 if in_deadband else error
-        deriv = (e_pd - self.prev_error) / dt if dt > 1e-6 else 0.0
-        self.prev_error = e_pd
-        out = self.kp * e_pd + self.ki * self.integral + self.kd * deriv
+        # ★ 死区: |e| ≤ d ⇒ e_eff = 0；|e| > d ⇒ e_eff = e ∓ d（**到死区边界**的距离）
+        #   ⇒ e_eff 在边界处连续，输出无跳变（见类 docstring）。
+        d = self.deadband
+        if d <= 0.0:
+            e_eff = error
+        elif error > d:
+            e_eff = error - d
+        elif error < -d:
+            e_eff = error + d
+        else:
+            e_eff = 0.0
+        deriv = (e_eff - self.prev_error) / dt if dt > 1e-6 else 0.0
+        self.prev_error = e_eff
+        out = self.kp * e_eff + self.ki * self.integral + self.kd * deriv
         sat_hi = out > self.out_max
         sat_lo = out < self.out_min
         if sat_hi:
@@ -555,12 +591,12 @@ class PidController:
         if sat_lo:
             out = self.out_min
         do_int = True
-        if sat_hi and error > 0:
+        if sat_hi and e_eff > 0:
             do_int = False
-        if sat_lo and error < 0:
+        if sat_lo and e_eff < 0:
             do_int = False
-        if do_int and not in_deadband:
-            self.integral += error * dt
+        if do_int:
+            self.integral += e_eff * dt        # 死区内 e_eff=0 ⇒ 积分自然冻结
         return out
 
     def reset(self):
@@ -860,7 +896,7 @@ def build_segment_plan(rng, targets, axis: int, st, planners: dict, n: int,
     """构造一段的参考: driven 轴 = 增强后的录制序列；held 轴 = 常量目标。
 
     · driven = 大 yaw: 参考中心取**现有平台方位角附近**（±BIG_CENTER_JITTER），
-      半幅 ≤ BIG_REF_AMP(60°)；held = 小 yaw 目标在**参考包络内**随机
+      半幅 ≤ BIG_REF_AMP(120°)；held = 小 yaw 目标在**参考包络内**随机
       （收进 0.7 倍 ⇒ SMALL_CENTER_RAD ± 10.15°，给大 yaw 摆动经 M12 传来的耦合偏移留余量）。
     · driven = 小 yaw: 参考落在**参考包络 [−22°, +22°]** 内（硬限位 ±30°
       两侧各留 8° 跟踪超调余量），中心在可行中心区间 [env_min+amp, env_max−amp] 内随机；
@@ -1523,7 +1559,7 @@ class SimRobotLink:
         """每段开始时调用: 刚性环境重新抽 β0（"每条数据的背隙中心随机"）。
 
         ★ β 的**在线估计器状态不重置**（只重抽 β0）—— 运行期的估计器是连续跑的，
-        不会每段清零；靠它自己的遗忘（τ=3 s）+ 段前 5 s 到位/稳定过程把新的两侧极值
+        不会每段清零；靠它自己的遗忘（τ=3 s）+ 段前这几秒的到位过程把新的两侧极值
         采到，采样开始时已经收敛。第一段会有一次预热，与实机一致。
         """
         if self.rigid:
@@ -1733,15 +1769,23 @@ def drive_steps(link, ref_big: np.ndarray, ref_small: np.ndarray, pids, limiters
         # ── 安全 1: 小 yaw 硬限位（当前行程对称 ±30°，但判据按 [min,max] 写，非对称也对）──
         if small_guard:
             th_s = float(st.small_joint_angle)
+            # ★ 三档（2026-09-21 放宽）: 软限位 ±30°（越界**只告警**）；硬限位 ±35°（触碰中止）
             if th_s > SMALL_ABORT_MAX or th_s < SMALL_ABORT_MIN:
-                log(f"  [SAFETY] 小 yaw θ={_deg(th_s):+.1f}° 触及行程界限 "
+                log(f"  [SAFETY] 小 yaw θ={_deg(th_s):+.1f}° 触及**硬限位** "
                     f"[{_deg(SMALL_ABORT_MIN):+.0f}°, {_deg(SMALL_ABORT_MAX):+.0f}°] "
                     f"→ 中止本段并回中心")
                 return "small_limit", k
-            if (th_s > SMALL_ABORT_MAX - SMALL_WARN_MARGIN
-                    or th_s < SMALL_ABORT_MIN + SMALL_WARN_MARGIN) and k % 50 == 0:
-                log(f"  [WARN] 小 yaw θ={_deg(th_s):+.1f}° 已接近行程界限"
-                    f"（余量 < {_deg(SMALL_WARN_MARGIN):.0f}°）")
+            if (th_s > SMALL_SOFT_MAX or th_s < SMALL_SOFT_MIN):
+                if k % 50 == 0:
+                    _m = (SMALL_ABORT_MAX - th_s if th_s > 0 else th_s - SMALL_ABORT_MIN)
+                    log(f"  [WARN] 小 yaw θ={_deg(th_s):+.1f}° 已越**软限位** "
+                        f"[{_deg(SMALL_SOFT_MIN):+.0f}°, {_deg(SMALL_SOFT_MAX):+.0f}°]，"
+                        f"距硬限位还有 {_deg(_m):.1f}°（**不中止**，只是超调余量在变小）")
+            elif (th_s > SMALL_SOFT_MAX - SMALL_WARN_MARGIN
+                    or th_s < SMALL_SOFT_MIN + SMALL_WARN_MARGIN) and k % 100 == 0:
+                log(f"  [WARN] 小 yaw θ={_deg(th_s):+.1f}° 接近软限位"
+                    f"（距 {_deg(SMALL_SOFT_MAX if th_s > 0 else SMALL_SOFT_MIN):+.0f}° "
+                    f"余量 < {_deg(SMALL_WARN_MARGIN):.0f}°）")
         # ── 安全 2: 电机温度 ──
         if max(st.mcu_temp_big, st.mcu_temp_small) >= max_temp:
             return "overheat", k
@@ -1763,76 +1807,6 @@ def drive_steps(link, ref_big: np.ndarray, ref_small: np.ndarray, pids, limiters
                                    tau_big, tau_small, axis, held_target,
                                    tgt_big, tgt_small))
     return None, n
-
-
-def hold_until_stable(link, pids, limiters, max_temp, tgt_big: float, tgt_small: float,
-                      err_tol: float, vel_tol: float, stable_sec: float,
-                      record: SegmentRecord | None = None, axis: int = AXIS_BIG,
-                      held_target: float = 0.0, t_offset: float = 0.0):
-    """保持稳定控制（100 Hz 继续跑 PID 指向固定目标），直到**连续 stable_sec** 满足稳定条件。
-
-    稳定条件（四个量同时满足）:
-      ① |大 yaw 方位角误差| ≤ err_tol      ② |小 yaw 关节角误差| ≤ err_tol
-      ③ |大 yaw 平台角速度| < vel_tol      ④ |小 yaw 关节角速度| < vel_tol
-    **任何一个越界 ⇒ 连续计时归零重计**。不满足就一直等（无上限），每秒打一行实时量。
-
-    返回 ``(reason, waited_s)``；reason 为 None 表示已满足（正常进入采样）。
-    期间与 drive_steps 一样做安全检查（小 yaw 硬限位 / 过温）。
-
-    ``record`` 给定时把这一段也逐样本记下来（列与 drive_steps 完全一致），
-    ``t_offset`` 用于把 t 接在**前一段（到位轨迹）之后**，保持整段 t 单调连续。
-    """
-    n_need = max(1, int(round(stable_sec * RATE)))
-    stable_n = 0
-    k = 0
-    t0_ns = time.perf_counter_ns()
-    next_log_ns = t0_ns
-    while True:
-        busy_wait_until(t0_ns + k * DT_NS)
-        k += 1
-        st = link.read()
-
-        # ── 安全检查（与 drive_steps 同判据）──
-        th_s = float(st.small_joint_angle)
-        if th_s > SMALL_ABORT_MAX or th_s < SMALL_ABORT_MIN:
-            log(f"  [SAFETY] 稳定等待期间小 yaw θ={_deg(th_s):+.1f}° 触及行程界限 → 中止本段")
-            return "small_limit", k * DT
-        if max(st.mcu_temp_big, st.mcu_temp_small) >= max_temp:
-            return "overheat", k * DT
-
-        # ── 继续 PID 控制（保持稳定）, 目标固定不动 ──
-        e_big = wrap_pi(tgt_big - st.platform_azimuth)
-        e_small = wrap_pi(tgt_small - st.small_joint_angle)
-        tau_big = limiters[0].limit(pids[0].update(e_big, DT))
-        tau_small = limiters[1].limit(pids[1].update(e_small, DT))
-        link.send(tau_big, tau_small, st.big_joint_angle + e_big, tgt_small)
-
-        if record is not None:
-            record.append(make_row(st, t_offset + (time.perf_counter_ns() - t0_ns) * 1e-9,
-                                   tau_big, tau_small, axis, held_target,
-                                   tgt_big, tgt_small))
-
-        # ── 稳定判据: 四个量全满足才累加, 否则归零 ──
-        v_big = abs(float(st.big_joint_rate))       # ★ RobotSample 没有 platform_rate; 与记录口径一致
-        v_small = abs(float(st.small_joint_rate))
-        ok = (abs(e_big) <= err_tol and abs(e_small) <= err_tol
-              and v_big < vel_tol and v_small < vel_tol)
-        stable_n = stable_n + 1 if ok else 0
-
-        now_ns = time.perf_counter_ns()
-        if now_ns >= next_log_ns:
-            next_log_ns = now_ns + int(1e9)
-            log(f"    [稳定等待] 已等 {(now_ns - t0_ns) * 1e-9:5.1f}s  "
-                f"e_big={_deg(e_big):+.2f}° e_small={_deg(e_small):+.2f}°  "
-                f"|ω_big|={_deg(v_big):.2f}°/s |ω_small|={_deg(v_small):.2f}°/s  "
-                f"连续 {stable_n * DT:.1f}/{stable_sec:g}s"
-                + ("" if ok else f"  ← 未满足"
-                   + ("" if abs(e_big) <= err_tol else " e_big超差")
-                   + ("" if abs(e_small) <= err_tol else " e_small超差")
-                   + ("" if v_big < vel_tol else " ω_big超速")
-                   + ("" if v_small < vel_tol else " ω_small超速")))
-        if stable_n >= n_need:
-            return None, k * DT
 
 
 def run_zero_torque(link, limiters, seconds: float, stop_temp: float | None = None):
@@ -1872,7 +1846,7 @@ def cooldown(link, limiters, max_temp: float, reason: str) -> bool:
 
 
 def recenter(link, pids, limiters, max_temp: float, seconds: float = RECENTER_SEC) -> None:
-    """回中心/守位: 小 yaw 回到**行程中心**（当前行程对称 ±30° ⇒ 0°），大 yaw 保持当前平台方位角。
+    """回中心/守位: 小 yaw 回到**行程中心**（当前行程对称 ⇒ 0°），大 yaw 保持当前平台方位角。
 
     为什么写"行程中心"而不是硬编码 0: 行程由 `SMALL_TRAVEL_MIN/MAX` 决定，式子按
     `(min+max)/2` 算 ⇒ 以后改成非对称行程（例如 [−20°, +25°] ⇒ +2.5°）会自动跟着走；
@@ -1996,6 +1970,8 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
         # ── 小 yaw 行程（**非对称**）: 三档数值都写进去，便于下游核对待遇 ──
         small_travel_min=np.float64(SMALL_TRAVEL_MIN),
         small_travel_max=np.float64(SMALL_TRAVEL_MAX),
+        small_soft_min=np.float64(SMALL_SOFT_MIN),
+        small_soft_max=np.float64(SMALL_SOFT_MAX),
         small_env_min=np.float64(SMALL_ENV_MIN),
         small_env_max=np.float64(SMALL_ENV_MAX),
         small_center=np.float64(SMALL_CENTER_RAD))
@@ -2117,11 +2093,9 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
             f"两侧各留 {_deg(SMALL_TRACK_MARGIN):.0f}° 跟踪余量; 中心 {_deg(SMALL_CENTER_RAD):+.1f}°）")
         log(f"  held   大 yaw: 目标={plan.held_target:+.3f} rad（现有方位角 ±π 内随机）")
 
-    # ── 到位 + 稳定（★ 两段）──
-    #   第一段: PID 把两轴带到目标并保持 `--settle-sec`（默认 5.0 s），固定时长、不判据；
-    #   第二段: 之后开始判稳定 —— 误差与速度四个量**连续** `--stable-sec`（默认 3.0 s）
-    #           全部满足才算稳；任何一个越界就重新计时，不满足就一直保持控制等下去。
-    #   ⇒ 两次采样至少间隔 5 + 3 = 8 s。
+    # ── 到位等待（★ 单段；稳定判据已删除）──
+    #   PID 把两轴带到目标并保持 `--settle-sec`（默认 5.0 s），**固定时长、不判据**，
+    #   走完就直接采样（原来后面还有「第二段: 连续 --stable-sec 达标」，已按用户要求删除）。
     #   参考仍由轨迹规划器整形（不是阶跃），否则 PID 会饱和过冲把小 yaw 顶到限位。
     settle_n = max(1, int(round(args.settle_sec * RATE)))
     pids[0].reset()
@@ -2152,25 +2126,16 @@ def collect_segment(link, rng, targets, planners, pids, limiters, args,
     log(f"  到位(固定 {args.settle_sec:g}s): err_big={_deg(wrap_pi(plan.ref_big[0] - st.platform_azimuth)):+.2f}°"
         f" err_small={_deg(wrap_pi(plan.ref_small[0] - st.small_joint_angle)):+.2f}°")
 
-    # ── 第二段: 连续稳定判据（不满足就一直保持控制等）──
-    err_tol = math.radians(args.err_tol_deg)
-    vel_tol = math.radians(args.vel_tol_deg_s)
-    log(f"  等待连续 {args.stable_sec:g}s 稳定（判据: 两轴误差 ≤ {args.err_tol_deg:g}° 且 "
-        f"两轴速度 < {args.vel_tol_deg_s:g}°/s；任一越界即重新计时）…")
-    reason, waited = hold_until_stable(link, pids, limiters, args.max_temp,
-                                       float(plan.ref_big[0]), float(plan.ref_small[0]),
-                                       err_tol, vel_tol, args.stable_sec,
-                                       record=rec_hold, axis=axis,
-                                       held_target=plan.held_target,
-                                       t_offset=settle_n * DT)
-    if reason == "small_limit":
-        recenter(link, pids, limiters, args.max_temp)
-        return "abort"
-    if reason == "overheat":
-        if not cooldown(link, limiters, args.max_temp, "稳定等待阶段温度过高"):
-            return "abort"
-        return "retry"
-    log(f"  ✓ 已稳定（第二段用时 {waited:.2f}s，两段合计 {args.settle_sec + waited:.2f}s）")
+    # ── ★ 稳定性判据已删除（用户要求，2026-09-20）──
+    #   原来这里是"第二段: 误差/速度连续 `--stable-sec` 全部达标才开采，不满足就一直等"。
+    #   现在: 到位段（固定 `--settle-sec`，默认 5 s）走完就**直接采样**，不再判稳定。
+    #   · 两次采样的间隔只由 `--settle-sec` 决定（原来是 settle + stable）；
+    #   · PID 状态仍然跨相位连续（不 reset），与之前一致；
+    #   · 到位段的实际余差仍打印出来供人工看（不再当门限）。
+    st = link.read()
+    log(f"  ✓ 到位等待结束（固定 {args.settle_sec:g}s，**不判稳定性**）→ 直接开始采样"
+        f"（当前 err_big={_deg(wrap_pi(plan.ref_big[0] - st.platform_azimuth)):+.2f}° "
+        f"err_small={_deg(wrap_pi(plan.ref_small[0] - st.small_joint_angle)):+.2f}°）")
     if rec_hold is not None and len(rec_hold) > 0:
         h_npz, h_csv = save_segment(rec_hold, plan, args.out, args.tag, segment_index,
                                     suffix=HOLD_SUFFIX, save_csv=args.save_csv)
@@ -2261,44 +2226,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="双级 yaw 系统辨识数据采集（分轴激励 + 录制序列增强 + 上位机 PID）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--segments", type=int, default=1, help="采集段数（偶数段驱动大 yaw，奇数段驱动小 yaw）")
-    p.add_argument("--duration-sec", type=float, default=3.0,
+    p.add_argument("--segments", type=int, default=SEGMENTS_DEFAULT, help="采集段数（偶数段驱动大 yaw，奇数段驱动小 yaw）")
+    p.add_argument("--duration-sec", type=float, default=DURATION_SEC,
                    help="每段秒数（标准 3 s = 300 点 @100 Hz）")
     p.add_argument("--rate", type=float, default=RATE,
                    help="采样率 Hz（**固定 100**；传更高会被拒绝并回到 100）")
     p.add_argument("--out", default=DEFAULT_OUT_DIR, help="保存目录")
-    p.add_argument("--tag", default=None, help="文件名 tag（默认按 axis 自动取 big/small）")
-    p.add_argument("--seed", type=int, default=42,
+    p.add_argument("--tag", default=TAG_DEFAULT, help="文件名 tag（默认按 axis 自动取 big/small）")
+    p.add_argument("--seed", type=int, default=SEED_DEFAULT,
                    help="随机数种子（增强/激励序列/每段随机 β0 **都**由它决定 ⇒ 采集是"
                         "**确定性**的）。★ 采留出/测试集时必须换一个 seed，否则会得到与"
                         "训练集**逐位相同**的数据（辨识脚本会做指纹比对并告警）")
-    p.add_argument("--max-temp", type=float, default=55.0, help="电机过温阈值 ℃")
+    p.add_argument("--max-temp", type=float, default=MAX_TEMP_C, help="电机过温阈值 ℃")
     p.add_argument("--kp", type=float, default=PID_KP, help=f"PID 比例增益（默认 {PID_KP}）")
     p.add_argument("--ki", type=float, default=PID_KI, help=f"PID 积分增益（默认 {PID_KI}）")
     p.add_argument("--kd", type=float, default=PID_KD,
                    help=f"PID 微分增益（默认 {PID_KD}；注意用的是未滤波差分, 给大会抖）")
     p.add_argument("--pid-deadband-deg", type=float, default=PID_DEADBAND_DEG,
-                   help="★ **PID 误差死区**（度，默认 0 = 关闭）: |e| ≤ 死区时 P/D 按 0 算、"
-                        "**积分冻结** ⇒ 被保持轴不再一直追编码器噪声、也不在背隙里来回蹭"
-                        "（对辨识的好处: 被保持轴的力矩更干净，Δ 的抖动更小）。"
-                        "建议取 0.3~0.5° 且 **≤ --err-tol-deg**，否则可能永远进不了稳定容差；"
+                   help="★ **PID 误差死区**（度，默认 0 = 关闭）: |e| ≤ 死区 ⇒ e_eff=0"
+                        "（只留积分项，被保持轴不再追编码器噪声/在背隙里蹭）；"
+                        "**|e| > 死区 ⇒ 误差按「到死区边界的距离」e∓d 算**（不是到目标点的距离）"
+                        "⇒ 输出在边界处连续、没有 kp·d 的力矩跳变。"
+                        "建议取 0.3~0.5°（越大保持段静态偏差越大，但力矩越干净）；"
                         "记进 npz 的 `pid_deadband`。")
-    p.add_argument("--record-hold", action=argparse.BooleanOptionalAction, default=True,
-                   help="把每次的静止保持段（到位+稳定等待, 含大角度阶跃）也落盘并参与辨识"
+    p.add_argument("--record-hold", action=argparse.BooleanOptionalAction, default=RECORD_HOLD_DEFAULT,
+                   help="把每次的静止保持段（到位等待, 含大角度阶跃）也落盘并参与辨识"
                         "（文件名后缀 %s；**最开始的第一次不记**）。默认开；--no-record-hold 关闭"
                         % HOLD_SUFFIX)
-    p.add_argument("--save-csv", action=argparse.BooleanOptionalAction, default=False,
+    p.add_argument("--save-csv", action=argparse.BooleanOptionalAction, default=SAVE_CSV_DEFAULT,
                    help="★ **默认不写 CSV**: 只落 npz（列更全、体积约小 2 倍、辨识直接可读）。"
                         "给 --save-csv 才同时写同名 .csv（**只为人眼看/给老脚本用**；"
                         "注意目录里 csv 与 npz 成对存在时，辨识脚本只读 npz 那一份）")
-    p.add_argument("--stable-sec", type=float, default=STABLE_SEC,
-                   help=f"到位后还需连续满足稳定条件这么久（默认 {STABLE_SEC:g}s）")
-    p.add_argument("--err-tol-deg", type=float, default=STABLE_ERR_TOL_DEG,
-                   help=f"稳定判据: 两轴与目标的误差容差（度，默认 {STABLE_ERR_TOL_DEG:g}）")
-    p.add_argument("--vel-tol-deg-s", type=float, default=STABLE_VEL_TOL_DEG_S,
-                   help=f"稳定判据: 两轴速度阈值（度/秒，默认 {STABLE_VEL_TOL_DEG_S:g}）")
     p.add_argument("--settle-sec", type=float, default=SETTLE_SEC,
-                   help=f"第一段: 采样前 PID 到位并保持这么久 s（默认 {SETTLE_SEC:g}）")
+                   help=f"采样前的到位等待时长 s（默认 {SETTLE_SEC:g}）。"
+                        "★ 现在**只有这一段**: 走完就直接采样，不再判稳定性")
     p.add_argument("--tilted", action="store_true",
                    help="静态倾斜段: 每段前提示把底盘以固定倾角静置（**不做任何倾角补偿、"
                         "不改变激励方式**），并把 gravity_ax/ay 记进数据、元数据记 tilted=1")
@@ -2320,14 +2281,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "目的是把背隙建模逼到最不利情形: 死区内零刚度 ⇒ δ/k/c 几乎无梯度；k=∞ 只能用有限 k 近似；"
         "β 每条数据都不同 ⇒ 单个全局 β 不可能对，必须用估计器的在线值（数据里的 backlash_center 列）。\n"
         "环境 3（--sim-no-backlash）: **被控对象根本没有背隙**（δ=0），"
-        "用于可辨识性诊断 —— 看当前 16 参模型会不会在无背隙数据上\"认\"出一个假的死区。")
+        "用于可辨识性诊断 —— 看当前 18 参模型会不会在无背隙数据上\"认\"出一个假的死区。")
     sg.add_argument("--sim-rigid", action="store_true",
                     help="dry-run 用**刚性接触**环境（隐含: 记录 backlash_center / "
                          "backlash_beta_true 两列；实机也会记，实机真值恒 0）")
     sg.add_argument("--sim-no-backlash", action="store_true",
                     help="★ dry-run 用**没有背隙**的被控对象（δ = 0 ⇒ 电机与云台之间没有空行程，"
                          "只剩一条刚度为 --sim-no-backlash-k 的同步带弹簧）。用途: 可辨识性诊断 —— "
-                         "喂给当前 16 参（含 δ/k/c/γ）模型，看它能不能识出'其实没有背隙'。"
+                         "喂给当前 18 参（含 δ/k/c/γ/Pb）模型，看它能不能识出'其实没有背隙'。"
                          "与 --sim-rigid 互斥")
     sg.add_argument("--sim-no-backlash-k", type=float, default=SIM_NO_BACKLASH_K,
                     help=f"无背隙环境里那条同步带的刚度（N·m/rad，默认 {SIM_NO_BACKLASH_K:g}）；"
@@ -2338,11 +2299,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          f"|P|~U{SIM_COM_P_RANGE} / |Pb|~U{SIM_COM_PB_RANGE} kg·m），"
                          "免得辨识只在某一组恰好方便的偏置上验证；真值写进 npz（*_true 标量）",
                     )
-    sg.add_argument("--sim-com-seed", type=int, default=None,
+    sg.add_argument("--sim-com-seed", type=int, default=SIM_COM_SEED,
                     help="★ 随机重心偏置用**独立**的种子（默认 None = 用本次运行的 --seed）。"
                          "train/val、水平/倾斜 几次运行要**共享同一组重心真值**时，"
                          "都传同一个 --sim-com-seed（否则各自抽各自的，留出集与训练集物理对象不同）")
-    sg.add_argument("--sim-tilt-deg", type=float, default=0.0,
+    sg.add_argument("--sim-tilt-deg", type=float, default=SIM_TILT_DEG,
                     help="★ dry-run 的**底盘静态倾角**（度，绕底盘 y 轴，默认 0 = 水平）。"
                          "非 0 时被控对象的 A 系重力**随大 yaw 平台角旋转**"
                          "（g_A = Rz(−θ_p)·g_C，与实机估计器给 gravity_a 的口径一致），"
@@ -2396,6 +2357,7 @@ def main(argv=None) -> int:
         f"（首段除外）")
     log(f"  仅力矩模式(mode=0)  pitch=0  小 yaw 行程="
         f"[{_deg(SMALL_TRAVEL_MIN):+.0f}°, {_deg(SMALL_TRAVEL_MAX):+.0f}°]"
+        f"（软限位 [{_deg(SMALL_SOFT_MIN):+.0f}°, {_deg(SMALL_SOFT_MAX):+.0f}°]，越界只告警）"
         f"  参考包络=[{_deg(SMALL_ENV_MIN):+.0f}°, {_deg(SMALL_ENV_MAX):+.0f}°]"
         f"  中止阈值=同硬限位  中心={_deg(SMALL_CENTER_RAD):+.1f}°  过温={args.max_temp:g}℃")
     if getattr(args, "held_big_stratified", False):
@@ -2414,9 +2376,7 @@ def main(argv=None) -> int:
     if _db > 0.0:
         log(f"  ★ PID 误差死区: ±{args.pid_deadband_deg:g}°（{_db:.5f} rad）"
             f" —— 死区内 P/D 按 0 算、积分冻结")
-        if args.pid_deadband_deg > args.err_tol_deg:
-            log(f"  [WARN] 死区 {args.pid_deadband_deg:g}° > 稳定容差 "
-                f"{args.err_tol_deg:g}° ⇒ 两轴可能永远进不了稳定判据，建议调小")
+        log("    （稳定判据已删除 ⇒ 死区多大都不会「卡在门限外」，它只决定保持段的静态偏差）")
     log(f"  保存目录: {args.out}")
     log(f"  保存格式: {'npz + csv' if args.save_csv else 'npz（默认，不写 csv）'}"
         + ("  ← 也记静止保持段" if args.record_hold else "  ← 不记静止保持段"))

@@ -1,6 +1,6 @@
 # TorqueControllerForBigSmallYaw — 双级 yaw 云台力矩 MPC 控制
 
-两级平行 yaw 的云台控制系统（**大 yaw 可多圈自由转、响应慢；小 yaw 行程 ±30°、响应快；
+两级平行 yaw 的云台控制系统（**大 yaw 可多圈自由转、响应慢；小 yaw 行程 ±35°（软限位 ±30°）、响应快；
 `IMU 固定在头上`（构型 `ON_HEAD`，默认；`ON_BIG_YAW` 为备选，运行时切换）**）。
 上位机通过串口与电控（MCU）和 IMU 通信，
 完成状态估计与**耦合非线性 MPC** 求解，输出两关节力矩（可选叠加电控内环）。
@@ -39,7 +39,7 @@
 | 量 | 怎么测 | 精度 | 填到哪 |
 |---|---|---|---|
 | **两 yaw 轴平面偏置 `d = (dx, dy)`** | 卡尺/三坐标量两轴中心距与方向（A 系 x-y 平面内）。**本构型已实测 = `(0, 0.07)` m**（横向无偏置、小 yaw 轴在大 yaw 轴**前方** 0.07 m） | ±0.5 mm | `ModelParams::dx/dy`（`planar_yaw_params.h`，**已按实测填好**） |
-| **小 yaw 实际行程两端角度** | 手动（力矩 0）转到两侧机械限位，读编码器；确认 `±30°`（也可在 `./build/tcbs_test_serial` 里读） | ±0.2° | `defaultMpcConfig().small.min_angle/max_angle` + 电控宏 `YAW_SMALL_MIN/MAX_RAD` |
+| **小 yaw 实际行程两端角度** | 手动（力矩 0）转到两侧机械限位，读编码器；确认 `±35°`（软限位 ±30°；也可在 `./build/tcbs_test_serial` 里读） | ±0.2° | `defaultMpcConfig().small.min_angle/max_angle` + 电控宏 `YAW_SMALL_MIN/MAX_RAD` |
 | **两关节力矩能力**（峰值力矩 × 减速比 × 效率） | 电机手册 + **实测堵转/斜坡**（不要只信手册） | — | `big/small.max_torque`、`max_torque_rate`（**直接决定控制权限与安全**） |
 | （可选）上装质量 `m_u` | 电子秤 | ±10 g | `ModelParams::m_u_known`（不称重填 0，代价见 §8-8） |
 | （可选）上装质心偏置 `ρ` | 吊线/称重法 | ±2 mm | 仅用于核对辨识出的 `P`（`P = m_u·ρ`），**不填进模型** |
@@ -418,7 +418,7 @@ s.t.   |u| ≤ max_torque（内部 clamp，硬限位）
 - **两关节的相互影响被显式建模**（非共轴偏置 `d` 与上装一阶矩 `P` 引起的交叉惯量
   `M12(θ_s)=Js+d·R(θ_s)P`、离心/科氏项、底盘转动耦合、重力项），因此"大 yaw 快速展开时
   小 yaw 被带偏"这类现象由 MPC 直接补偿，而不是靠事后调参掩盖；
-- **小 yaw 行程由 `small.min_angle/max_angle` 给出（当前对称 ±30°）**，软限位**两侧各自**从硬限位向内推导：
+- **小 yaw 行程由 `small.min_angle/max_angle` 给出（当前对称 ±35°，软限位 ±30° ⇒ `small_limit_soft_ratio ≈ 0.9286`）**，软限位**两侧各自**从硬限位向内推导：
   `inset = (1−ratio)·(max−min)` ⇒ `soft_min = min + inset`、`soft_max = max − inset`
   （默认 `ratio=0.75`、`inset=11.25°` ⇒ 软限位区 `[−13.75°, +8.75°]`）。
   旧的 `soft = ratio·max_angle` 隐含"行程对称 ±max_angle"：行程一旦非对称，负侧会被算成
