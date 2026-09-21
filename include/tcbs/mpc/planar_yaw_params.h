@@ -130,9 +130,9 @@ inline DualYawMpcConfig defaultMpcConfig() {
     // ★ 软限位从 ±30° 开始（硬限位 ±35°，见下面的 min/max_angle）:
     //   soft = max − (1−ratio)·(max−min) = 35° − 0.0714·70° = 30°
     c.small_limit_soft_ratio = 0.9285714285714286;
-    c.r_big_torque = 1.0;
+    c.r_big_torque = 0.1;
     c.r_small_torque = 0.01;
-    c.rd_big_rate = 100.0;
+    c.rd_big_rate = 10.0;
     c.rd_small_rate = 100.0;
     c.smooth_eps = 1e-6;
     c.ref_delay_steps = 0;
