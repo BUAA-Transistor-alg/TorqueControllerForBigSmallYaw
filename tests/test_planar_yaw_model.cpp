@@ -137,6 +137,10 @@ void testAgainstReference() {
     ModelParams p = defaultModelParams();
     p.fcBig = 0.0; p.fvBig = 0.0; p.fcSmall = 0.0; p.fvSmall = 0.0;   // 摩擦单独测
     p.Px = 0.021; p.Py = -0.013;      // 非零一阶矩
+    // ★ 参考实现是"2-DOF 物理参数化"(J_big, m_u, ρ, J_u, 载荷质心 r=d+R(θs)ρ)，
+    //   **不含**大 yaw 侧一阶矩 Pb（转子/支架自身偏心）。比对公式时把 Pb 置 0；
+    //   Pb 那一项由 [E] 的 Gb 检查单独覆盖。
+    p.Pbx = 0.0; p.Pby = 0.0;
     const double m_u = 1.0;           // 参考用任意 m_u（8 参形式应与之无关）
     // 注意: 模型里 m_u(d×g) 那一项需要 m_u（默认 0 = 不建模，见头文件说明）。
     // 为逐项验证公式，这里把同一个 m_u 也告诉模型。
@@ -277,7 +281,8 @@ void testAnalyticCases() {
         const double Qx = p.Px * std::cos(ts) - p.Py * std::sin(ts);
         const double Qy = p.Px * std::sin(ts) + p.Py * std::cos(ts);
         const double Gs = Qx * e.gravity_a[1] - Qy * e.gravity_a[0];
-        const double Gb = p.m_u_known * (p.dx * e.gravity_a[1] - p.dy * e.gravity_a[0]) + Gs;
+        const double Gb = (p.Pbx + p.m_u_known * p.dx) * e.gravity_a[1]
+                        - (p.Pby + p.m_u_known * p.dy) * e.gravity_a[0] + Gs;
         check(std::fabs(h[0] + Gb) < 1e-12 && std::fabs(h[1] + Gs) < 1e-12,
               "重力项（A 系）: h_b=−G_b, h_s=−G_s",
               std::max(std::fabs(h[0] + Gb), std::fabs(h[1] + Gs)), 1e-12);
@@ -361,8 +366,11 @@ void testBacklash() {
         eomBacklash(q, qd, p, e, M, h);
         max_free = std::max(max_free, std::fabs(h[0]));      // h[0] 含 τ_t + 电机摩擦(Δ̇=0 ⇒ 0)
     }
-    // 容差: 直通项 k·γ·|Δ|（用户授权的梯度引导，Δ≤δ/2）+ 平滑残余 ∝ k
-    const double free_tol = p.backlash_k * (p.backlash_through * 0.5 * p.backlash_delta + 1e-5);
+    // 容差: 直通项 k·γ·|Δ|（用户授权的梯度引导，Δ≤δ/2）+ **平滑残余**（∝ k·ε）。
+    //   ★ 必须显式带上 ε: 当前默认 δ≈0.018、smooth_eps=1e-4 ⇒ ε/(δ/2)≈1.1%，
+    //     在 |Δ|→δ/2 附近的平滑残余可达 k·ε/2 量级，比 γ 项还大（旧默认 δ≈0.087 时不明显）。
+    const double free_tol = p.backlash_k * (p.backlash_through * 0.5 * p.backlash_delta
+                                            + 2.0 * p.backlash_smooth_eps);
     check(max_free < free_tol, "死区内 τ_t ≈ 0（自由段, 仅剩直通项）", max_free, free_tol);
 
     // ② 接触区: τ_t ≈ k·(|Δ| − δ/2)，两侧反号对称
