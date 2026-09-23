@@ -278,9 +278,9 @@ void McuMpcController::loop() {
             theta_star[1] = est.small_joint_angle;
         }
         // ★ 下发的 yaw_big_target_angle/velocity **控制的是电机**，而 theta_star 是云台角
-        //   ⇒ mode=1（电控位置环）时必须换算到**电机**坐标系: 保持当前传动形变
+        //   ⇒ mode=2（电控位置环）时必须换算到**电机**坐标系: 保持当前传动形变
         //   Δ_meas = θ_motor − θ_platform，令电机目标 = 云台目标 + Δ_meas。
-        //   （mode=0 仅力矩时电控不使用该字段，换算也无害。）
+        //   （mode=1 仅力矩时电控不使用该字段，换算也无害。）
         const double transmission_offset = est.big_motor_angle - est.big_platform_angle;
         pkt.yaw_big_target_angle = theta_star[0] + transmission_offset;
         pkt.yaw_big_target_velocity = static_cast<float>(omega_star[0]);

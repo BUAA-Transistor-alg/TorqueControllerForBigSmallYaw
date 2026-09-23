@@ -47,7 +47,7 @@
  │          移动参考由**轨迹规划器整形**而不是阶跃 —— 阶跃会让 PID 饱和过冲）
  ├─ 采样: 300 点 @100 Hz（3.00 s），每点
  │        忙等到绝对时间点 → 读 est/mcu → 安全判定 → 两轴 PID → 力矩变化限幅
- │        → 仅力矩模式(mode=0)下发 → 记录（含 gravity_ax/gravity_ay）
+ │        → 仅力矩模式(mode=1)下发 → 记录（含 gravity_ax/gravity_ay）
  └─ 段尾: 主动回到**行程中心**保持（当前行程 ±35° ⇒ 0°；大 yaw 保持当前平台方位角）
           * 只在**程序退出**时才连发零力矩（规格要求）
 ```
@@ -64,7 +64,7 @@
 - 只使用**低层** `torque_controller.TcbsRobotCommunication`（`get_latest_data` / `get_estimate` / `send_to_mcu`），
   不用高层 MPC 控制器 —— 采集必须自己独占力矩通道。
 - 下发协议 `include/tcbs/communication/Protocol.hpp`（v0x03）:
-  `yaw_big_mode = 1`、`yaw_small_mode = 1`（**1 = 仅力矩**；2026-09-23 由 0 翻转为 1），`pitch_target_angle = 0`（pitch 固定 0，本项目不用它标定），
+  `yaw_big_mode = 1`、`yaw_small_mode = 1`（**1 = 仅力矩**；2 = 力矩 + 内环，其余值 = 非法 ⇒ 电控按 0 力矩处理），`pitch_target_angle = 0`（pitch 固定 0，本项目不用它标定），
   `auto_aim_enable = 1`，`fire = 0`。`yaw_*_target_angle/velocity` 在仅力矩模式下电控**不使用**，
   仍按"关节角语义"填上当前意图（大 yaw 多圈连续、小 yaw 相对角）仅供电控侧限位/日志参考。
 - 反馈:

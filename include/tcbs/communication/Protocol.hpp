@@ -42,11 +42,12 @@ constexpr size_t PREAMBLE_SIZE = 3;
 constexpr uint8_t PROTOCOL_VERSION = 0x03;
 
 // ── yaw 关节控制模式 ──
-// ★ 2026-09-23（用户要求）: 语义**翻过来**成"1 = 仅力矩"，与旧版单轴示例
-//   （`yaw_torque_only_mode`，1 = 仅力矩）以及采集脚本一致。
+// ★ 2026-09-23（用户要求）: **1 = 仅力矩**、**2 = 力矩 + 内环**；
+//   其余任何取值（含 0）一律视为**非法模式** ⇒ 力矩按 0 处理（保守，见电控端实现）。
+//   与旧版单轴示例（`yaw_torque_only_mode`，1 = 仅力矩）以及采集脚本一致。
 enum YawMode : uint8_t {
-    YAW_MODE_TORQUE_ONLY   = 1,   // 仅力矩: 电控直接施加 yaw_torque
-    YAW_MODE_TORQUE_PLUS_PID = 0, // 力矩 + 位置/速度内环: τ = kp(θ*−θ) + kd(ω*−ω) + yaw_torque
+    YAW_MODE_TORQUE_ONLY     = 1, // 仅力矩: 电控直接施加 yaw_torque
+    YAW_MODE_TORQUE_PLUS_PID = 2, // 力矩 + 位置/速度内环: τ = kp(θ*−θ) + kd(ω*−ω) + yaw_torque
 };
 
 #pragma pack(push, 1)

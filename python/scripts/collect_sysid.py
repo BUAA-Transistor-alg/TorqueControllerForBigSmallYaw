@@ -60,8 +60,8 @@
    （大 yaw/底盘 IMU 只有 ~10 Hz）都跟不上，高于 100 Hz 只是重复下发同一份估计值，
    反而破坏"力矩-状态"的时间对应关系。
 
-8) **仅力矩模式下发（``yaw_*_mode = 0``）+ 上位机 PID**。原因: 要辨识的是**力矩 → 运动**
-   的动力学，力矩通道必须由上位机独占；若开电控内环（mode 1），电控的位置环会吃掉上位机
+8) **仅力矩模式下发（``yaw_*_mode = 1``）+ 上位机 PID**。原因: 要辨识的是**力矩 → 运动**
+   的动力学，力矩通道必须由上位机独占；若开电控内环（mode 2），电控的位置环会吃掉上位机
    力矩的因果性，辨识出来的就不是机械参数而是"电控环 + 机械"的混合模型。
    反馈: 大 yaw 用 IMU 直测的 ``platform_azimuth``（实时无延迟），小 yaw 用编码器
    ``small_joint_angle``（实时可信）—— 两者都是估计器里的**可信实时量**。
@@ -1055,8 +1055,8 @@ class HwRobotLink:
             est_valid=int(est.valid), mcu_valid=int(mcu.valid), imu_valid=int(imu.valid))
 
     def send(self, tau_big, tau_small, big_joint_target, small_joint_target) -> bool:
-        # 仅力矩模式（yaw_*_mode = 0）: 电控直接施加 yaw_*_torque。
-        # 目标角/角速度字段在 mode 0 下电控不使用，但仍按"关节角语义"填上当前意图:
+        # 仅力矩模式（yaw_*_mode = 1）: 电控直接施加 yaw_*_torque。
+        # 目标角/角速度字段在 mode 1 下电控不使用，但仍按「关节角语义」填上当前意图:
         #   大 yaw = 关节角（多圈连续）; 小 yaw = 相对角（±45° 内）。
         ok = self.comm.send_to_mcu(
             auto_aim_enable=AUTO_AIM_ENABLE, fire=0,
@@ -1808,7 +1808,7 @@ def drive_steps(link, ref_big: np.ndarray, ref_small: np.ndarray, pids, limiters
         e_small = wrap_pi(tgt_small - st.small_joint_angle)
         tau_big = limiters[0].limit(pids[0].update(e_big, DT))
         tau_small = limiters[1].limit(pids[1].update(e_small, DT))
-        # 下发给电控的"关节角目标"（mode=0 时电控不使用，仅供电控限位/日志参考）:
+        # 下发给电控的"关节角目标"（mode=1 时电控不使用，仅供电控限位/日志参考）:
         #   大 yaw = 估计关节角 + 平台误差; 小 yaw = 关节相对角目标
         big_joint_target = st.big_joint_angle + e_big
         link.send(tau_big, tau_small, big_joint_target, tgt_small)
@@ -2366,7 +2366,7 @@ def main(argv=None) -> int:
         f"力矩变化限幅 {MAX_TORQUE_DELTA:g} N·m/步")
     log(f"  静止保持段记录={'开（后缀 ' + HOLD_SUFFIX + '）' if args.record_hold else '关'}"
         f"（首段除外）")
-    log(f"  仅力矩模式(mode=0)  pitch=0  小 yaw 行程="
+    log(f"  仅力矩模式(mode=1)  pitch=0  小 yaw 行程="
         f"[{_deg(SMALL_TRAVEL_MIN):+.0f}°, {_deg(SMALL_TRAVEL_MAX):+.0f}°]"
         f"（软限位 [{_deg(SMALL_SOFT_MIN):+.0f}°, {_deg(SMALL_SOFT_MAX):+.0f}°]，越界只告警）"
         f"  参考包络=[{_deg(SMALL_ENV_MIN):+.0f}°, {_deg(SMALL_ENV_MAX):+.0f}°]"
