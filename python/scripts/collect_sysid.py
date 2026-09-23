@@ -264,12 +264,12 @@ PITCH_TARGET_ANGLE = 0.0           # pitch 固定 0（不进动力学）
 #   (2π/8192 ≈ 7.7e-4 rad) 就会让 ė 抖 ±0.08 rad/s，×kd 直接变成力矩抖动。
 #   因此: kp 2.0→4.0（P 加大, 减少静差/加快到位）、kd 0.2→0.05（削弱差分噪声放大）、
 #   ki 保持 0.1（有抗饱和，不动）。这两项要按实车手感再调时用 CLI。
-PID_KP, PID_KI, PID_KD = 5.0, 0.0, 0.2
+PID_KP, PID_KI, PID_KD = 1.0, 0.1, 0.1
 PID_OUT_MIN, PID_OUT_MAX = -1.0, 1.0
 MAX_TORQUE_DELTA = 0.5             # 相邻两步力矩变化限幅 N·m（保护减速器）
 MAX_TX_FAIL = 50                   # 连续 50 帧发不出去 ⇒ 判定链路断开，报错退出（0.5 s）
 
-PID_DEADBAND_DEG = 3.0            # [CLI] --pid-deadband-deg（见 PidController 的死区说明）
+PID_DEADBAND_DEG = 1.0            # [CLI] --pid-deadband-deg（见 PidController 的死区说明）
 
 # ============================================================================
 # ★★ 命令行默认值（**统一在这里管理**）
@@ -279,7 +279,7 @@ PID_DEADBAND_DEG = 3.0            # [CLI] --pid-deadband-deg（见 PidController
 # ============================================================================
 SEGMENTS_DEFAULT = 1              # [CLI] --segments（偶数段激励大 yaw，奇数段激励小 yaw）
 DURATION_SEC = 3.0                # [CLI] --duration-sec：每段采样时长 s（3.0 s = 300 点 @100 Hz）
-SEED_DEFAULT = 571015                 # [CLI] --seed（★ 确定性: 换 seed 才是另一批激励）
+SEED_DEFAULT = 1048596                 # [CLI] --seed（★ 确定性: 换 seed 才是另一批激励）
 MAX_TEMP_C = 55.0                 # [CLI] --max-temp：电机过温阈值 ℃
 TAG_DEFAULT = None                # [CLI] --tag（None = 按 axis 自动取 big/small）
 RECORD_HOLD_DEFAULT = True        # [CLI] --record-hold / --no-record-hold
