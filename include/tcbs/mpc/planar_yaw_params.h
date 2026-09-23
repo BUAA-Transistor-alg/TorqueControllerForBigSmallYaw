@@ -125,6 +125,10 @@ inline DualYawMpcConfig defaultMpcConfig() {
 
     c.w_big_azimuth = 1.0;
     c.w_small_azimuth = 1.0;
+    // ★ 速度惩罚（2026-09-21 用户要求）: 大 yaw 默认 0.1（压换向/背隙冲击时的速度尖峰），
+    //   小 yaw 默认 0（关，保持快速跟随）。
+    c.w_big_rate = 0.1;
+    c.w_small_rate = 0.0;
     c.w_small_center = 0.0;
     c.w_small_limit = 1e4;
     // ★ 软限位从 ±30° 开始（硬限位 ±35°，见下面的 min/max_angle）:

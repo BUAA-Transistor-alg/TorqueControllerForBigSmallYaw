@@ -18,7 +18,10 @@ namespace tcbs {
 //           —— 含两轴交叉惯量、非共轴偏置引起的离心/科氏项、大yaw加速对小yaw的
 //              惯性反作用、任意底盘倾斜下的重力项、pitch 惯量调度与耦合
 //   代价:
-//     Σ_k  w_b·|ψ_big(k) − ψ_big*(k)|_smooth + w_s·|ψ_small(k) − ψ_small*(k)|_smooth
+//     Σ_k  w_b·(ψ_big(k) − ψ_big*(k))²      ← ★ 大 yaw 跟踪 = **平方**（2026-09-21 由 |·| 改回）
+//        + w_s·|ψ_small(k) − ψ_small*(k)|_smooth   ← 小 yaw 保持**绝对误差**（平滑 |·|）
+//        + w_vb·θ̇_platform(k)² + w_vs·θ̇_small(k)²  ← ★ **速度惩罚**（新增；θ̇ 用**关节/云台**角速度，
+//                                   不是电机侧；小 yaw 默认关 w_vs=0，大 yaw 默认 w_vb=0.1）
 //        + w_c·(θ_small(k) − small_center_angle)²  ← 冗余自由度回中/打破多解
 //                                  （中心默认 = 行程中心, 非对称行程下 ≠ 0）
 //        + w_lim·ρ(θ_small(k))                 （小 yaw 软限位, **双侧** 4 次幂障碍）
@@ -62,8 +65,15 @@ struct DualYawMpcConfig {
     int    max_iter = 15;       // Ceres 迭代上限
 
     // ── 权重 ──
-    double w_big_azimuth = 1.0;     // 大 yaw 世界方位角跟踪
-    double w_small_azimuth = 1.0;   // 小 yaw 世界方位角跟踪
+    double w_big_azimuth = 1.0;     // 大 yaw 世界方位角跟踪（★ **平方**误差: w·(ψ_b−ψ_b*)²）
+    double w_small_azimuth = 1.0;   // 小 yaw 世界方位角跟踪（**绝对误差** 平滑 |·|）
+    // ★ 速度惩罚（新增，2026-09-21）: 代价项 = w_v·θ̇²（θ̇ = 云台/关节侧角速度，不是电机侧）。
+    //   动机: 平方跟踪项对速度没有直接约束 ⇒ 换向/穿越背隙时可以冲很快，激励出接触模态与抖动；
+    //   给大 yaw 一点速度权重（0.1）能把"过冲/抖动"压下去，而小 yaw 默认不加（保持跟得上）。
+    //   量纲: w_v 的单位是 N·m·s（若无量纲力矩/角速度²…），数值靠实机试：0.1 与 w=1 的
+    //   跟踪项在同一量级（θ̇=1 rad/s 时贡献 0.1）。
+    double w_big_rate = 0.1;        // 大 yaw 云台角速度惩罚（默认 0.1；0 = 关）
+    double w_small_rate = 0.0;      // 小 yaw 关节角速度惩罚（默认 0 = 关）
     double w_small_center = 0.05;   // 小 yaw 回中（冗余自由度分配）
     // 回中目标角（rad）: 代价项 = w_c·(θ_small − small_center_angle)²。
     // ★ 行程**非对称**时 0 就不是行程中心（例如 [−25°,+20°] 的中心是 −2.5°），因此这里

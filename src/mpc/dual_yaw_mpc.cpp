@@ -154,6 +154,8 @@ bool DualYawMpcCost::operator()(T const* const* parameters, T* residuals) const 
 
     const double sw_b = std::sqrt(cfg_.w_big_azimuth);
     const double sw_s = std::sqrt(cfg_.w_small_azimuth);
+    const double sw_vb = std::sqrt(cfg_.w_big_rate);      // ★ 速度惩罚（云台侧 θ̇）
+    const double sw_vs = std::sqrt(cfg_.w_small_rate);    // ★ 速度惩罚（小 yaw θ̇）
     const double sw_c = std::sqrt(cfg_.w_small_center);
     const double sw_l = std::sqrt(cfg_.w_small_limit);
     const double sr_b = std::sqrt(cfg_.r_big_torque);
@@ -190,8 +192,12 @@ bool DualYawMpcCost::operator()(T const* const* parameters, T* residuals) const 
         const T psi_b = psi_c + q[1];
         const T psi_s = psi_b + q[2];
 
-        residuals[idx++] = T(sw_b) * smoothAbs(psi_b - T(ref_big_[k]), cfg_.smooth_eps);
+        // ★ 大 yaw: **平方**误差（残差写成 √w·e ⇒ 代价 = w·e²）；小 yaw: 平滑绝对误差
+        residuals[idx++] = T(sw_b) * (psi_b - T(ref_big_[k]));
         residuals[idx++] = T(sw_s) * smoothAbs(psi_s - T(ref_small_[k]), cfg_.smooth_eps);
+        // ★ 速度惩罚: qd[1] = 云台角速度、qd[2] = 小 yaw 角速度（不是电机侧 qd[0]）
+        residuals[idx++] = T(sw_vb) * qd[1];
+        residuals[idx++] = T(sw_vs) * qd[2];
         residuals[idx++] = T(sr_b) * ub[k];
         residuals[idx++] = T(sr_s) * us[k];
         // 回中到**行程中心**（非对称行程下 ≠ 0, 由配置显式给出）
@@ -256,7 +262,9 @@ void DualYawMpc::reset() {
 }
 
 int DualYawMpc::residualSize() const {
-    return cfg_.N * 6 + (cfg_.N - 1) * 2;
+    // 每步: 大 yaw 跟踪 + 小 yaw 跟踪 + **大 yaw 速度 + 小 yaw 速度** + u_b + u_s + 回中 + 软限位 = 8
+    // 另加 k≥1 的 2 条力矩变化率 ⇒ 8N + 2(N−1)
+    return cfg_.N * 8 + (cfg_.N - 1) * 2;
 }
 
 DualYawMpc::Output DualYawMpc::solve(const Input& in) {
