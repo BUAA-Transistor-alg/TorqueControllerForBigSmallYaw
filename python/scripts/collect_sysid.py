@@ -328,38 +328,38 @@ HELD_SMALL_MAX = 0.7 * SMALL_ENV_HALF    # held 小 yaw 随机目标半宽（保
 #     大 yaw 摆动会通过 M12 给小 yaw 注入扰动力矩（M12·θ̈_big 可达 ~0.3 N·m），
 #     PID 顶回来需要几度到十几度的瞬时偏差，收窄一点才有余量不触碰中止阈值。
 #     抽取范围 = SMALL_CENTER_RAD ± HELD_SMALL_MAX（⊂ 参考包络），见 docs/sysid_data.md §6.2。
-BIG_REF_AMP = math.radians(120.0)     # driven 大 yaw 参考**半幅**上限（★ 2026-09-21: 60°→120°
+BIG_REF_AMP = math.radians(180.0)     # driven 大 yaw 参考**半幅**上限（★ 2026-09-21: 60°→120°
                                       #   ⇒ 参考峰峰可达 240°；大 yaw 多圈自由，仅防大摆）
-BIG_CENTER_JITTER = math.radians(30.0)  # driven 大 yaw 参考中心相对当前方位角的随机抖动
+BIG_CENTER_JITTER = math.radians(180.0)  # driven 大 yaw 参考中心相对当前方位角的随机抖动
 HELD_BIG_OFFSET = math.pi             # held 大 yaw 目标: 现有角度 ±π 内随机（多圈连续）
 # （到位判据已删: 与原仓库一样"PID 跑固定 2 s 就算到位"，不做收敛判定/多轮重试 ——
 #   判据不满足时的处理反而更麻烦，且原仓库就是这么做的，两批数据口径一致。）
 
 # ── 参考幅值: 既要"每段都有有效激励"，又不能超过该轴的安全半幅 ──
 #   下限**按轴给**: 小 yaw 行程只有 45° 宽（包络半宽才 14.5°），下限不能沿用大 yaw 的 14°。
-MIN_EXCITE_AMP_BIG = math.radians(14.0)     # 大 yaw 参考半幅下限（≈14°）
-MIN_EXCITE_AMP_SMALL = math.radians(7.0)    # 小 yaw 参考半幅下限（≈7°: 峰峰 14°，
-#   仍远高于编码器噪声/到位判据 0.02 rad ≈ 1.1°，且能产生可观的力矩变化）
-MIN_SHAPE_SPAN = 0.20                 # 挑选录制窗口的峰峰值下限 rad（≈11°）: 丢掉"平段"
+MIN_EXCITE_AMP_BIG = math.radians(1.0)     # 大 yaw 参考半幅下限（≈1°）
+MIN_EXCITE_AMP_SMALL = math.radians(1.0)    # 小 yaw 参考半幅下限（≈1°: 峰峰 2°）
+MIN_SHAPE_SPAN = 0.05                 # 挑选录制窗口的峰峰值下限 rad（≈3°）: 丢掉"平段"
 WINDOW_TRIES = 20                     # 挑窗口最多重试次数（录制序列里有大量静止段）
-AMP_JITTER = (0.6, 1.0)               # 半幅在上限的 60%~100% 间随机（幅值多样性）
+AMP_JITTER = (0.1, 1.0)               # 半幅在上限的 10%~100% 间随机（幅值多样性）
 REF_TRIES = 6                         # 参考幅值不达标时换窗口重试次数
 AMP_BOOST_TRIES = 4                   # 平滑抹平了激励时，放大输入重试次数
-AMP_BOOST_FACTOR = 4.0                # 每次放大倍数
+AMP_BOOST_FACTOR = 1.5                # 每次放大倍数
 
 # ── 参考轨迹规划器（按轴给参数；理由: 参考必须是执行器跟得动的）──
 #   · 大 yaw: 惯量大、力矩上限 ±1 N·m，允许较快的摆动（主要激励惯量/耦合）
 #   · 小 yaw: 必须一直守在 ±45° 内，参考越"温柔"，PID 跟踪误差越小、越安全
 REFINE_N = 1000                       # StepRefinementWrapper 细化系数（与旧脚本一致）
 BIG_PLANNER = dict(max_velocity=8.0, max_acceleration=30.0, max_jerk=800.0)
-SMALL_PLANNER = dict(max_velocity=3.0, max_acceleration=15.0, max_jerk=400.0)
+# SMALL_PLANNER = dict(max_velocity=3.0, max_acceleration=15.0, max_jerk=400.0)
+SMALL_PLANNER = dict(max_velocity=8.0, max_acceleration=30.0, max_jerk=800.0)
 
 # ── 时序 ──
 HOLD_SUFFIX = "_hold"                 # 静止保持段落盘文件名的后缀（见 --record-hold）
 # 采样前的**到位等待**（固定时长，**不判稳定性** —— 稳定判据已按用户要求删除，2026-09-20）。
 # 两次采样的间隔 = SETTLE_SEC（原来还要再等一段"连续稳定 STABLE_SEC"）。
-SETTLE_SEC = 5.0                      # 采样前 PID 到位并保持这么久（固定时长，不判据）
-ZERO_FRAMES_AT_EXIT = 20              # 退出前必发的零力矩帧数（规格: 连发几帧）
+SETTLE_SEC = 3.0                      # 采样前 PID 到位并保持这么久（固定时长，不判据）
+ZERO_FRAMES_AT_EXIT = 300             # 退出前必发的零力矩帧数（规格: 连发几帧）
 MAX_COOL_WAIT_S = 600.0               # 过热等待上限（超过则退出）
 COOL_HYSTERESIS_C = 5.0               # 降温到 max_temp − 5 ℃ 才恢复
 RECENTER_SEC = 1.5                    # 小 yaw 越限后的回中时间
@@ -761,6 +761,13 @@ def fit_into_interval(seq: np.ndarray, lo: float, hi: float):
     seq = np.asarray(seq, dtype=np.float64)
     if len(seq) == 0:
         return seq, 1.0, 0.0
+    # ★ 2026-09-23: **已经落在区间内 ⇒ 原样返回**（不缩放、不居中）。
+    #   以前这里无条件"把中点对齐到区间中点"，等于把调用方刚加上的**随机中心**抵消掉
+    #   （实测 118 个小 yaw 段里 116 段实际中心恒为 0°，而元数据里记着另一个数）。
+    #   调用方（`random_center_for`）取的随机中心本来就保证不越界 ⇒ 这个函数回到
+    #   它注释里写的"越界兜底"角色: 只有真的超出包络才缩放 + 平移。
+    if float(seq.max()) <= float(hi) and float(seq.min()) >= float(lo):
+        return seq, 1.0, 0.0
     width = float(hi) - float(lo)
     span = float(seq.max() - seq.min())
     k = 1.0 if span <= 1e-12 else min(1.0, width / span)
@@ -927,10 +934,14 @@ def build_segment_plan(rng, targets, axis: int, st, planners: dict, n: int,
         # （行程可能非对称 ⇒ 不能用 ±(band−amp) 的对称写法）
         center = random_center_for(rng, amp, SMALL_ENV_MIN, SMALL_ENV_MAX)
         ref_small = ref_shape + center
-        # 规格: 若仍超出包络（规划器过冲/浮点）→ **整体等比缩放 + 平移到包络内**（不截断）
+        # 规格: **只有**超出包络（规划器过冲/浮点）才整体等比缩放 + 平移到包络内（不截断）；
+        #       没越界时 `fit_into_interval` 原样返回 ⇒ 上面随机取的中心**保留生效**
         ref_small, _k, _shift = fit_into_interval(ref_small, SMALL_ENV_MIN, SMALL_ENV_MAX)
         ref_big = np.full(n, held_target, dtype=np.float64)
-        ref_center, ref_amp = center, float(np.max(np.abs(ref_small - center)))
+        # ★ 元数据按**实际**参考算（不再用那个可能被缩放/平移改过的 center）:
+        #   正常情况（未越界）两者相等；越界被缩放+平移时这里才是真值。
+        ref_center = 0.5 * float(ref_small.max() + ref_small.min())
+        ref_amp = 0.5 * float(ref_small.max() - ref_small.min())
 
     return SegmentPlan(
         axis=axis, held_target=held_target,
