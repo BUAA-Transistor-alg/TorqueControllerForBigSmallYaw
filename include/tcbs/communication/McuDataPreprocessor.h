@@ -46,7 +46,7 @@ public:
         //     发 raw_cmd = −θ，回读 raw_fb = −θ ⇒ 二者相等 ⇒ 不动 ✔
         double recv_big_yaw_scale      = -1.0;
         double recv_big_yaw_offset     =  0.0;
-        double recv_big_omega_scale    = -1.0;
+        double recv_big_omega_scale    = -9.549296585513721;
         double send_big_yaw_scale      = -1.0;
         double send_big_yaw_offset     =  0.0;
         double send_big_velocity_scale = -1.0;
