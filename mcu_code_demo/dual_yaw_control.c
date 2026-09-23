@@ -216,10 +216,10 @@
 #endif
 
 /* yaw 控制模式位（与 mcu::YawMode 一致）
- * 注意: 与旧版单轴示例的 yaw_torque_only_mode 语义相反 —— 旧版 1 = 仅力矩,
- *       新版协议规定 0 = 仅力矩, 1 = 力矩 + 位置/速度内环。 */
-#define YAW_MODE_TORQUE_ONLY        0u
-#define YAW_MODE_TORQUE_PLUS_PID    1u
+ * ★ 2026-09-23（用户要求）: **1 = 仅力矩**、0 = 力矩 + 位置/速度内环 ——
+ *   与旧版单轴示例的 yaw_torque_only_mode（1 = 仅力矩）一致，也与采集脚本一致。 */
+#define YAW_MODE_TORQUE_ONLY        1u
+#define YAW_MODE_TORQUE_PLUS_PID    0u
 
 /* ---- 1.2 内环增益（每关节独立, 需调参） ---- */
 #define YAW_BIG_KP                  0.10f   /* N·m/rad   */

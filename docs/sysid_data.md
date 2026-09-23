@@ -64,8 +64,8 @@
 - 只使用**低层** `torque_controller.TcbsRobotCommunication`（`get_latest_data` / `get_estimate` / `send_to_mcu`），
   不用高层 MPC 控制器 —— 采集必须自己独占力矩通道。
 - 下发协议 `include/tcbs/communication/Protocol.hpp`（v0x03）:
-  `yaw_big_mode = 0`、`yaw_small_mode = 0`（**0 = 仅力矩**），`pitch_target_angle = 0`（pitch 固定 0，本项目不用它标定），
-  `auto_aim_enable = 1`，`fire = 0`。`yaw_*_target_angle/velocity` 在 mode 0 下电控**不使用**，
+  `yaw_big_mode = 1`、`yaw_small_mode = 1`（**1 = 仅力矩**；2026-09-23 由 0 翻转为 1），`pitch_target_angle = 0`（pitch 固定 0，本项目不用它标定），
+  `auto_aim_enable = 1`，`fire = 0`。`yaw_*_target_angle/velocity` 在仅力矩模式下电控**不使用**，
   仍按"关节角语义"填上当前意图（大 yaw 多圈连续、小 yaw 相对角）仅供电控侧限位/日志参考。
 - 反馈:
   - 大 yaw → `est.platform_azimuth`（大 yaw 上 IMU 直测的**平台世界方位角**，实时无延迟，多圈解卷绕）；

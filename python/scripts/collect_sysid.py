@@ -253,7 +253,7 @@ SAMPLE_LEN = 300                   # 标准段长 = 3 s @100 Hz
 TWO_PI = 2.0 * math.pi
 
 # ── 协议模式位（include/tcbs/communication/Protocol.hpp）──
-YAW_MODE_TORQUE_ONLY = 1           # 0 = 仅力矩（上位机独占力矩通道）
+YAW_MODE_TORQUE_ONLY = 1           # ★ 1 = 仅力矩（2026-09-23 与 mcu::YawMode 对齐；上位机独占力矩通道）
 AUTO_AIM_ENABLE = 1                # 自瞄总开关（与电控手动开关相与）；与旧脚本一致
 PITCH_TARGET_ANGLE = 0.0           # pitch 固定 0（不进动力学）
 

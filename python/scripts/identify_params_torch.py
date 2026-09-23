@@ -1505,6 +1505,12 @@ class FitConfig:
     #   典型用法: `--epochs=2000 --lr=1e-2 --cos-decay-steps=1000`
     #   = 前 1000 epoch 常数 1e-2、后 1000 epoch 余弦衰减到 0。
     cos_decay_steps: int = 0        # 0 = 关闭（默认，行为与以前逐字相同）
+    # ★ 长跑（几万~几十万 epoch）的**断点**: 每 N 个 epoch 把当前 φ 写一份到
+    #   `<checkpoint_prefix>.epXXXXXX`（格式与 --out 相同 ⇒ 可直接喂 --params / --init-vector）。
+    #   动机: 训练 loss 是随机 0.1 s 片段、**不是**可靠的选择指标（实测 2000 epoch 最优解
+    #   在中间、继续训反而整段 RMSE 变差）⇒ 长跑必须留下中间的候选参数，事后用留出集挑。
+    checkpoint_every: int = 0       # 0 = 关闭
+    checkpoint_prefix: str = ""     # 通常 = --out（不给就不写）
     # ── 旧配方（显式给 iters>0 才启用；或 --legacy-recipe 一键预设）──
     iters: int = 0                  # >0 ⇒ 旧配方：精确跑 iters 个 Adam 步（分窗 mini-batch）
     lbfgs_iters: int = 0            # LBFGS 迭代数（0 = 关闭 ⇒ 原仓库没有 LBFGS）
@@ -1694,6 +1700,16 @@ def _pack_windows(segs, cfg: FitConfig, chan_sel, dtype, dev):
             "lens": [int(sp[2]) for sp in specs],          # 每个窗口的**有效**长度（未 padding）
             "specs": [("seg%d" % sp[0], sp[1], sp[2]) for sp in specs],
             "seg_of_window": [sp[0] for sp in specs]}
+
+
+def write_params_file(path: str, phi, recipe: str = "") -> None:
+    """把 18 参写成 `--out` 那种 `名字 = 值` 文本（checkpoint 与最终输出共用同一格式）。"""
+    with open(path, "w") as fh:
+        fh.write("# identify_params_torch.py 输出（输出误差法）\n")
+        if recipe:
+            fh.write(f"# 配方: {recipe}\n")
+        for nm, v in zip(PARAM_NAMES, np.asarray(phi, dtype=np.float64)):
+            fh.write(f"{nm} = {float(v):.9f}\n")
 
 
 def lr_at_step(step: int, total: int, base_lr: float, decay_steps: int) -> float:
@@ -2011,6 +2027,14 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
                       f"{cfg.lr:g}，最后 {min(cos_n, epochs)} epoch 余弦衰减到 0")
             rng = np.random.RandomState(cfg.seed)
             print_every = max(1, int(cfg.print_every))
+            _ck_n = int(cfg.checkpoint_every)
+            _ck_pre = str(cfg.checkpoint_prefix or "")
+            if _ck_n > 0 and not _ck_pre:
+                print("[torch] [WARN] --checkpoint-every 给了但没给 --out ⇒ 不做断点保存")
+            if int(cfg.checkpoint_every) > 0 and cfg.checkpoint_prefix:
+                print(f"[torch] ★ 断点: 每 {int(cfg.checkpoint_every)} epoch 写一份 "
+                      f"{cfg.checkpoint_prefix}.epXXXXXX（共约 "
+                      f"{epochs // max(1, int(cfg.checkpoint_every))} 份）")
             if cfg.batch_segments:
                 # ── ★ 全批: 每 epoch 对每段各抽 1 个 seg_steps 片段 → 拼成一个 batch
                 #    做**一次** Adam 步（损失 = 各段损失的均值 = 原配方 W 个梯度的平均）──
@@ -2028,6 +2052,16 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
                     print(f"[torch] ★ --batch-segments: 每 epoch {n_group} 次 Adam 步"
                           f"（每步 batch={bs}/{nv} 段 × {seg_steps} 步；损失 = 组内各段损失均值）")
                 for ep in range(epochs):
+                    if _ck_n > 0 and _ck_pre and ep > 0 and ep % _ck_n == 0:
+                        try:
+                            _phi_ck = np.asarray([float(v) for v in
+                                                  space.to_physical(raw, phi0).detach().cpu().numpy()],
+                                                 dtype=np.float64)
+                            write_params_file(f"{_ck_pre}.ep{ep:06d}", _phi_ck,
+                                              recipe=f"checkpoint @ epoch {ep}/{epochs}")
+                            _ck_saved += 1
+                        except Exception as exc:
+                            print(f"[torch] [warn] checkpoint 写入失败: {exc}", file=sys.stderr)
                     if cos_n > 0:
                         _lr = lr_at_step(ep, epochs, cfg.lr, cos_n)
                         for _g2 in opt.param_groups:
@@ -2091,6 +2125,15 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
             # ── 默认路径: 每 epoch 对每段各抽 1 个 seg_steps 片段做 1 个 Adam 步 ──
             if not cfg.batch_segments:
                 for ep in range(epochs):
+                    if _ck_n > 0 and _ck_pre and ep > 0 and ep % _ck_n == 0:
+                        try:
+                            _phi_ck = np.asarray([float(v) for v in
+                                                  space.to_physical(raw, phi0).detach().cpu().numpy()],
+                                                 dtype=np.float64)
+                            write_params_file(f"{_ck_pre}.ep{ep:06d}", _phi_ck,
+                                              recipe=f"checkpoint @ epoch {ep}/{epochs}")
+                        except Exception as exc:
+                            print(f"[torch] [warn] checkpoint 写入失败: {exc}", file=sys.stderr)
                     ep_loss, n_used = 0.0, 0
                     for w in valid:
                         s0 = int(rng.randint(0, lens[w] - seg_steps + 1))
@@ -2790,6 +2833,11 @@ def _build_argparser():
     g.add_argument("--integrator", choices=["euler", "rk4"], default=FitConfig.integrator,
                    help="★ 默认 rk4（3-DOF 背隙接触模态很硬: 同子步数下 euler 的数值角速度"
                         "误差可达 0.13 rad/s，会污染摩擦/k 的拟合）；euler = 原仓库同款消融")
+    g.add_argument("--checkpoint-every", type=int, default=FitConfig.checkpoint_every,
+                   help="★ 长跑断点: 每 N 个 epoch 把当前 18 参写一份到 `<--out>.epXXXXXX`"
+                        "（格式与 --out 相同，可直接当 --params / --init-vector 用）。"
+                        "0 = 关闭（默认）。**长跑强烈建议开**: 训练 loss 是随机 0.1 s 片段、"
+                        "不是可靠的选择指标，最优解常在中间（实测 200k/3e-4 这种跑法尤其）。")
     g.add_argument("--cos-decay-steps", type=int, default=FitConfig.cos_decay_steps,
                    help="★ **最后 N 步**用余弦把学习率从 `--lr` 衰减到 0（前面保持常数）。"
                         "典型: `--epochs=2000 --lr=1e-2 --cos-decay-steps=1000` = 前 1000 epoch "
@@ -2849,20 +2897,23 @@ def _build_argparser():
                     help="平衡点 θ* 在当前零点坐标系里的读数（度）。0 = 零点恰好设在平衡点上；"
                          "手动挪过零点就填实际读数。仅 --p-constraint=along_d 时有效")
     # ── ★ 新增（3-DOF 背隙/电机侧）参数的**初值**（全都进模型一起拟合，没有特殊处理）──
-    ap.add_argument("--backlash-delta", type=float, default=0.0873,
-                    help="δ 初值 (rad)。不给默认、也不自动估时就用手动固定值；"
-                         "想用数据粗估可传 --backlash-delta=auto（精估见 calibrate_backlash.py）")
-    ap.add_argument("--backlash-k", type=float, default=200.0,
-                    help="k 初值 (N·m/rad)。注意 10 ms 步长下的显式稳定上限 "
-                         "k_max = μ_red·(2.78/hh)²（substeps=4 ⇒ hh=2.5ms ⇒ ≈6750）")
-    ap.add_argument("--backlash-c", type=float, default=2.0, help="c 初值 (N·m·s/rad)")
-    ap.add_argument("--backlash-through", type=float, default=0.002,
-                    help="γ 初值（死区直通线性项 τ_t += k·γ·Δ；给死区内部提供梯度）")
-    ap.add_argument("--jmotor", type=float, default=0.006, help="J_motor 初值 (kg·m²)")
-    ap.add_argument("--fc-motor", type=float, default=0.030, help="电机侧库仑摩擦初值 (N·m)")
-    ap.add_argument("--fv-motor", type=float, default=0.010, help="电机侧粘滞摩擦初值 (N·m·s/rad)")
-    ap.add_argument("--backlash-beta", type=float, default=0.0,
-                    help="β 初值 (rad)（死区中心偏置；实机由估计器在线给出，离线一并拟合）")
+    # ★★ 这 7 个"初值覆盖"开关**默认 None = 不覆盖**（用 `--init-vector` / 头文件那组）。
+    #    以前这里是硬编码的占位值（0.0873/200/2.0/0.006/0.030/0.010），会**无条件覆盖**
+    #    `--init-vector` 的第 8~14 项（实测踩过: 传了 --init-vector 但 δ/k/c/电机摩擦仍从旧值出发）。
+    ap.add_argument("--backlash-delta", type=str, default=None,
+                    help="δ 初值 (rad)。不给 = 用 --init-vector / 头文件那组；"
+                         "给 `auto` = 从数据粗估（精估见 calibrate_backlash.py）；给数字 = 手动覆盖")
+    ap.add_argument("--backlash-k", type=float, default=None,
+                    help="k 初值 (N·m/rad)（不给 = 用 --init-vector/头文件）。注意显式稳定上限 "
+                         "k_max = μ_red·(2.78/hh)²（substeps=4 ⇒ hh=2.5ms ⇒ ≈6124）")
+    ap.add_argument("--backlash-c", type=float, default=None, help="c 初值 (N·m·s/rad)（不给 = 用 --init-vector/头文件）")
+    ap.add_argument("--backlash-through", type=float, default=None,
+                    help="γ 初值（死区直通线性项；不给 = 用 --init-vector/头文件）")
+    ap.add_argument("--jmotor", type=float, default=None, help="J_motor 初值 (kg·m²)（不给 = 用 --init-vector/头文件）")
+    ap.add_argument("--fc-motor", type=float, default=None, help="电机侧库仑摩擦初值 (N·m)（同上）")
+    ap.add_argument("--fv-motor", type=float, default=None, help="电机侧粘滞摩擦初值 (N·m·s/rad)（同上）")
+    ap.add_argument("--backlash-beta", type=float, default=None,
+                    help="β 初值 (rad)（不给 = 用 --init-vector/头文件；实机由估计器在线给出，离线一并拟合）")
     ap.add_argument("--freeze-backlash-through", action=argparse.BooleanOptionalAction,
                     default=FitConfig.freeze_backlash_through,
                     help="★ **默认开**: 把背隙直通项 γ（参数 11）冻结在 --backlash-through 给的初值"
@@ -2980,26 +3031,26 @@ def main(argv=None) -> int:
     patterns = args.data or ["data/sysid/*.npz"]
     # ── 新增参数的初值（全部参与拟合；这里只是**初值**）──
     phi0 = default_param_vector()
+    # ★ 只在**显式给出**对应 CLI 时才覆盖初值（默认 None ⇒ 用 phi0 已有的值 =
+    #   --init-vector 或 planar_yaw_params.h 那组），否则 --init-vector 的第 8~14 项会被吃掉。
     d_init = args.backlash_delta
-    if isinstance(d_init, str):
-        if d_init.strip().lower() in ("auto", ""):
+    if d_init is not None:
+        if isinstance(d_init, str) and d_init.strip().lower() in ("auto", ""):
             d_init = _estimate_backlash_delta(patterns)
             if d_init > 0.0:
                 print(f"[backlash] 从数据粗估 δ 初值 = {d_init:.6f} rad "
                       f"({math.degrees(d_init):.3f}°)（★ 精确标定用 calibrate_backlash.py）")
             else:
-                print("[backlash] 数据里没有电机侧/云台侧两列 ⇒ δ 初值用默认 0.0873 rad")
-                d_init = 0.0873
-        else:
-            d_init = float(d_init)
-    phi0[8] = float(d_init)
-    phi0[9] = float(args.backlash_k)
-    phi0[10] = float(args.backlash_c)
-    phi0[11] = float(args.backlash_through)
-    phi0[12] = float(args.jmotor)
-    phi0[13] = float(args.fc_motor)
-    phi0[14] = float(args.fv_motor)
-    phi0[15] = float(args.backlash_beta)
+                print(f"[backlash] 数据里没有电机侧/云台侧两列 ⇒ δ 初值保持 phi0 = "
+                      f"{phi0[8]:.6f} rad")
+                d_init = None
+        if d_init is not None:
+            phi0[8] = float(d_init)
+    for _i, _v in ((9, args.backlash_k), (10, args.backlash_c), (11, args.backlash_through),
+                   (12, args.jmotor), (13, args.fc_motor), (14, args.fv_motor),
+                   (15, args.backlash_beta)):
+        if _v is not None:
+            phi0[_i] = float(_v)
 
     segs = load_segments(patterns, dt_override=args.dt)
     segs = truncate_hold_segments(segs, args.hold_max_sec)
@@ -3061,6 +3112,7 @@ def main(argv=None) -> int:
                     epochs=args.epochs, seg_steps=args.seg_steps, loss_mode=args.loss_mode,
                     integrator=args.integrator, lr_schedule=args.lr_schedule,
                     cos_decay_steps=args.cos_decay_steps,
+                    checkpoint_every=args.checkpoint_every, checkpoint_prefix=(args.out or ""),
                     init_vector=(phi0 if args.init_vector is None
                                  else _parse_vecN(args.init_vector, "--init-vector")),
                     truth_vector=(None if args.truth_params is None
@@ -3182,11 +3234,7 @@ def main(argv=None) -> int:
                   file=sys.stderr)
 
     if args.out:
-        with open(args.out, "w") as fh:
-            fh.write("# identify_params_torch.py 输出（输出误差法）\n")
-            fh.write(f"# 配方: {res.recipe}\n")
-            for nm, v in zip(PARAM_NAMES, res.phi):
-                fh.write(f"{nm} = {v:.9f}\n")
+        write_params_file(args.out, res.phi, recipe=res.recipe)
         print(f"[out] 已写入 {args.out}")
     return 0
 

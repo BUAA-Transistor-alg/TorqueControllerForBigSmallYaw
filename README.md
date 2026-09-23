@@ -457,7 +457,7 @@ s.t.   |u| ≤ max_torque（内部 clamp，硬限位）
 | PC→MCU (41B，含 CRC) | `0x42 0x52 0x03` + size(36) + payload + CRC8 | `auto_aim_enable, fire, pitch_target_angle`、**大 yaw**: `mode, θ*, ω*, τ`、**小 yaw**: `mode, θ*, ω*, τ` |
 | MCU→PC (**47B**，含 CRC) | `0x42 0x52 0x03` + size(42) + payload + CRC8 | `bullet_velocity, pitch_angle`、**大 yaw**: `angle(double,多圈), omega`、**小 yaw**: `angle(相对), omega`、`chassis_imu_yaw/omega`、`mark, color, auto_aim_switch,` 两个温度、**`mcu2_seq`（MCU2 新样本序号）** |
 
-- 两个 yaw 关节各有**模式位**: `0 = 仅力矩`，`1 = 力矩 + 电控位置/速度内环`
+- 两个 yaw 关节各有**模式位**: **`1 = 仅力矩`**，`0 = 力矩 + 电控位置/速度内环`（2026-09-23 翻转）
   （`τ = kp(θ*−θ) + kd(ω*−ω) + τ_ff`）；
 - `pitch_angle` 为原始语义，由上位机 `McuDataPreprocessor` 做线性映射（电控侧不做）；
 - yaw 轴的"计数→弧度、多圈累计"仍由电控完成；映射参数保留在上位机（`recv_big_yaw_scale/offset` 等）；

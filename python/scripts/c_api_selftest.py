@@ -165,7 +165,7 @@ def test_low_level_handle() -> None:
               est.big_enc_age < 0.0 and est.chassis_imu_age < 0.0,
               f"big_enc_age={est.big_enc_age}, chassis_imu_age={est.chassis_imu_age}")
 
-        sent = comm.send_to_mcu(auto_aim_enable=1, yaw_big_mode=0,
+        sent = comm.send_to_mcu(auto_aim_enable=1, yaw_big_mode=1,   # 1 = 仅力矩
                                 yaw_big_target_angle=0.0, yaw_big_torque=0.0)
         check("send_to_mcu() 无硬件时返回 False（不抛异常）", sent is False)
         check("send_to_imu() 无硬件时返回 False（不抛异常）",

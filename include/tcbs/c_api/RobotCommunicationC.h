@@ -455,7 +455,7 @@ int tcbs_robot_comm_get_latest_data(TcbsRobotCommHandle* handle, TcbsRobotLatest
 int tcbs_robot_comm_get_estimate(TcbsRobotCommHandle* handle, TcbsRobotEstimate_C* out);
 
 // 发送 MCU 指令包（内部按映射参数预处理 + 计算 CRC；返回 1 = 发送成功，0 = 失败）
-// yaw_*_mode: 0 = 仅力矩，1 = 力矩 + 电控位置/速度内环（见 mcu::YawMode）
+// yaw_*_mode: **1 = 仅力矩**，0 = 力矩 + 电控位置/速度内环（见 mcu::YawMode；2026-09-23 翻转）
 int tcbs_robot_comm_send_to_mcu(TcbsRobotCommHandle* handle,
                            uint8_t auto_aim_enable,          // 自瞄总开关
                            uint8_t fire,                     // 火控

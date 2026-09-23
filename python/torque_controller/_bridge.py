@@ -798,13 +798,14 @@ class TcbsRobotCommunication:
 
     # ── 发送 ──
     def send_to_mcu(self, auto_aim_enable=0, fire=0, pitch_target_angle=0.0,
-                    yaw_big_mode=0, yaw_big_target_angle=0.0,
+                    yaw_big_mode=1, yaw_big_target_angle=0.0,
                     yaw_big_target_velocity=0.0, yaw_big_torque=0.0,
-                    yaw_small_mode=0, yaw_small_target_angle=0.0,
+                    yaw_small_mode=1, yaw_small_target_angle=0.0,
                     yaw_small_target_velocity=0.0, yaw_small_torque=0.0) -> bool:
         """发送 MCU 指令包（内部按映射参数预处理 + 计算 CRC）。
 
-        yaw_*_mode: 0 = 仅力矩，1 = 力矩 + 电控位置/速度内环。
+        yaw_*_mode: **1 = 仅力矩**，0 = 力矩 + 电控位置/速度内环（2026-09-23 翻转）。
+        ★ 本方法**默认就是 1 = 仅力矩**（安全默认: 不启用 MCU 内环，目标角/角速度仍照传但电控不用）。
         返回 True = 写串口成功；False = 串口未打开/写失败。
         """
         lib = _require_lib()

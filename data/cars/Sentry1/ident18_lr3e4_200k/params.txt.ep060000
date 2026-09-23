@@ -1,0 +1,20 @@
+# identify_params_torch.py 输出（输出误差法）
+# 配方: checkpoint @ epoch 60000/200000
+Jbig_eff = 0.051563989
+Js = 0.004558195
+Px = 0.000156284
+Py = 0.021919764
+fc_big = 0.249703406
+fv_big = 0.157443743
+fc_small = 0.019068565
+fv_small = 0.043930219
+backlash_delta = 0.002498292
+backlash_k = 30.127381770
+backlash_c = 7.755597119
+backlash_through = 0.002000000
+Jmotor = 0.023754141
+fc_motor = 0.033771139
+fv_motor = 0.050210709
+backlash_beta = 0.000000000
+Pbx = -0.008330238
+Pby = 0.123787736

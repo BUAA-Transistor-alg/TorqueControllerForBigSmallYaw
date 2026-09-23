@@ -158,8 +158,8 @@ void YawTask_1kHz(void) {
 2. **CRC8**：查表法，初值 `0xFF`，覆盖范围为「整帧 − 1 字节」（即不含 CRC 自身），
    与 `CRC8_Check_Sum(ptr, sizeof(packet) - 1)` 一致。CRC 表已与
    `src/communication/CRC.cpp` 逐项核对一致。
-3. **模式位语义**：`0 = 仅力矩`，`1 = 力矩 + 位置/速度内环`。
-   注意这与旧版单轴示例的 `yaw_torque_only_mode`（1 = 仅力矩）**相反**。
+3. **模式位语义**（★ 2026-09-23 翻转）：**`1 = 仅力矩`**，`0 = 力矩 + 位置/速度内环`。
+   与旧版单轴示例的 `yaw_torque_only_mode`（1 = 仅力矩）**一致**了。
 4. **double 字段**（`yaw_big_target_angle`、`yaw_big_angle`）必须用 `memcpy`
    按 8 字节存取，不要直接对 packed 结构体成员取地址/赋值。
 5. **前导两边相同**（都是 `0x42 0x52 0x03`），靠 `data_size` 区分收发方向；
