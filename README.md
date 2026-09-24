@@ -103,6 +103,23 @@ python3 python/scripts/collect_sysid.py --tag=small --segments=6 --tilted
 PYTHONPATH=python/scripts python3 -m identify_params --data='data/sysid/*.npz' \
         --truth-params=<若有真值> --epochs=1000
 # ③ 结果填进 include/tcbs/mpc/planar_yaw_params.h 的 defaultModelParams()（或运行时 setModelParams）
+
+# ②' 无梯度 **CMA-ES**（可选；同一个 `--out` / 同一套参数与数据口径）
+#   · 默认前向 = **手写 C++**（fast_sim，分块向量化 + std::thread，满线程）；
+#     `--forward=numpy|torch|auto` 可切换（torch 后端默认 1 线程：多线程反而更慢）
+#   · 损失只有一处实现（identify_params/loss.py）⇒ 与前向无关、两条优化路径共用
+#   · `--max-sigma` 是**搜索盒**（raw 空间 ±m·σ）：不加盒会在病态目标上飘进非物理区
+#     （实测跑出 J=4.3e4、fc=3e4、δ=8.8 rad 而 RMSE 几乎没改善）
+#   · `--windows-per-seg=3` = 每段取段首/中/尾三个窗口（只取 1 个会把目标限制在段首 100 点）
+PYTHONPATH=python/scripts python3 -m identify_params.cmaes_fit \
+        --data='data/cars/Sentry1/sysid/*.npz' --hold-max-sec=3 \
+        --window-len=100 --windows-per-seg=3 --max-segs=200 \
+        --generations=3000 --popsize=16 --sigma=0.15 --max-sigma=20 \
+        --eval-max-segs=40 --checkpoint-every=500 \
+        --out=data/cars/Sentry1/ident/params_cmaes.txt \
+        --plot-out=data/cars/Sentry1/ident/ident_cmaes
+# ↑ --max-segs 控制目标开销（CMA-ES 要评估几万次）；C++ 精度自检:
+#   python3 -m identify_params.fast_sim.selftest
 ```
 
 要点：**两轴力矩都必须记录**（被保持轴的力矩是 `P` 的观测量）；**小 yaw 要尽量用满行程**；

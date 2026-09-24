@@ -11,3 +11,6 @@ __pycache__/
 #   data/archive/<日期>_<用途>/       历史归档（含仿真数据集与辨识结果）
 #   data/sysid/                       当前工作区（正在采集/分析的数据）
 # 只有 build/ 与 python 缓存不入库。
+
+# 手写 C++ 快速前向（fast_sim）的编译产物：本机编译，不入库
+python/scripts/identify_params/fast_sim/_build/

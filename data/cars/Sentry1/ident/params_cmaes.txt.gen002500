@@ -1,0 +1,20 @@
+# identify_params（输出误差法）输出
+# 配方: CMA-ES checkpoint @ gen 2500
+Jbig_eff = 25042.301122130
+Js = 0.046281163
+Px = -0.000380649
+Py = 0.042818208
+fc_big = 17666.339251685
+fv_big = 0.000000000
+fc_small = 0.020301500
+fv_small = 0.035240673
+backlash_delta = 8.832007166
+backlash_k = 2.157393169
+backlash_c = 0.013031117
+backlash_through = 0.002000000
+Jmotor = 0.005739213
+fc_motor = 0.000000000
+fv_motor = 0.000000000
+backlash_beta = 0.000000000
+Pbx = -1151.730985677
+Pby = 4613.186864730

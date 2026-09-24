@@ -32,13 +32,18 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from .data import ask_skip_segment, state_arrays
+from .loss import pair_loss
 from .model import DifferentiableSimulator, simulate_backlash_np
 from .params import (
     AXIS_BIG,
     AXIS_CHANNELS,
     AXIS_SMALL,
     EXO_ZERO,
+    EXTRA_PARAM_NAMES,
+    NCORE,
+    NPARAM,
     PARAM_NAMES,
+    PARAM_UNITS,
     PlanarParams,
     ParamGroups,
     Exo,
@@ -386,6 +391,44 @@ def _config_summary(cfg: FitConfig, layout: "ParamGroups", W: int, dt: float,
                             if cfg.init_vector is None else "用户 --init-vector（整体替换）")}
 
 
+def format_param_table(phi, phi0) -> list:
+    """参数报告表（初值/估计/变化，按物理三组分段）—— Adam CLI 与 CMA-ES CLI 共用。"""
+    phi = np.asarray(phi, dtype=np.float64)
+    phi0 = np.asarray(phi0, dtype=np.float64)
+    out = [f"{'#':>2} {'参数':<16} {'初值':>12} {'估计':>12} {'变化':>12}  单位",
+           f"{'':>2} ---- 平面 8 参（云台/小 yaw 子块）----"]
+    for j in range(NCORE):
+        out.append(f"{j:>2} {PARAM_NAMES[j]:<16} {phi0[j]:>12.6f} {phi[j]:>12.6f} "
+                   f"{phi[j] - phi0[j]:>+12.6f}  {PARAM_UNITS[j]}")
+    out.append(f"{'':>2} ---- ★ 大 yaw 背隙 / 电机侧 ----")
+    for j in range(NCORE, NCORE + len(EXTRA_PARAM_NAMES)):
+        extra = f"   (= {math.degrees(phi[j]):.3f}°)" if j == 8 else ""
+        out.append(f"{j:>2} {PARAM_NAMES[j]:<16} {phi0[j]:>12.6f} {phi[j]:>12.6f} "
+                   f"{phi[j] - phi0[j]:>+12.6f}  {PARAM_UNITS[j]}{extra}")
+    out.append(f"{'':>2} ---- ★ 大 yaw 侧一阶矩 Pb（只在倾斜 + 大 yaw 转动时可辨识）----")
+    for j in range(NCORE + len(EXTRA_PARAM_NAMES), NPARAM):
+        out.append(f"{j:>2} {PARAM_NAMES[j]:<16} {phi0[j]:>12.6f} {phi[j]:>12.6f} "
+                   f"{phi[j] - phi0[j]:>+12.6f}  {PARAM_UNITS[j]}")
+    return out
+
+
+def format_header_snippet(phi) -> list:
+    """可直接粘进 `include/tcbs/mpc/planar_yaw_params.h` 的几行。"""
+    p = np.asarray(phi, dtype=np.float64)
+    return [
+        f"  p.Jbig_eff = {p[0]:.6f};  p.Js = {p[1]:.6f};",
+        f"  p.Px = {p[2]:.6f};  p.Py = {p[3]:.6f};",
+        f"  p.fcBig = {p[4]:.6f};  p.fvBig = {p[5]:.6f};",
+        f"  p.fcSmall = {p[6]:.6f};  p.fvSmall = {p[7]:.6f};",
+        f"  p.backlash_delta = {p[8]:.6f};  p.backlash_k = {p[9]:.4f};",
+        f"  p.backlash_c = {p[10]:.4f};  p.backlash_through = {p[11]:.6f};",
+        f"  p.Jmotor = {p[12]:.6f};  p.fcMotor = {p[13]:.6f};",
+        f"  p.fvMotor = {p[14]:.6f};  // β 由估计器在线给（离线拟合值 {p[15]:+.6f} 仅供参考）",
+        f"  p.Pbx = {p[16]:.6f};  p.Pby = {p[17]:.6f};"
+        f"  // 大 yaw 侧一阶矩（只有倾斜数据才可辨识）",
+    ]
+
+
 def _fmt_vec(phi) -> str:
     vals = [float(v) for v in phi]
     return ("[" + " ".join(f"{v:+.5f}" for v in vals) + "]")
@@ -403,6 +446,155 @@ def loss_trend(loss_history) -> dict:
             "ratio": (tail / head) if head > 0 else float("nan"),
             "decreased": bool(tail < head),
             "min": float(np.min(h)), "final": float(h[-1])}
+
+
+# ============================================================================
+# 拟合上下文（★ Adam 训练器与 CMA-ES 优化器**共用**的一份准备逻辑）
+# ============================================================================
+@dataclass
+class FitContext:
+    """一次拟合所需的全部数据/模型对象（数据打包 + β + 固定参数 + 可微模型）。
+
+    ``train.fit_params_torch``（Adam）与 ``cmaes_fit``（CMA-ES）都从这里拿输入，
+    保证两条优化路径用的是**同一份**打包/连续化/β/参数化/模型语义。
+    """
+
+    segs: list
+    batch: dict
+    dtype: object
+    dev: object
+    layout: "ParamGroups"
+    base_phi: PlanarParams
+    phi0: np.ndarray
+    sim: "DifferentiableSimulator"
+    dt: float
+    L: int
+    W: int
+    lens: list
+    chan_sel: tuple
+    tau_t: object
+    th_t: object
+    dth_t: object
+    mask_t: object
+    q0_all: object
+    qd0_all: object
+    w_axis_all: object
+    grav_all: object
+    beta_all: object
+    seq_var: object
+    use_beta_col: bool
+    beta_tag: str
+    raw: object
+    v0_free: object
+    n_free: int
+    summary: dict
+
+
+def build_fit_context(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZERO,
+                      dtype=None, dev=None, seed: bool = True,
+                      what: str = "训练集", honor_windows: bool = False) -> FitContext:
+    """把数据段 + 配置 + 几何 → 可直接喂给优化器的上下文（Adam / CMA-ES 共用）。
+
+    做这几件事（顺序与原 `fit_params_torch` 完全一致，数值不变）:
+      ① 只对参与拟合的通道计误差（fit_axis）；② β 必需校验/提示跳过；
+      ③ 数据打包成 batch-first 窗口张量；④ 初值（唯一来源 = `PARAM_SPECS`）；
+      ⑤ P 方向约束 → 固定参数 → `ParamGroups`；⑥ seq_const/seq_var 与可微模型。
+    """
+    if torch is None:
+        raise RuntimeError(f"需要 torch: {_TORCH_IMPORT_ERROR}")
+    if not segs:
+        raise ValueError("没有可用的数据段")
+    dtype = dtype or (cfg.dtype or torch.float64)
+    dev = torch.device(dev or cfg.device)
+    if seed:
+        torch.manual_seed(cfg.seed)
+        np.random.seed(cfg.seed)
+
+    # ① 只对参与拟合的状态通道计误差（big ⇒ 电机+云台；small ⇒ 小 yaw；both ⇒ 3 个通道）
+    chan_sel = ((0, 1, 2) if cfg.fit_axis == "both"
+                else AXIS_CHANNELS[AXIS_BIG if cfg.fit_axis == "big" else AXIS_SMALL])
+
+    # ② Adam 新配方 = 每段一个 sample（不分窗、不 mini-batch）；显式给了分窗设置时提示被忽略。
+    #    ★ 无梯度优化器（CMA-ES）用**固定窗口**当目标 ⇒ honor_windows=True 时**不**忽略窗口设置。
+    pack_cfg = cfg
+    if (not honor_windows and not cfg.use_legacy_path
+            and (cfg.window_len > 0 or cfg.windows_per_seg > 1
+                 or (cfg.batch_size > 0 and not cfg.batch_segments))):
+        if cfg.verbose:
+            print("[torch] ★ 新配方按「整段 = 一个 sample」采样，忽略 "
+                  f"window_len={cfg.window_len}, windows_per_seg={cfg.windows_per_seg}, "
+                  f"batch_size={cfg.batch_size}（要旧配方请用 --iters>0 或 --legacy-recipe）")
+        pack_cfg = replace(cfg, window_len=0, windows_per_seg=1, batch_size=0)
+
+    # ── ★ β: **必需数据**，永远从所选帧的数据列来（--beta-mode=fit 已移除）──
+    #   缺 β 的段用 [Y/n] 提示**跳过**（与 β 连续性校验同一套），不再直接报错。
+    if cfg.beta_mode not in ("auto", "column", "true"):
+        raise ValueError("beta_mode 必须是 auto / column / true")
+    segs = filter_beta_segments(segs, cfg.state_mode, cfg.beta_mode, what)
+    if not segs:
+        raise ValueError(f"没有可用的数据段（{what}全部因缺 β 被跳过）")
+    if cfg.eval_segs:
+        cfg.eval_segs = filter_beta_segments(cfg.eval_segs, cfg.state_mode, cfg.beta_mode,
+                                             "留出集")
+    beta_tag = beta_source(segs[0], cfg.state_mode, cfg.beta_mode)[1]
+    use_beta_col = True
+    cfg.use_beta_column = True
+
+    batch = _pack_windows(segs, pack_cfg, chan_sel, dtype, dev)
+    dt, L, W = batch["dt"], batch["L"], batch["W"]
+    lens = batch["lens"]
+
+    # ③ 初值（★ 唯一来源 = 参数表 PARAM_SPECS；`--init-vector` 是整体替换）
+    phi0 = (default_param_vector() if cfg.init_vector is None
+            else np.asarray(cfg.init_vector, dtype=np.float64).copy())
+
+    # ④ P 的方向约束（可选）: P = |P|·R(−θ*)·d̂ ⇒ Px/Py 退化成 real 组末尾一个派生标量
+    mode = str(cfg.p_constraint).replace("-", "_")
+    if mode not in ("free", "along_d", "zero"):
+        raise ValueError("p_constraint 必须是 free / along_d / zero")
+    p_along = None
+    if mode == "along_d":
+        p_along = p_direction(base.dx, base.dy, cfg.p_zero_angle_deg)
+        print(f"[torch] P 方向约束: θ* = {cfg.p_zero_angle_deg:+.2f}° ⇒ "
+              f"P ∝ ({p_along[0]:+.5f}, {p_along[1]:+.5f})")
+
+    # ⑤ 固定参数 = 冻结的那些（★ 不属于"全体实数/正数"任何一组）
+    fixed = resolve_fixed_names(cfg.fit_axis, cfg.freeze_params,
+                                cfg.freeze_backlash_through, cfg.p_constraint, use_beta_col)
+    base_phi = base.with_vector(phi0)          # 固定参数取初值
+    layout = ParamGroups(base_phi, fixed_names=fixed, p_along_d=p_along)
+    if layout.fixed_names and cfg.verbose:
+        print("[torch] ★ 固定参数（不参与优化，恒保持初值）: "
+              + ", ".join(f"{n}={layout.fixed_value(n):.6g}" for n in layout.fixed_names))
+
+    raw = torch.tensor(layout.to_raw_init(phi0), dtype=dtype, device=dev, requires_grad=True)
+    # ★ 每段的初始角速度自由量: 3-DOF ⇒ [W,3]（旧脚本这里是 [W,2]，状态从 2-DOF 扩到 3-DOF
+    #   之后没同步，导致 `--free-init-vel` 一开就崩；这里修正为 3 个通道）。
+    v0_free = (torch.zeros(W, 3, dtype=dtype, device=dev, requires_grad=True)
+               if cfg.free_init_vel else None)
+
+    tau_t, th_t, dth_t = batch["tau"], batch["theta"], batch["dtheta"]
+    mask_t, q0_all, qd0_all, w_axis_all = (batch["mask"], batch["q0"], batch["qd0"],
+                                           batch["w_axis"])
+    grav_all = batch["grav"] if batch["has_gravity"] else None
+    beta_all = batch["beta"] if use_beta_col else None
+
+    # ⑥ seq_const / seq_var 打包成模型的输入契约（力矩在 seq_var 头两个通道）
+    seq_var = DifferentiableSimulator.pack_seq_var(tau_t[..., 0], tau_t[..., 1],
+                                                   grav_all, beta_all)
+    sim = DifferentiableSimulator(dt=dt, substeps=cfg.substeps, integrator=cfg.integrator,
+                                  layout=layout, base=base_phi, beta_from_input=use_beta_col)
+    n_free = layout.n_learnable
+    summary = _config_summary(cfg, layout, W, dt, n_free)
+    return FitContext(
+        segs=segs, batch=batch, dtype=dtype, dev=dev,
+        layout=layout, base_phi=base_phi, phi0=phi0, sim=sim,
+        dt=dt, L=L, W=W, lens=lens, chan_sel=chan_sel,
+        tau_t=tau_t, th_t=th_t, dth_t=dth_t, mask_t=mask_t,
+        q0_all=q0_all, qd0_all=qd0_all, w_axis_all=w_axis_all,
+        grav_all=grav_all, beta_all=beta_all, seq_var=seq_var,
+        use_beta_col=use_beta_col, beta_tag=beta_tag, raw=raw, v0_free=v0_free,
+        n_free=n_free, summary=summary)
 
 
 # ============================================================================
@@ -429,86 +621,20 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
         raise RuntimeError(f"需要 torch: {_TORCH_IMPORT_ERROR}")
     if not segs:
         raise ValueError("没有可用的数据段")
-    dtype = cfg.dtype or torch.float64
-    dev = torch.device(cfg.device)
     t_start = time.time()
 
-    torch.manual_seed(cfg.seed)
-    np.random.seed(cfg.seed)
+    # ★ 准备逻辑（打包 / β / 固定参数 / 模型）与 CMA-ES 优化器**共用同一份**
+    ctx = build_fit_context(segs, cfg, base, exo)
+    segs, batch, layout, base_phi, phi0 = ctx.segs, ctx.batch, ctx.layout, ctx.base_phi, ctx.phi0
+    sim, dt, L, W, lens = ctx.sim, ctx.dt, ctx.L, ctx.W, ctx.lens
+    raw, v0_free = ctx.raw, ctx.v0_free
+    dev = ctx.dev
+    th_t, dth_t = ctx.th_t, ctx.dth_t
+    mask_t, w_axis_all = ctx.mask_t, ctx.w_axis_all
+    q0_all, qd0_all = ctx.q0_all, ctx.qd0_all
+    seq_var, beta_tag = ctx.seq_var, ctx.beta_tag
+    n_free, summary = ctx.n_free, ctx.summary
 
-    # 只对参与拟合的状态通道计误差（big ⇒ 电机+云台；small ⇒ 小 yaw；both ⇒ 3 个通道）
-    chan_sel = ((0, 1, 2) if cfg.fit_axis == "both"
-                else AXIS_CHANNELS[AXIS_BIG if cfg.fit_axis == "big" else AXIS_SMALL])
-
-    # ★ 新配方 = 每段一个 sample（不分窗、不 mini-batch）；显式给了分窗设置时提示被忽略
-    pack_cfg = cfg
-    if not cfg.use_legacy_path and (cfg.window_len > 0 or cfg.windows_per_seg > 1
-                                    or (cfg.batch_size > 0 and not cfg.batch_segments)):
-        if cfg.verbose:
-            print("[torch] ★ 新配方按「整段 = 一个 sample」采样，忽略 "
-                  f"window_len={cfg.window_len}, windows_per_seg={cfg.windows_per_seg}, "
-                  f"batch_size={cfg.batch_size}（要旧配方请用 --iters>0 或 --legacy-recipe）")
-        pack_cfg = replace(cfg, window_len=0, windows_per_seg=1, batch_size=0)
-    # ── ★ β: **必需数据**，永远从所选帧的数据列来（--beta-mode=fit 已移除）──
-    #   缺 β 的段用 [Y/n] 提示**跳过**（与 β 连续性校验同一套），不再直接报错。
-    if cfg.beta_mode not in ("auto", "column", "true"):
-        raise ValueError("beta_mode 必须是 auto / column / true")
-    segs = filter_beta_segments(segs, cfg.state_mode, cfg.beta_mode, "训练集")
-    if not segs:
-        raise ValueError("没有可用的数据段（所有段都因缺 β 被跳过）")
-    if cfg.eval_segs:
-        cfg.eval_segs = filter_beta_segments(cfg.eval_segs, cfg.state_mode, cfg.beta_mode,
-                                            "留出集")
-    beta_tag = beta_source(segs[0], cfg.state_mode, cfg.beta_mode)[1]
-    use_beta_col = True
-    cfg.use_beta_column = True
-
-    batch = _pack_windows(segs, pack_cfg, chan_sel, dtype, dev)
-    dt, L, W = batch["dt"], batch["L"], batch["W"]
-    lens = batch["lens"]
-
-    # ★ 初值（不做任何 clip —— 正参数取对数时若初值非正，只用 1e-6 作对数**起点**）
-    phi0 = (default_param_vector() if cfg.init_vector is None
-            else np.asarray(cfg.init_vector, dtype=np.float64).copy())
-
-    # ── P 的方向约束（可选）: P = |P|·R(−θ*)·d̂ ⇒ Px/Py 退化成 real 组末尾一个派生标量 ──
-    mode = str(cfg.p_constraint).replace("-", "_")
-    if mode not in ("free", "along_d", "zero"):
-        raise ValueError("p_constraint 必须是 free / along_d / zero")
-    p_along = None
-    if mode == "along_d":
-        p_along = p_direction(base.dx, base.dy, cfg.p_zero_angle_deg)
-        print(f"[torch] P 方向约束: θ* = {cfg.p_zero_angle_deg:+.2f}° ⇒ "
-              f"P ∝ ({p_along[0]:+.5f}, {p_along[1]:+.5f})")
-
-    # ── ★ 固定参数 = 冻结的那些（★ 不属于"全体实数/正数"任何一组）──
-    fixed = resolve_fixed_names(cfg.fit_axis, cfg.freeze_params,
-                                cfg.freeze_backlash_through, cfg.p_constraint, use_beta_col)
-    base_phi = base.with_vector(phi0)         # 固定参数取初值
-    layout = ParamGroups(base_phi, fixed_names=fixed, p_along_d=p_along)
-    if layout.fixed_names and cfg.verbose:
-        print("[torch] ★ 固定参数（不参与优化，恒保持初值）: "
-              + ", ".join(f"{n}={layout.fixed_value(n):.6g}" for n in layout.fixed_names))
-
-    raw = torch.tensor(layout.to_raw_init(phi0), dtype=dtype, device=dev, requires_grad=True)
-    # ★ 每段的初始角速度自由量: 3-DOF ⇒ [W,3]（旧脚本这里是 [W,2]，状态从 2-DOF 扩到 3-DOF
-    #   之后没同步，导致 `--free-init-vel` 一开就崩；这里修正为 3 个通道）。
-    v0_free = (torch.zeros(W, 3, dtype=dtype, device=dev, requires_grad=True)
-               if cfg.free_init_vel else None)
-
-    tau_t, th_t, dth_t = batch["tau"], batch["theta"], batch["dtheta"]
-    mask_t, q0_all, qd0_all, w_axis_all = (batch["mask"], batch["q0"], batch["qd0"],
-                                           batch["w_axis"])
-    grav_all = batch["grav"] if batch["has_gravity"] else None
-    beta_all = batch["beta"] if use_beta_col else None
-
-    # ★ seq_const / seq_var 打包成新模型的输入契约（力矩在 seq_var 头两个通道）
-    seq_var = DifferentiableSimulator.pack_seq_var(tau_t[..., 0], tau_t[..., 1],
-                                                   grav_all, beta_all)
-    sim = DifferentiableSimulator(dt=dt, substeps=cfg.substeps, integrator=cfg.integrator,
-                                  layout=layout, base=base_phi, beta_from_input=use_beta_col)
-
-    huber = torch.nn.functional.huber_loss
     loss_mode = cfg.loss_mode
 
     # ── 物理参数 / 张量辅助 ──
@@ -557,38 +683,15 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
         pos, vel = sim(params_b(int(wid.numel())), seq_const_at(wid, starts), sv)
         return torch.stack(pos, dim=-1), torch.stack(vel, dim=-1)
 
-    def _weighted(term, ax_w, mask):
-        """按"轴权重（+可选有效点 mask）"归约成标量。term [B,T,3]，ax_w [B,3]。
+    # ★ 损失本体只在 `loss.py` 定义一次（角度不 wrap、两项等权 / Huber）；
+    #   这里只负责"取哪一段数据、怎么归约"。
+    _loss_kw = dict(loss_mode=loss_mode, huber_delta=cfg.huber_delta,
+                    vel_weight=cfg.vel_weight, vel_huber_delta=cfg.vel_huber_delta)
 
-        `ax_w` 的每一行只对**参与拟合的轴**给非零权重且和为 1 ⇒ 归约后 = 所选轴上的**平均**。
-        mask=None（新配方的 10 步片段，无 padding）⇒ 按点数平均；否则按有效点数平均。
-        """
-        if mask is None:
-            return (term * ax_w[:, None, :]).sum() / (term.shape[0] * term.shape[1])
-        w = mask[:, :, None] * ax_w[:, None, :]
-        return (term * w).sum() / mask.sum()
-
-    def _pair_loss(th_pred, dth_pred, th_true, dth_true, mask=None, ax_w=None):
-        """★ 损失: 角度误差 MSE（**不再 wrap**，要求对圈数负责）+ 角速度误差 MSE，等权相加。
-
-        角度序列在加载时已做过连续化（`continuous_angles`）、β 也做过圈数对齐
-        （`align_beta`），所以模型输出的绝对角与目标在同一分支上，直接用
-        ``θ_pred − θ_target`` 即可；这也是"模型必须对圈数负责"的来源。
-        loss_mode="huber" 时退回旧配方（Huber + 可选 vel_weight）。
-        """
-        err = th_pred - th_true                                  # ★ 不 wrap
-        verr = dth_pred - dth_true
-        if loss_mode == "mse":
-            pos = _weighted(err ** 2, ax_w, mask)
-            vel = _weighted(verr ** 2, ax_w, mask)
-            return pos + vel                                    # ★ 两项**等权**相加
-        pos_l = huber(err, torch.zeros_like(err), delta=cfg.huber_delta, reduction="none")
-        loss = _weighted(pos_l, ax_w, mask)
-        if cfg.vel_weight > 0.0:
-            vel_l = huber(verr, torch.zeros_like(verr), delta=cfg.vel_huber_delta,
-                          reduction="none")
-            loss = loss + cfg.vel_weight * _weighted(vel_l, ax_w, mask)
-        return loss
+    def _pair_loss(th_pred, dth_pred, th_true, dth_true, mask=None, ax_w=None,
+                   reduce="mean"):
+        return pair_loss(th_pred, dth_pred, th_true, dth_true, mask=mask, ax_w=ax_w,
+                         reduce=reduce, **_loss_kw)
 
     def _slice_loss(w: int, s: int, n: int):
         """★ 新配方的一个优化步: 第 w 个 sample 的 [s, s+n) 片段做一次可导前向仿真。"""
@@ -629,9 +732,6 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
                   f"{rm['motor_deg']:.3f}/{rm['platform_deg']:.3f}/{rm['small_deg']:.3f}"
                   f"  角速度 = {rm['motor_rate']:.4f}/{rm['platform_rate']:.4f}/"
                   f"{rm['small_rate']:.4f}")
-
-    n_free = layout.n_learnable
-    summary = _config_summary(cfg, layout, W, dt, n_free)
 
     if cfg.verbose:
         _grav = "带静态倾斜重力" if batch["has_gravity"] else "水平(重力=0)"
@@ -726,17 +826,9 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
                         ii = st[:, None] + torch.arange(seg_steps + 1, device=dev)[None, :]
                         b_th = th_t[wid[:, None], ii]
                         b_dth = dth_t[wid[:, None], ii]
-                        err = th_pred - b_th                      # ★ 不 wrap（对圈数负责）
-                        verr = dth_pred - b_dth
-                        wa = w_axis_all[wid]                        # [nb,3]
-                        if loss_mode == "mse":
-                            per = ((err ** 2 + verr ** 2) * wa[:, None, :]).sum(dim=(1, 2))
-                        else:
-                            pl = huber(err, torch.zeros_like(err), delta=cfg.huber_delta,
-                                       reduction="none")
-                            vl = huber(verr, torch.zeros_like(verr),
-                                       delta=cfg.vel_huber_delta, reduction="none")
-                            per = ((pl + cfg.vel_weight * vl) * wa[:, None, :]).sum(dim=(1, 2))
+                        # ★ 损失本体在 loss.py（不 wrap、两项等权 / Huber）；这里按样本归约
+                        per = _pair_loss(th_pred, dth_pred, b_th, b_dth,
+                                         ax_w=w_axis_all[wid], reduce="per_sample")
                         loss = per.mean() / float(seg_steps + 1)
                         opt.zero_grad(set_to_none=True)
                         loss.backward()

@@ -31,22 +31,13 @@ if __package__ in (None, ""):
     __package__ = "identify_params"
 
 import argparse
-import math
 import sys
 import time
 
 import numpy as np
 
 from .data import HOLD_KEEP_SEC, load_segments, seg_fingerprint, truncate_hold_segments
-from .params import (
-    EXTRA_PARAM_NAMES,
-    FRICTION_LAMBDA,
-    NCORE,
-    NPARAM,
-    PARAM_NAMES,
-    PARAM_UNITS,
-    PlanarParams,
-)
+from .params import FRICTION_LAMBDA, NPARAM, PlanarParams
 from .plotting import plot_convergence, plot_learning, plot_trajectory, resolve_plot_paths
 from .selftest import model_self_test
 from .train import (
@@ -56,6 +47,8 @@ from .train import (
     channel_rmse,
     filter_beta_segments,
     fit_params_torch,
+    format_header_snippet,
+    format_param_table,
     loss_trend,
     write_params_file,
 )
@@ -343,22 +336,8 @@ def main(argv=None) -> int:
     print(f"辨识结果（输出误差法, 段数={len(segs)}, 轴={cfg.fit_axis}）  用时 {res.seconds:.1f}s")
     print(f"配方: {res.recipe}；Adam/总步数={res.n_steps}；参数限位={res.config['limits']}")
     print(f"可学习参数分组: {res.config['param_space']}")
-    print(f"{'#':>2} {'参数':<16} {'初值':>12} {'估计':>12} {'变化':>12}  单位")
-    print(f"{'':>2} ---- 平面 8 参（云台/小 yaw 子块）----")
-    for j in range(NCORE):
-        print(f"{j:>2} {PARAM_NAMES[j]:<16} {res.phi0[j]:>12.6f} {res.phi[j]:>12.6f} "
-              f"{res.phi[j] - res.phi0[j]:>+12.6f}  {PARAM_UNITS[j]}")
-    print(f"{'':>2} ---- ★ 大 yaw 背隙 / 电机侧 ----")
-    for j in range(NCORE, NCORE + len(EXTRA_PARAM_NAMES)):
-        extra = ""
-        if j == 8:
-            extra = f"   (= {math.degrees(res.phi[j]):.3f}°)"
-        print(f"{j:>2} {PARAM_NAMES[j]:<16} {res.phi0[j]:>12.6f} {res.phi[j]:>12.6f} "
-              f"{res.phi[j] - res.phi0[j]:>+12.6f}  {PARAM_UNITS[j]}{extra}")
-    print(f"{'':>2} ---- ★ 大 yaw 侧一阶矩 Pb（只在倾斜 + 大 yaw 转动时可辨识）----")
-    for j in range(NCORE + len(EXTRA_PARAM_NAMES), NPARAM):
-        print(f"{j:>2} {PARAM_NAMES[j]:<16} {res.phi0[j]:>12.6f} {res.phi[j]:>12.6f} "
-              f"{res.phi[j] - res.phi0[j]:>+12.6f}  {PARAM_UNITS[j]}")
+    for _ln in format_param_table(res.phi, res.phi0):
+        print(_ln)
     print("=" * 78)
     # ── ★ 全批开环前向仿真误差（比 loss 好读；口径 = 整段 + 同一起点 + 同一积分器）──
     eval_segs = val_segs if val_segs is not None else segs
@@ -393,17 +372,8 @@ def main(argv=None) -> int:
               f"（比值 {tr['ratio']:.4f}，最小值 {tr['min']:.6e}）"
               f"  ⇒ {'下降 ✓' if tr['decreased'] else '未下降 ✗'}")
     print("可粘贴到 include/tcbs/mpc/planar_yaw_params.h:")
-    print(f"  p.Jbig_eff = {res.phi[0]:.6f};  p.Js = {res.phi[1]:.6f};")
-    print(f"  p.Px = {res.phi[2]:.6f};  p.Py = {res.phi[3]:.6f};")
-    print(f"  p.fcBig = {res.phi[4]:.6f};  p.fvBig = {res.phi[5]:.6f};")
-    print(f"  p.fcSmall = {res.phi[6]:.6f};  p.fvSmall = {res.phi[7]:.6f};")
-    print(f"  p.backlash_delta = {res.phi[8]:.6f};  p.backlash_k = {res.phi[9]:.4f};")
-    print(f"  p.backlash_c = {res.phi[10]:.4f};  p.backlash_through = {res.phi[11]:.6f};")
-    print(f"  p.Jmotor = {res.phi[12]:.6f};  p.fcMotor = {res.phi[13]:.6f};")
-    print(f"  p.fvMotor = {res.phi[14]:.6f};  // β 由估计器在线给（离线拟合值 "
-          f"{res.phi[15]:+.6f} 仅供参考）")
-    print(f"  p.Pbx = {res.phi[16]:.6f};  p.Pby = {res.phi[17]:.6f};"
-          f"  // 大 yaw 侧一阶矩（只有倾斜数据才可辨识）")
+    for _ln in format_header_snippet(res.phi):
+        print(_ln)
 
     # ── 留出集学习曲线（--eval-every）──
     if res.eval_hist:

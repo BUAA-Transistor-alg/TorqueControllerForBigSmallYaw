@@ -11,8 +11,16 @@
   · :mod:`~identify_params.model`    —— ② **可微仿真模型**:
        ``DifferentiableSimulator``（**不含任何可学习参数**，RK4 可导积分，返回每个时间点的
        位置/速度）+ numpy 参考实现（前向验证 / 回归矩阵 / 评测）。
-  · :mod:`~identify_params.train`    —— ③ **训练逻辑**:
-       ``FitConfig`` / ``FitResult`` / 输出误差法主循环 / 损失 / 学习率 / 评测 RMSE。
+  · :mod:`~identify_params.loss`     —— **损失（只有这一处定义）**:
+       ``pair_loss`` / ``pointwise_loss`` / ``weighted_reduce`` / ``WindowObjective``
+       （前向 + 损失一步到位；给无梯度优化器用，内部 ``no_grad``）。
+  · :mod:`~identify_params.train`    —— ③ **训练逻辑（Adam）**:
+       ``FitConfig`` / ``FitResult`` / ``build_fit_context``（与 CMA-ES 共用的准备逻辑）
+       / 输出误差法主循环 / 学习率 / 评测 RMSE。
+  · :mod:`~identify_params.cmaes_fit` —— **CMA-ES 优化器**（无梯度；前向可选
+       ``cpp``/``numpy``/``torch``，见 ``python3 -m identify_params.cmaes_fit --help``）。
+  · :mod:`~identify_params.fast_sim` —— **手写 C++ 快速前向**（分块向量化 + ``std::thread``
+       + ctypes；独立子目录，不参与主工程构建；**按需编译**，所以不在包导入时加载）。
   · :mod:`~identify_params.data`     —— 数据段加载（CSV / npz）、**连续化 + β 圈数对齐**。
   · :mod:`~identify_params.plotting` —— 收敛曲线 / 轨迹对比 / 学习曲线。
   · :mod:`~identify_params.selftest` —— 模型一致性自检。
@@ -55,7 +63,24 @@ from .params import (  # noqa: F401
     default_param_vector,
     resolve_fixed_names,
 )
-from .train import FitConfig, FitResult, channel_rmse, fit_params_torch  # noqa: F401
+from .loss import (  # noqa: F401
+    WindowObjective,
+    pair_loss,
+    pointwise_loss,
+    rollout_states,
+    sequence_loss,
+    weighted_reduce,
+)
+from .train import (  # noqa: F401
+    FitConfig,
+    FitContext,
+    FitResult,
+    build_fit_context,
+    channel_rmse,
+    fit_params_torch,
+    format_header_snippet,
+    format_param_table,
+)
 
 __all__ = [
     # ① 默认参数配置
@@ -67,8 +92,11 @@ __all__ = [
     "DifferentiableSimulator", "simulate_backlash_np", "simulate_np",
     "eom_backlash_np", "forward_accel_backlash_np", "inverse_dynamics_backlash_np",
     "regressor_np",
-    # ③ 训练逻辑
-    "FitConfig", "FitResult", "fit_params_torch", "channel_rmse",
+    # ③ 损失（唯一定义处）与训练逻辑
+    "pair_loss", "pointwise_loss", "weighted_reduce", "rollout_states", "sequence_loss",
+    "WindowObjective",
+    "FitConfig", "FitResult", "FitContext", "build_fit_context",
+    "fit_params_torch", "channel_rmse", "format_param_table", "format_header_snippet",
     # 数据
     "Segment", "load_segments", "segment_from_arrays", "truncate_hold_segments",
     "state_arrays",

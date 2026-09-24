@@ -406,8 +406,43 @@ def simulate_backlash_np(p: PlanarParams, q0, qd0, tau_seq, dt, exo: Exo = EXO_Z
     return th, dth
 
 
-# ============================================================================
-# torch 可导版内部函数（float64，逐项镜像上面的 numpy 版）
+def rollout_backlash_batched_np(p: PlanarParams, seq_const, seq_var,
+                                dt: float, substeps: int = 4, integrator: str = "rk4"):
+    """**按 batch 向量化**的 3-DOF 前向（numpy；与 `simulate_backlash_np` 同逻辑）。
+
+    输入用的是与可微模型**同一张量契约**:
+        seq_const [B,8]   q0(3) + qd0(3) + base_omega + base_alpha
+        seq_var   [B,T,5] tau_big, tau_small, grav_x, grav_y, β
+    返回 ``(theta [B,T,3], dtheta [B,T,3])``（第 i 行 = 积分**前**的状态，与逐段版一致）。
+
+    为什么单独写: 逐段版（`simulate_backlash_np`）是 Python 标量循环，喂优化器太慢
+    （实测比本函数慢 40~120×）。本函数直接复用同一个 numpy 版 `rk4_step_backlash_np`
+    对 ``[B,3]`` 状态整批推进 —— 不引入第二份模型公式。
+    """
+    sc = np.asarray(seq_const, dtype=np.float64)
+    sv = np.asarray(seq_var, dtype=np.float64)
+    if sc.ndim != 2 or sc.shape[1] != NCONST:
+        raise ValueError(f"seq_const 形状应为 [B,{NCONST}]，得到 {sc.shape}")
+    if sv.ndim != 3 or sv.shape[2] != NVAR:
+        raise ValueError(f"seq_var 形状应为 [B,T,{NVAR}]，得到 {sv.shape}")
+    B, T = int(sv.shape[0]), int(sv.shape[1])
+    q = np.array(sc[:, IDX_Q0], dtype=np.float64)
+    qd = np.array(sc[:, IDX_QD0], dtype=np.float64)
+    wc = sc[:, IDX_BASE_OMEGA]
+    ac = sc[:, IDX_BASE_ALPHA]
+    th = np.empty((B, T, 3), dtype=np.float64)
+    dth = np.empty((B, T, 3), dtype=np.float64)
+    for t in range(T):
+        th[:, t] = q
+        dth[:, t] = qd
+        exo = Exo(gravity_a=(sv[:, t, IDX_GRAV_X], sv[:, t, IDX_GRAV_Y]), gravity_on=True,
+                  base_omega=wc, base_alpha=ac, backlash_beta=sv[:, t, IDX_BETA])
+        q, qd = integrate_step_backlash_np(q, qd, sv[:, t, IDX_TAU_BIG:IDX_TAU_SMALL + 1], p,
+                                           exo, dt, substeps, integrator)
+    return th, dth
+
+
+
 #   参数字段允许是**标量**（固定参数）或 **[B] 张量**（可学习参数按 batch 广播）。
 # ============================================================================
 @dataclass
