@@ -1,0 +1,34 @@
+python3 python/scripts/identify_params_torch.py \
+  --data='data/cars/Sentry1/sysid/*.npz' \
+  --epochs=400000 --lr=3e-4 --cos-decay-steps=50000 \
+  --batch-segments --substeps=2 --threads=4 \
+  --eval-every=1000 --print-every=100 \
+  --plot-out=data/cars/Sentry1/ident/ident \
+  --out=data/cars/Sentry1/ident/params.txt
+
+python3 python/scripts/identify_params_torch.py \
+  --data='data/cars/Sentry1/sysid/*.npz' \
+  --epochs=2000 --lr=1e-2 --cos-decay-steps=1000 \
+  --seg-steps=100 \
+  --batch-segments --substeps=2 --threads=4 \
+  --eval-every=100 --print-every=100 \
+  --plot-out=data/cars/Sentry1/ident_long/ident \
+  --out=data/cars/Sentry1/ident_long/params.txt
+
+python3 python/scripts/identify_params_torch.py \
+  --data='data/cars/Sentry1/sysid/*.npz' \
+  --epochs=4000 --lr=3e-4 --cos-decay-steps=1000 \
+  --seg-steps=100 \
+  --batch-segments --substeps=4 --threads=4 \
+  --eval-every=100 --print-every=100 \
+  --plot-out=data/cars/Sentry1/ident_long_single/ident \
+  --out=data/cars/Sentry1/ident_long_single/params.txt
+
+python3 python/scripts/identify_params/cli.py \
+  --data='data/cars/Sentry1/sysid/*.npz' \
+  --epochs=4000 --lr=1e-2 --cos-decay-steps=2000 \
+  --seg-steps=10 \
+  --batch-segments --substeps=4 --threads=4 \
+  --eval-every=100 --print-every=100 \
+  --plot-out=data/cars/Sentry1/ident/ident \
+  --out=data/cars/Sentry1/ident/params.txt

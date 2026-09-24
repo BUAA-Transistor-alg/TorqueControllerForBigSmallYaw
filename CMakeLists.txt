@@ -3,8 +3,7 @@ cmake_minimum_required(VERSION 3.10)
 # ============================================================================
 # TorqueControllerForBigSmallYaw —— 双级 yaw（大 yaw + 小 yaw）力矩控制子模组
 #
-# 模块标识（pfx）= **tcbs**（TorqueController Big/Small），统一封装约定见
-# docs/embedding.md。要点:
+# 模块标识（pfx）= **tcbs**（TorqueController Big/Small）。要点:
 #   * target 名 / 产物文件名 / ctest 名一律带 tcbs_ 前缀，库另提供
 #     tcbs::<原名> 形式的 ALIAS，供父工程 target_link_libraries 使用；
 #   * 头文件物理位于 include/tcbs/...，对内外一律通过 "tcbs/..." 访问，
@@ -144,12 +143,13 @@ target_link_libraries(tcbs_control_demo PRIVATE tcbs::robot_comm_c)
 
 # 采集与辨识全部在 Python 侧（唯一一条路径）:
 #   python/scripts/collect_sysid.py        # 采集（录制目标序列 + 增强 + PID，与原仓库一致）
-#   python/scripts/identify_params_torch.py # 辨识（torch 可导仿真输出误差法）
+#   python/scripts/identify_params/        # 辨识（torch 可导仿真输出误差法）
+#       cd python/scripts && python3 -m identify_params --data='../../data/sysid/*.npz'
 
 # pitch 轴映射标定（两段线性拟合，需临时把 IMU 装到头上 = ON_HEAD 构型）:
 #   ./build/tcbs_pitch_calibration --sim        # 无硬件自检（虚拟台架 + 断言）
 #   ./build/tcbs_pitch_calibration --selftest   # 纯数学自检
-#   实车用法与安全约定见 tools/pitch_calibration.cpp 文件头与 docs/calibration.md §3.3
+#   实车用法与安全约定见 tools/pitch_calibration.cpp 文件头
 add_executable(tcbs_pitch_calibration tools/pitch_calibration.cpp)
 set_target_properties(tcbs_pitch_calibration PROPERTIES OUTPUT_NAME tcbs_pitch_calibration)
 target_compile_features(tcbs_pitch_calibration PRIVATE cxx_std_17)
@@ -168,7 +168,7 @@ target_link_libraries(tcbs_pitch_calibration PRIVATE tcbs::communication)
 #   ./build/tcbs_test_serial              # 实车: 发零力矩帧 + 打印收到的每帧
 # ⚠ 名字里带 test 但**不是 ctest 用例**（不 add_test）: 它是实车链路工具，
 #   不依赖 gtest / 断言框架，靠自身退出码表达成败（0/1/2/130）。
-#   与 tcbs_test_* 三个 ctest 程序的命名区分见 docs/calibration.md §3.0。
+#   与 tcbs_test_* 三个 ctest 程序的命名区分见 `./build/tcbs_test_serial --help`。
 add_executable(tcbs_test_serial tools/test_serial.cpp)
 set_target_properties(tcbs_test_serial PROPERTIES OUTPUT_NAME tcbs_test_serial)
 target_compile_features(tcbs_test_serial PRIVATE cxx_std_17)

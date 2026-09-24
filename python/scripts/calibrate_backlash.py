@@ -1,9 +1,10 @@
 """背隙标定（大 yaw）: 从 collect_sysid.py 记录的数据里直接估 **宽度 δ** 与 **中心 β**。
 
-★ 定位（与 identify_params_torch.py 的关系）:
-    参数辨识（`identify_params_torch.py`）已经把 **δ/k/c/γ/J_motor/电机摩擦/β 直接作为模型
+★ 定位（与 identify_params 包的关系）:
+    参数辨识（`python/scripts/identify_params/`，入口 `python3 -m identify_params`）已经把 **δ/k/c/γ/J_motor/电机摩擦/β 直接作为模型
     参数一起拟合**（3-DOF，无任何特殊处理）。本脚本**不参与**那条拟合路径，只提供两件事:
-      ① 一个**独立的初值/交叉校验**（`--backlash-delta=auto` 的粗估更粗，见下）；
+      ① 一个**独立的初值/交叉校验**（辨识初值只有一处管理：参数表 `PARAM_SPECS` 的
+         `default`，或用 `--init-vector` 整体替换；本脚本给出的是标定值，供你填进那里）；
       ② 诊断: 若这里估出的 δ 与拟合值差很多，说明数据里两列有一列不对（或链路时延没标定）。
     所以它是"量一下背隙有多宽"的尺子，不是辨识的前置步骤。
 
@@ -165,8 +166,10 @@ def main():
     print(f"  δ（★ 全段合并, 推荐值）= {math.degrees(delta_pool):.3f}°  （{delta_pool:.6f} rad）")
     print(f"  中心 β   : 中位 {math.degrees(beta_med):+.3f}°  "
           f"（标准差 {math.degrees(centers.std()):.3f}° ← 大说明 IMU 漂移/多圈解卷绕有问题）")
-    print(f"\n  ⇒ 建议: --backlash-delta = {delta_pool:.6f} rad   ({math.degrees(delta_pool):.3f}°)"
-          f"（作为 torch 3-DOF 拟合的初值；拟合会自己再修它）")
+    print(f"\n  ⇒ 建议把 backlash_delta 初值设为 {delta_pool:.6f} rad   "
+          f"({math.degrees(delta_pool):.3f}°)\n"
+          f"     （辨识初值只有一处管理: params.py 的 PARAM_SPECS，或用 --init-vector 整体替换；"
+          f"拟合会自己再修它）")
     print(f"     （离线参考的 β = {beta_med:+.6f} rad；运行期用估计器的 backlash_center 在线值）")
     if delta_med < math.radians(0.2):
         print("\n  ⚠ δ 估出来接近 0: 要么这台车背隙真的很小，要么这两列有一列不对"

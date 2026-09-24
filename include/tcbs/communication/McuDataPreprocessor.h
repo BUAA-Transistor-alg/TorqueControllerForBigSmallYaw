@@ -31,7 +31,7 @@ public:
         //   recv: 关节角 = 0.006060·raw_fb − 198.645875   （raw_fb 是计数：关节角 0 ⇒ raw ≈ 32780 ≈ 2^15）
         //   send: raw_cmd = 21.337421·关节角 − 6.708668    （关节角 0 ⇒ raw ≈ 0）
         // 两个通道各自线性，但斜率与零点都不同 ⇒ 必须分别标定、分别使用。
-        // 改机械/换电控/动过 IMU 安装后都要重标（见 docs/calibration.md §3.3.1）。
+        // 改机械/换电控/动过 IMU 安装后都要重标。
         double send_pitch_scale  =  21.337421;   // 关节角 → 电控 pitch 目标值
         double send_pitch_offset =  -6.708668;
         double recv_pitch_scale  =   0.006060;   // 电控原始 pitch 值 → 关节角
@@ -39,14 +39,14 @@ public:
 
         // ── 大 yaw（★ 电控侧该轴的正方向与本工程约定**相反** ⇒ 位置/速度/力矩
         //    收发两个方向都取负号；**温度、模式位**不参与映射，不受影响）──
-        //   本工程约定: yaw 绕 +z、从上方看逆时针为正（x→y，见 docs/model.md §2.1）。
+        //   本工程约定: yaw 绕 +z、从上方看逆时针为正（x→y）。
         //   `mapped = scale·raw + offset`、`raw_cmd = scale·θ + offset`，
         //   这里 scale = −1、offset = 0 ⇒ 收发互为逆映射，等价于"整体镜像"。
         //   平衡校验（与用户给的判据一致: 下发值 == 编码器回读值 ⇒ 不动）:
         //     发 raw_cmd = −θ，回读 raw_fb = −θ ⇒ 二者相等 ⇒ 不动 ✔
         double recv_big_yaw_scale      = -1.0;
         double recv_big_yaw_offset     =  0.0;
-        double recv_big_omega_scale    = -9.549296585513721;
+        double recv_big_omega_scale    = -1.0;
         double send_big_yaw_scale      = -1.0;
         double send_big_yaw_offset     =  0.0;
         double send_big_velocity_scale = -1.0;

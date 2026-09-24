@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """plot_ident_compare.py — 把多份辨识日志画在一起（同图对比不同设置/轮数）。
 
-日志就是 `identify_params_torch.py` 的标准输出（终端/重定向文件都行），
+日志就是 `identify_params`（`python3 -m identify_params`）的标准输出（终端/重定向文件都行），
 脚本按 `[torch] epoch   N/M  loss=... [+a +b ...]` 逐行解析。
 
 用途举例:
@@ -25,8 +25,8 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from identify_params_torch import (PARAM_NAMES, PARAM_UNITS, _save_fig,   # noqa: E402
-                                   _lazy_pyplot)
+from identify_params.params import PARAM_NAMES, PARAM_UNITS          # noqa: E402
+from identify_params.plotting import _lazy_pyplot, _save_fig         # noqa: E402
 
 _EPOCH_RE = re.compile(r"epoch\s+(\d+)/(\d+)\s+loss=([-\d.eE+]+)\s+\[([^\]]*)\]")
 

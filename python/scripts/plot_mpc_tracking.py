@@ -26,7 +26,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from identify_params_torch import _lazy_pyplot, _save_fig          # noqa: E402
+from identify_params.plotting import _lazy_pyplot, _save_fig          # noqa: E402
 
 SCENARIO_NAMES = ("阶跃 0.6 rad", "大阶跃 1.2 rad", "正弦 0.3 rad @0.5Hz")
 

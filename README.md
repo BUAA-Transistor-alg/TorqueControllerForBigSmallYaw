@@ -7,8 +7,7 @@
 
 > 本工程是 `TorqueController`（单 yaw 版本）的改版：模型从"单自由度 + J/τ_c/b"升级为
 > **平面 2 自由度的严格刚体动力学**（8 个可辨识参数：4 个摩擦 + 2 个惯量 + 2 个一阶矩，
-> 两 yaw 的非共轴偏置带来的交叉惯量与离心项、底盘转动耦合、重力项全部显式建模；
-> 推导与化简前提见 `docs/model.md`），接口从"一个 yaw 目标"升级为
+> 两 yaw 的非共轴偏置带来的交叉惯量与离心项、底盘转动耦合、重力项全部显式建模），接口从"一个 yaw 目标"升级为
 > **大/小 yaw 两个世界方位角目标**，状态从"融合 yaw 位置/速度"升级为
 > **可信量 + 大 yaw 延迟补偿估计 + 反解真实位姿 + 数据来源**。
 > 详细差异见 §10。
@@ -17,8 +16,7 @@
 
 ## 0. 每台新车必须标定的参数（总清单）
 
-> **换一台车，下面 A/B/C/D 四类全部要重做**（E 类一般沿用）。详细步骤与判据见
-> `docs/calibration.md`（§2 参数总表、§3 运动学、§4 参数辨识、§5 力矩常数、§6 顺序）；
+> **换一台车，下面 A/B/C/D 四类全部要重做**（E 类一般沿用）。
 > 本节是"一张纸的清单"，含**必须自己手工测量**的量。
 
 ### 0. 先决条件: 串口链路自检（不是标定，但不过这一步后面全是白做）
@@ -30,9 +28,8 @@
 ```
 
 `--list` 里 MCU / IMU 两列都必须有 `YES`；逐帧打印必须出现 `[MCU #n]`（说明 CRC8 与
-字段偏移都对得上）；1 Hz 统计行里 **`MCU2 新样本 n/s`** 就是 §3.1 要标的
-`transport_delay_s` 所依赖的那条低速链路的真实刷新率。安全约定与常见坑见
-`docs/calibration.md` §3.0（含 `--wait=0` 跳过预检、`--no-send` 纯监听）。
+字段偏移都对得上）；1 Hz 统计行里 **`MCU2 新样本 n/s`** 就是要标的
+`transport_delay_s` 所依赖的那条低速链路的真实刷新率。安全约定与常见坑见 `--wait=0`（跳过预检）与 `--no-send`（纯监听）。
 
 ### A. 手工测量（不进辨识，但缺一不可）
 
@@ -48,11 +45,11 @@
 
 | 项 | 标定方法 | 目标精度 |
 |---|---|---|
-| `recv_pitch_*` / `send_pitch_*` | ★ `./build/tcbs_pitch_calibration --points=20 --min=<原始单位下限> --max=<原始单位上限>`（两段线性拟合：`recv_*`: 电控原始值→关节角，`send_*`: 关节角→下发值；无硬件先跑 `--sim`/`--selftest`）。**前提: IMU 临时装到头上**（`ImuLocation::ON_HEAD`）—— 否则 `imu.euler_pitch` 不是 pitch 关节角、结果无效（§3.3） | 0.2° |
-| `recv_small_yaw_scale` | **临时 head IMU 法**（`docs/calibration.md` §3.3）——大 yaw 静止、小 yaw 慢速三角波 | 0.05° |
+| `recv_pitch_*` / `send_pitch_*` | ★ `./build/tcbs_pitch_calibration --points=20 --min=<原始单位下限> --max=<原始单位上限>`（两段线性拟合：`recv_*`: 电控原始值→关节角，`send_*`: 关节角→下发值；无硬件先跑 `--sim`/`--selftest`）。**前提: IMU 临时装到头上**（`ImuLocation::ON_HEAD`）—— 否则 `imu.euler_pitch` 不是 pitch 关节角、结果无效 | 0.2° |
+| `recv_small_yaw_scale` | **临时 head IMU 法**——大 yaw 静止、小 yaw 慢速三角波 | 0.05° |
 | `recv_small_yaw_offset`（**零位**） | ★ **在串口测试里直接读**：跑 `./build/tcbs_test_serial`（力矩恒 0），人工把小 yaw 摆到**机械零点**，读它打印的 `yaw_small_angle`（电控原始弧度），**取负**写进 `recv_small_yaw_offset`；`send_small_yaw_offset` 取**相反符号**（下发与上报同一原始坐标系）。**不需要单独的标定程序**。重复性 = 人工摆放的可重复性 | 0.2~1°（取决于人工重复性） |
-| `recv_big_yaw_scale/offset` | **IMU 法**（§3.1）：底盘静止时 `Δ(IMU 方位角) == Δ(关节角)` | 0.05° |
-| `send_*_torque_scale` | 力矩常数独立校核（§5：已知惯量体或吊质量块测稳态力矩） | 1% |
+| `recv_big_yaw_scale/offset` | **IMU 法**：底盘静止时 `Δ(IMU 方位角) == Δ(关节角)` | 0.05° |
+| `send_*_torque_scale` | 力矩常数独立校核（已知惯量体或吊质量块测稳态力矩） | 1% |
 
 ### C. 状态估计器（`YawStateEstimator::Config`）
 
@@ -60,8 +57,8 @@
 |---|---|---|
 | `imu_location` | 装配决定（**默认 `ON_HEAD`**：IMU 在头上；备选 `ON_BIG_YAW`） | 运行时可切换，一份二进制支持两种构型 |
 | `mount_yaw/pitch/roll`（或 `head_mount_*`） | **静止时**用 IMU 加速度计把安装倾斜标到 0.1°；yaw 部分按约定（"机械零位处 x 轴指向世界 +x ⇒ 方位角 0"） | 重力方向直接乘这个矩阵 ⇒ 直接影响 `P` 的辨识 |
-| `transport_delay_s` | §3.1：用 `big_enc_innovation` 与 `big_enc_age` 在线校核（默认 15 ms） | MCU 无时钟，只标传输时延 |
-| `bore[3]` | §3.4：激光/照准器或相机像素反解视轴方向 | 默认 `(0,1,0)`（本工程 x=右/y=前/z=上，pitch 绕 x ⇒ 光轴在 y-z 平面） |
+| `transport_delay_s` | 用 `big_enc_innovation` 与 `big_enc_age` 在线校核（默认 15 ms） | MCU 无时钟，只标传输时延 |
+| `bore[3]` | 激光/照准器或相机像素反解视轴方向 | 默认 `(0,1,0)`（本工程 x=右/y=前/z=上，pitch 绕 x ⇒ 光轴在 y-z 平面） |
 | `chassis_imu_timeout_s`、`small_rate_lpf_alpha`/`big_rate_lpf_alpha`、`stale_age_s`… | 保持默认，按实测噪声/带宽微调 | 不影响正确性，只影响平滑度 |
 
 ### D. 动力学参数（16 个，必须**辨识**，不要手填）
@@ -77,10 +74,10 @@
 | ★ `backlash_through` γ | 死区直通线性项（给死区内提供梯度）—— **默认冻结在 0.002、不参与拟合**（`--no-freeze-backlash-through` 可放开） |
 | ★ `backlash_beta` β | 死区**中心**偏置 —— **运行期由估计器在线给**（`Estimate::backlash_center`），不要用离线常数 |
 
-> 全套 16 参的含义、δ 与 β 为什么一个能离线一个不能、底盘 IMU 的延迟补偿、MPC 接线、
-> 以及"哪些是实测值、哪些还是占位"的可信度表，见 **`docs/backlash_model.md`**；
-> 该文还给了**仿真环境 2**（`--sim-rigid`: 接触完全刚性 + 死区完全自由 + β 随机/漂移）与
-> 100 段 × 1000 epoch 的完整验证结果（收敛曲线 / 模型 vs 环境 / 控制 vs 目标三条曲线）。
+> 全套 16 参的含义、δ 与 β 为什么一个能离线一个不能、底盘 IMU 的延迟补偿、MPC 接线，
+> 以及"哪些是实测值、哪些还是占位"的可信度表。
+> 采集脚本另带**仿真环境 2**（`--sim-rigid`: 接触完全刚性 + 死区完全自由 + β 随机/漂移），
+> 可在无硬件时把采集→辨识→控制整条链路跑通。
 
 采集与拟合：
 
@@ -91,17 +88,19 @@ python3 python/scripts/collect_sysid.py --tag=small --segments=6 --tilted
 # ↑ 默认还会把每个"静止保持段"也落盘（文件名后缀 _hold，首段除外）并参与辨识 ——
 #   它补的是采样轨迹里稀缺的**大角度阶跃**激励；不要就用 --no-record-hold
 # ★ 默认**只写 npz**（列是 csv 的超集、体积约为一半；辨识只读 npz，同名成对时也只读 npz）；
-#   确实要留一份 csv 给人看/给老脚本用，加 --save-csv
+#   确实要留一份 csv 给人看，加 --save-csv
 # ①' 只采**测试数据**（无硬件）: 用"刚性接触 + 死区完全自由 + β 每条数据随机/漂移"的仿真环境
 #    python3 python/scripts/collect_sysid.py --dry-run --sim-rigid --segments=100 \
 #            --duration-sec=3 --no-record-hold --out=/tmp/rigid
-# ② 拟合（torch 输出误差法；λ 固定 100，不改。拟合 15 参：平面 8 + 背隙/电机侧 8 里去掉了
-#   **默认冻结**的直通项 γ；保持段默认只取前 3 s，见 --hold-max-sec）
+# ② 拟合（torch 输出误差法；λ 固定 100，不改。可学习 16 参：平面 8 + 背隙/电机侧 8 里
+#   去掉了固定参数 γ 与 β —— β 是必需数据、逐样本从 `backlash_center` 列取；
+#   保持段默认只取前 3 s，见 --hold-max-sec）
 #   需要数据里同时有 theta_big_motor（电机侧）与 theta_big_platform（云台侧）两列
 #   δ 的独立校验/初值: python3 python/scripts/calibrate_backlash.py --data='data/sysid/*.npz'
+#   （辨识初值只在一处管理: params.py 的 PARAM_SPECS；要整体换一组就传 --init-vector）
 # ★ 几何已按实测填好（(dx, dy) = (0, 0.07)），实机数据**不需要**再给 --dx/--dy；
 #   只有换机械或跑旧归档数据（用 (0.10, 0) 生成的那批）时才显式覆盖
-python3 python/scripts/identify_params_torch.py --data='data/sysid/*.npz' \
+PYTHONPATH=python/scripts python3 -m identify_params --data='data/sysid/*.npz' \
         --truth-params=<若有真值> --epochs=1000
 # ③ 结果填进 include/tcbs/mpc/planar_yaw_params.h 的 defaultModelParams()（或运行时 setModelParams）
 ```
@@ -114,7 +113,7 @@ python3 python/scripts/identify_params_torch.py --data='data/sysid/*.npz' \
 ### 结果放哪里（沿用原仓库约定）
 
 标定结果**一车一目录**：`data/cars/<车名>/`（`LinearParams.txt` + `params/Identified_parameters.txt`
-+ `params/Figure_1.png` + `sysid_samples/*.npz`，约定见 `data/cars/README.md`）。
++ `params/Figure_1.png` + `sysid_samples/*.npz`）。
 `data/sysid/` 是**工作区**（也在版本管理内，但定型后请归到对应车目录）；本轮仿真验证数据归档在 `data/archive/20260915_sim_sysid/`。
 
 ### E. MPC / 控制调参（不是标定，但每台车要过一遍）
@@ -148,7 +147,7 @@ cd build && ctest --output-on-failure
 # 参数辨识: 采集（Python，无硬件可 --dry-run）+ 拟合（C++ 线性最小二乘 / torch 可导仿真）
 python3 python/scripts/collect_sysid.py --tag=big --segments=6      # 大 yaw 被激励
 python3 python/scripts/collect_sysid.py --tag=small --segments=6    # 小 yaw 被激励
-python3 python/scripts/identify_params_torch.py --data='data/sysid/sysid_*.npz'   # 唯一辨识路径
+PYTHONPATH=python/scripts python3 -m identify_params --data='data/sysid/sysid_*.npz'  # 唯一辨识路径
 
 # pitch 映射标定（两段线性拟合）: ★ 需把 IMU 临时装到头上（ON_HEAD）
 ./tcbs_pitch_calibration --sim                # 无硬件自检（虚拟台架 + 断言，秒级）
@@ -164,7 +163,7 @@ python3 python/scripts/identify_params_torch.py --data='data/sysid/sysid_*.npz' 
 > **作为子模组嵌入父工程**（模块标识 `tcbs`）: 本仓库的全部对外名字都带 `tcbs_` 前缀，
 > C++ 代码整体在 `namespace tcbs` 内，头文件一律走 `#include "tcbs/..."`，
 > 因此可与同源的 `TorqueController`（单 yaw 版）等子模组**共存于同一个 CMake 工程、同一个进程**。
-> 约定与父工程侧改法见 [`docs/embedding.md`](docs/embedding.md)；父工程用
+> 父工程用
 > `add_subdirectory(<本目录> <binary_dir> EXCLUDE_FROM_ALL)` 引入后，
 > 链接 `tcbs::robot_comm_c`（或 `tcbs::communication`）即可。
 
@@ -411,7 +410,7 @@ s.t.   |u| ≤ max_torque（内部 clamp，硬限位）
        |Δu| ≤ max_torque_rate·dt（硬约束，代价函数内 clamp）
        ψ_big(k)   = ψ_chassis + ω_chassis·t_k + θ_big(k)     ← 底盘转动在窗内线性外推
        ψ_small(k) = ψ_big(k) + θ_small(k)
-       动力学: 严格模型（见 docs/model.md），RK4 / 半隐式欧拉离散
+       动力学: 严格模型，RK4 / 半隐式欧拉离散
 ```
 
 要点:
@@ -473,8 +472,8 @@ s.t.   |u| ≤ max_torque（内部 clamp，硬限位）
 
 ## 6. 电控侧要求
 
-见 `mcu_code_demo/dual_yaw_control.c`（协议解析、组帧、双电机控制、小 yaw 安全层、看门狗）
-与 `mcu_code_demo/README.md`（接入说明、桩函数表、易踩坑）。
+见 `mcu_code_demo/dual_yaw_control.c`（协议解析、组帧、双电机控制、小 yaw 安全层、看门狗、
+接入说明、桩函数表、易踩坑）。
 
 **两个 MCU 的分工（与真实结构一致，示例代码默认按此实现）**:
 - **MCU1**（与上位机直连）: 解析/组帧、控制 **pitch + 小 yaw**（本地闭环、每帧新值）、
@@ -535,20 +534,15 @@ tests/
 mcu_code_demo/                 # 电控侧示例 C 代码
 python/
   scripts/collect_sysid.py     # ★ 辨识数据采集（录制目标序列+增强+PID，分轴，100Hz）
-  scripts/identify_params_torch.py    # ★ 唯一的参数辨识路径（torch 可导仿真输出误差法）
+  scripts/identify_params/            # ★ 唯一的参数辨识路径（python3 -m identify_params）
   scripts/mpc_demo.py          # 控制台示例（小 yaw 正弦跟踪；可切 IMU 构型/临时改 8 参）
   scripts/c_api_selftest.py    # C API / 绑定自检（无硬件可跑）
   torque_controller/           # ctypes 绑定（对应 C API v4: 平面 8 参模型）
-docs/
-  model.md                     # ★ 平面 8 参模型: 化简前提/推导/可辨识性/验证/IMU 构型开关
-  calibration.md               # ★ 本构型下的完整标定方法（含辨识方法与采集规格）
-  sysid_data.md                # 辨识数据格式与采集协议（CSV/NPZ 列头、增强规则、安全策略）
-  sysid_torch.md               # ★ torch 辨识结果 + MPC 闭环验证（λ、N、ON_HEAD、倾斜数据）
 ```
 
 ---
 
-## 8. 标定（详见 `docs/calibration.md`）
+## 8. 标定
 
 一句话流程: **先运动学后动力学**。
 1. 用大 yaw 上的 IMU 标定大 yaw 编码器的比例/零位**与链路延迟**（底盘静止时
@@ -557,7 +551,7 @@ docs/
    并校核反解精度（< 0.5°）；其中 **pitch 映射用本仓库工具**
    `./build/tcbs_pitch_calibration --points=20 --min=<原始单位下限> --max=<原始单位上限>`
    （两段线性拟合，直接打印可粘贴的 `recv_pitch_*`/`send_pitch_*` 四行；
-   **前提是 IMU 临时装在头上**，见 `docs/calibration.md` §3.3）；
+   **前提是 IMU 临时装在头上**）；
    无硬件时先跑 `./build/tcbs_pitch_calibration --sim`（虚拟台架 + 断言）与 `--selftest`；
 3. **小 yaw 零位（必须先做，后面所有小 yaw 角度语义都依赖它）**:
    跑 `./build/tcbs_test_serial`（两关节恒「仅力矩 + 0 N·m」，工具不驱动任何关节）——
@@ -569,13 +563,12 @@ docs/
    注意: 零点只给出"哪个读数对应 0" ⇒ **`P` 的方向仍然未知，不能假设 `Py=0`**。
 4. 用 `python/scripts/collect_sysid.py` 采集（**录制目标序列 + 增强 + 上位机 PID**、
    **分轴激励**、另一轴 PID 保持在固定/随机位置、pitch≡0、100 Hz）→
-   用 `python/scripts/identify_params_torch.py`（**唯一辨识路径**: torch 可导仿真输出误差法）
-   辨识 8 个参数；
-4. 关键: **两轴力矩都必须记录**（被保持轴的力矩就是耦合项 `P` 的传感器，见
-   `docs/calibration.md` §4.2）；小 yaw 应**尽量用满行程**（±30°，
+   用 `PYTHONPATH=python/scripts python3 -m identify_params`（**唯一辨识路径**: torch 可导
+   仿真输出误差法）辨识 16 个可学习参数；
+4. 关键: **两轴力矩都必须记录**（被保持轴的力矩就是耦合项 `P` 的传感器）；小 yaw 应**尽量用满行程**（±30°，
    两侧各留 8° 余量 ⇒ 约 44° 摆幅），摆幅越小 `Px/Py` 与惯量越共线；
    **强烈建议加静态倾斜段**（底盘静止但静置成 ±10° 左右，`--tilted`），
-   否则水平数据下 `Px/Py` 几乎不可辨识（详见 `docs/sysid_data.md` §6.4）；
+   否则水平数据下 `Px/Py` 几乎不可辨识；
 5. 辨识完做三项检查: 参数物理合理（`J>0`、`fc/fv ≥ 0`）、`|Px|/σ ≥ 3`、
    **未参与拟合的留出段**做开环前向仿真的 RMSE；再上实车跑 `tcbs_control_demo` 低幅验证。
 
@@ -619,9 +612,9 @@ docs/
    需要改成完整 3 关节 IK（改动量较大）。**请先测量这个夹角**。
 2. 底盘**角加速度**默认置 0（作为慢变扰动）；若需要更激进的前馈，可由 `ω_c` 微分估计填入。
 3. 底盘平动与其旋转轴偏置未建模。
-4. `planar_yaw_params.h` 里所有数值都是**占位值**，必须按 `docs/calibration.md` 标定后替换；
+4. `planar_yaw_params.h` 里所有数值都是**占位值**，必须按 §8 标定后替换；
    尤其 `small.max_torque`（小 yaw 力矩能力）与 `max_torque_rate` 直接影响控制权限。
-   另注意两个**不可分辨**的量（见 `docs/model.md`）: `m_u` 与质心偏置 `ρ` 只能得到乘积
+   另注意两个**不可分辨**的量: `m_u` 与质心偏置 `ρ` 只能得到乘积
    `P=m_u·ρ`；大 yaw 自身惯量与 `m_u|d|²` 只能得到和 `Jbig_eff`。
 5. 结构柔度/回差未建模；若非共轴偏置较大且上装较重，注意低频谐振。
 6. 电控协议需要电控侧同步改到 v0x03（示例代码已给）。

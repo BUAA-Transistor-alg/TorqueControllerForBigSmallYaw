@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """plot_openloop_compare.py — **开环**：用识别出来的参数做前向仿真 vs 实际采集曲线。
 
-与 `identify_params_torch.py --plot-out=...` 生成的 `ident_traj.png` 的区别：
+与 `python3 -m identify_params --plot-out=...` 生成的 `ident_traj.png` 的区别：
   · 这里可以一次画**多段**（默认 6 段，按"激励幅度最大"挑选，大小 yaw 各一半）；
   · 每段一行、三列：θ 叠加（实测实线 / 开环仿真虚线）+ θ 误差曲线 + θ̇ 叠加；
   · 每段标题里给出**窗口 0.1 s** 与**整段 3 s** 开环 RMSE，并打印成表。
@@ -29,10 +29,12 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from identify_params_torch import (AXIS_BIG, AXIS_SMALL, EXO_ZERO, PARAM_NAMES,   # noqa: E402
-                                   PlanarParams, _lazy_pyplot, _save_fig, channel_rmse,
-                                   exo_from_gravity, load_segments, simulate_backlash_np,
-                                   state_arrays)
+from identify_params.data import load_segments, state_arrays                    # noqa: E402
+from identify_params.model import simulate_backlash_np                          # noqa: E402
+from identify_params.params import (AXIS_BIG, AXIS_SMALL, EXO_ZERO, PARAM_NAMES,  # noqa: E402
+                                    PlanarParams, exo_from_gravity)
+from identify_params.plotting import _lazy_pyplot, _save_fig                     # noqa: E402
+from identify_params.train import beta_source, channel_rmse                      # noqa: E402
 
 CORE = ("Jbig_eff", "Js", "Px", "Py", "fc_big", "fv_big", "fc_small", "fv_small")
 EXTRA = ("backlash_delta", "backlash_k", "backlash_c", "backlash_through",
@@ -78,8 +80,9 @@ def main(argv=None) -> int:
     ap.add_argument("--n", type=int, default=6, help="画几段（默认 6，大小 yaw 各一半）")
     ap.add_argument("--substeps", type=int, default=2, help="开环仿真每控制步的子步（与训练一致）")
     ap.add_argument("--integrator", choices=["rk4", "euler"], default="rk4")
-    ap.add_argument("--beta-mode", choices=["auto", "fit", "column", "true"], default="auto",
-                    help="与训练一致：auto = 数据里有 backlash_center 列就逐样本用它")
+    ap.add_argument("--beta-mode", choices=["auto", "column", "true"], default="auto",
+                    help="与训练一致（β 必需）: auto = 与拟合帧匹配（est→backlash_center、"
+                         "true→beta_true）")
     ap.add_argument("--state-mode", choices=["est", "true"], default="est")
     ap.add_argument("--dx", type=float, default=0.0)
     ap.add_argument("--dy", type=float, default=0.07)
@@ -101,11 +104,11 @@ def main(argv=None) -> int:
     segs = load_segments([a.data], dt_override=a.dt, verbose=False)
     if not segs:
         raise SystemExit("[error] 没读到数据")
-    use_beta = any(s.beta is not None for s in segs) and a.beta_mode in ("auto", "column")
+    beta_tag = beta_source(segs[0], a.state_mode, a.beta_mode)[1]
     sel = pick_segments(segs, a.n)
 
-    print(f"参数: " + " ".join(f"{k}={v:+.5f}" for k, v in zip(PARAM_NAMES, phi)))
-    print(f"逐样本 β: {'用数据列 backlash_center' if use_beta else '用常数 backlash_beta'}"
+    print("参数: " + " ".join(f"{k}={v:+.5f}" for k, v in zip(PARAM_NAMES, phi)))
+    print(f"逐样本 β: {beta_tag}（必需数据、按拟合帧取）"
           f"；状态目标: {a.state_mode}；积分 {a.integrator}/substeps={a.substeps}")
 
     rows = []
@@ -115,12 +118,12 @@ def main(argv=None) -> int:
         if s.gravity is not None:
             seq = [exo_from_gravity(float(s.gravity[i, 0]), float(s.gravity[i, 1]))
                    for i in range(s.T)]
-        bs = s.beta if use_beta else None
+        bs = beta_source(s, a.state_mode, a.beta_mode)[0]
         th, dth = simulate_backlash_np(p_model, th_m[0], dth_m[0], s.tau, s.dt, EXO_ZERO,
                                        a.substeps, exo_seq=seq, beta_seq=bs,
                                        integrator=a.integrator)
         win = channel_rmse([s], phi, base, integrator=a.integrator, substeps=a.substeps,
-                           use_beta=use_beta, state_mode=a.state_mode)
+                           state_mode=a.state_mode, beta_mode=a.beta_mode)
         rows.append((s, th_m, dth_m, th, dth, win))
 
     print(f"\n{'段':<28} {'轴':<6} {'窗口 0.1s RMSE 电机/云台/小yaw':<32} "

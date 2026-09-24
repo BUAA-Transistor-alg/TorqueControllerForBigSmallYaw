@@ -10,12 +10,13 @@ namespace tcbs {
 // planar_yaw_params.h — 默认参数集中定义
 //
 // ★ **8 个平面参数**由 python/scripts/collect_sysid.py 采集、再用
-//   python/scripts/identify_params_torch.py（**唯一辨识路径**，torch 输出误差法）辨识后替换。
+//   python/scripts/identify_params/（**唯一辨识路径**，torch 输出误差法）：
+//     PYTHONPATH=python/scripts python3 -m identify_params --data='data/sysid/*.npz'
 //   几何量（d = dx/dy）是实测值，请按实际机械填写（当前 (0, 0.07)）。
 // ★ **大 yaw 背隙那 8 个参数**（δ/k/c/γ/J_motor/电机摩擦/β）由**同一个** torch 辨识
-//   作为 3-DOF 模型参数**一起拟合**（共 16 参，不再"占位 + 手猜"）—— 见
-//   docs/backlash_model.md。注意 β 虽然也参与离线拟合，但**运行期必须用估计器的在线值**
-//   （`Estimate::backlash_center`），因为它随电机/云台共同旋转而漂移。
+//   作为 3-DOF 模型参数**一起拟合**（可学习 16 参）。★ β **不参与离线拟合**：它逐样本取
+//   数据里的 `backlash_center`（仿真数据用 `backlash_beta_true`）；**运行期必须用估计器的
+//   在线值**（`Estimate::backlash_center`），因为它随电机/云台共同旋转而漂移。
 // ============================================================================
 namespace dual_yaw {
 
@@ -36,7 +37,7 @@ inline ModelParams defaultModelParams() {
     // ── 16 个待辨识参数（★ 已由实车数据辨识；来源见下方注释）──
     // 数据: data/cars/Sentry1/sysid/ 的 **240 段**（大 122 + 小 118；其中 **~103 段是 6~13.6° 的
     //       斜坡数据**（由 gravity_ax/ay 实测，`tilted` 标记当时没打开）；保持段只取前 3 s）
-    // 方法: python/scripts/identify_params_torch.py --epochs=2000 --batch-segments
+    // 方法: PYTHONPATH=python/scripts python3 -m identify_params --epochs=2000 --batch-segments
     //       --lr=1e-2 --cos-decay-steps=1000 --substeps=2 --threads=4 ...
     //       （λ=100，输出误差法，18 参一起拟合、γ 冻结在 0.002；前 1000 epoch 常数 lr、后 1000 余弦到 0）
     // 结果: 用时 420.8 s（★ 本次为该命令的输出，见 data/cars/Sentry1/ident18_cos/）

@@ -10,7 +10,7 @@
     # 无硬件自检（内置仿真代替串口；用来验证脚本逻辑与数据格式）
     python3 python/scripts/collect_sysid.py --dry-run --segments=1
 
-数据格式见 ``docs/sysid_data.md``。
+数据格式见下面的 ``CSV_HEADER``（列名即含义）。
 
 ================================================================================
 一、为什么这样采集（设计理由，先读这一段）
@@ -288,7 +288,7 @@ SIM_TILT_DEG = 0.0                # [CLI] --sim-tilt-deg（dry-run 底盘静态�
 SIM_COM_SEED = None               # [CLI] --sim-com-seed（None = 用本次 --seed）
 
 # ── 小 yaw 行程限位（**对称: 软限位 ±30° / 硬限位 ±35°**）──
-#   四档含义（详见文件头 "七、小 yaw 行程三档" 与 docs/sysid_data.md §5）:
+#   四档含义（详见文件头 "七、小 yaw 行程三档"）:
 #     ① 硬限位（机械行程, 电控侧也按它限位）: [SMALL_TRAVEL_MIN, SMALL_TRAVEL_MAX] = [−35°, +35°]
 #        ★ 用户要求（2026-09-21）: 限幅从 ±30° **放宽到 ±35°**，给超调留 5° 机械余量。
 #     ② 软限位（正常允许范围）: [SMALL_SOFT_MIN, SMALL_SOFT_MAX] = [−30°, +30°]
@@ -327,7 +327,7 @@ HELD_SMALL_MAX = 0.7 * SMALL_ENV_HALF    # held 小 yaw 随机目标半宽（保
 #   ↑ driven 轴是**大 yaw** 时，held 小 yaw 的目标在包络内随机抽，但收进 0.7 倍:
 #     大 yaw 摆动会通过 M12 给小 yaw 注入扰动力矩（M12·θ̈_big 可达 ~0.3 N·m），
 #     PID 顶回来需要几度到十几度的瞬时偏差，收窄一点才有余量不触碰中止阈值。
-#     抽取范围 = SMALL_CENTER_RAD ± HELD_SMALL_MAX（⊂ 参考包络），见 docs/sysid_data.md §6.2。
+#     抽取范围 = SMALL_CENTER_RAD ± HELD_SMALL_MAX（⊂ 参考包络）。
 BIG_REF_AMP = math.radians(180.0)     # driven 大 yaw 参考**半幅**上限（★ 2026-09-21: 60°→120°
                                       #   ⇒ 参考峰峰可达 240°；大 yaw 多圈自由，仅防大摆）
 BIG_CENTER_JITTER = math.radians(180.0)  # driven 大 yaw 参考中心相对当前方位角的随机抖动
@@ -366,7 +366,7 @@ RECENTER_SEC = 1.5                    # 小 yaw 越限后的回中时间
 
 # ── 静态倾斜段（--tilted / --tilt-rolling）──
 #   倾斜只为让重力在 A 系有平面分量（gravity_a[0..1] ≠ 0），从而把 P = m_u·ρ 的回归
-#   条件数改善约两个数量级，见文件头 "五、静态倾斜段" 与 docs/sysid_data.md §6.4。
+#   条件数改善约两个数量级，见文件头 "五、静态倾斜段"。
 #   **倾斜 ≠ 底盘运动**: 采集期间底盘仍是静止的（只是静置姿态不同），
 #   模型外生量 base_omega / base_alpha 依旧取 0。
 TILT_SLOTS = (
@@ -385,7 +385,7 @@ AXIS_BIG = 0        # 0 = 大 yaw 被激励
 AXIS_SMALL = 1      # 1 = 小 yaw 被激励
 AXIS_NAME = {AXIS_BIG: "big", AXIS_SMALL: "small"}
 
-# ── CSV 列头（前 10 列与 docs/sysid_data.md §2 逐字一致；末尾两列是可选的重力列）──
+# ── CSV 列头（前 10 列为历史列名；末尾两列是可选的重力列）──
 #   gravity_ax / gravity_ay: 重力在 **A 系（大 yaw 转子系）** 的平面分量 (m/s²)，
 #   水平静置时 ≈ 0。**追加在最后**是为了让按列名取列的读取器
 #   (findCol) 继续工作；只有这两列"有非零值"时，下游才会启用重力项。
@@ -398,7 +398,7 @@ AXIS_NAME = {AXIS_BIG: "big", AXIS_SMALL: "small"}
 #   （这正是背隙问题的根源；新代码请用下面显式的 `*_motor` / `*_platform` 四列）
 # ════════════════════════════════════════════════════════════════════════════
 CSV_HEADER = [
-    # ── 前置列（旧名; 前 10 列与 docs/sysid_data.md §2 逐字一致）──
+    # ── 前置列（旧名; 前 10 列为历史列名）──
     "t", "theta_big", "theta_small", "dtheta_big", "dtheta_small",
     "tau_big", "tau_small", "axis", "held_target", "mcu2_seq",
     "gravity_ax", "gravity_ay",
@@ -1898,7 +1898,7 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
     """写 npz（**默认只写这一份**；``save_csv=True`` 时再写一份同名 csv）。
 
     npz 里的 ``axis``/``held_target`` 是**标量**（段内恒定），CSV 里它们是每行一列（同值）；
-    其余列一一对应。详见 docs/sysid_data.md。
+    其余列一一对应。
 
     ★ 为什么默认不写 CSV: npz 的列是 CSV 的**超集**（多了打包的 ``theta_true``/``dtheta_true``、
     仿真真值 β 列，且 csv 只保留了 6 位小数），辨识脚本本来就只按列名从 npz 读；
@@ -2014,7 +2014,7 @@ def tilt_banner(segment_index: int, slot: int, rolling: bool) -> None:
 
     **只提示，不做任何补偿**: 脚本不会去估计/抵消倾角，也不改变激励方式 ——
     模型的重力项 `G_s = Qx·gy − Qy·gx` 只在数据里"本来就非零"时才有信息量，
-    由下游辨识工具决定是否启用（见 docs/sysid_data.md §6.4）。
+    由下游辨识工具决定是否启用。
     """
     name = TILT_SLOTS[slot % len(TILT_SLOTS)]
     log("  " + "!" * 74)

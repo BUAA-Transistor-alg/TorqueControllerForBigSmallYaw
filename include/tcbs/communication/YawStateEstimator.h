@@ -143,7 +143,7 @@ public:
         // ★ 本工程坐标系约定（与父工程 UnifiedAutoAimPipeline 一致）:
         //     x = 右, y = 前, z = 上；yaw 绕 z（从上方看逆时针, x→y）；pitch 绕 x（+ = 抬头, y→z）。
         //   因此 pitch 轴就是 head 系的 x 轴 ⇒ **光轴/枪管在 y-z 平面内、默认沿 +y**。
-        //   若实际视轴与默认方向不一致（装配偏角），按 docs/calibration.md §3.4 标定后填入。
+        //   若实际视轴与默认方向不一致（装配偏角），标定后填入。
         double bore[3] = {0.0, 1.0, 0.0};
         double gravity = 9.81;
 
