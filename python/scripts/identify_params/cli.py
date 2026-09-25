@@ -37,7 +37,8 @@ import time
 import numpy as np
 
 from .data import HOLD_KEEP_SEC, load_segments, seg_fingerprint, truncate_hold_segments
-from .params import FRICTION_LAMBDA, NPARAM, PlanarParams
+from .params import (FRICTION_LAMBDA, NPARAM, TAU_SIGN_BIG_DEFAULT,
+                     TAU_SIGN_SMALL_DEFAULT, PlanarParams, set_tau_sign)
 from .plotting import plot_convergence, plot_learning, plot_trajectory, resolve_plot_paths
 from .selftest import model_self_test
 from .train import (
@@ -45,7 +46,6 @@ from .train import (
     _fmt_rmse,
     _fmt_rmse_full,
     channel_rmse,
-    filter_beta_segments,
     fit_params_torch,
     format_header_snippet,
     format_param_table,
@@ -138,6 +138,14 @@ def _build_argparser():
                          "MPC/planar_yaw_model.h 一致）。**原仓库单 yaw 版用 1e4**，本仓库不能"
                          "照搬；想复现 1e4 可传 --model-lambda=1e4 消融")
     ap.add_argument("--dt", type=float, default=None, help="覆盖 dt（默认取数据里的）")
+    ap.add_argument("--tau-sign-big", type=float, choices=(1.0, -1.0),
+                    default=TAU_SIGN_BIG_DEFAULT,
+                    help="★ τ_cmd（大 yaw 电机通道）符号: +1=原样（默认），-1=取反。"
+                         "只作用于辨识环境（加载时施加），不影响主工程/控制器")
+    ap.add_argument("--tau-sign-small", type=float, choices=(1.0, -1.0),
+                    default=TAU_SIGN_SMALL_DEFAULT,
+                    help="★ τ_small（小 yaw 通道）符号: -1=取反（**默认**），+1=原样。"
+                         "想回到『两路都原样』就显式给 --tau-sign-small=1")
     ap.add_argument("--max-points", type=int, default=0, help="每段只用前 N 点（加速调试）")
     ap.add_argument("--window-len", type=int, default=FitConfig.window_len,
                     help="每个窗口的点数（0=整段一个窗口；**仅旧配方**用，新配方忽略）")
@@ -155,20 +163,10 @@ def _build_argparser():
                     help="平衡点 θ* 在当前零点坐标系里的读数（度）。仅 along_d 时有效")
     # ★ 初值只有一处管理（参数表 PARAM_SPECS 的 default）；CLI 只提供"整体替换"的 --init-vector，
     #   不再有按参数的初值开关（--backlash-* / --j*-motor 已删除）。
-    ap.add_argument("--freeze-backlash-through", action=argparse.BooleanOptionalAction,
-                    default=FitConfig.freeze_backlash_through,
-                    help="★ **默认开**: 把背隙直通项 γ（参数 11）固定（移出可学习组）在初值上。"
-                         "它的定位只是死区内的梯度引导；放开拟合会让它替模型去'填'刚性接触的"
-                         "台阶（γ→0.3、δ→0.25 rad，参数失去物理意义）。"
-                         "要用 --no-freeze-backlash-through 复现'γ 自由'的消融")
-    ap.add_argument("--beta-mode", choices=["auto", "column", "true"],
-                    default=FitConfig.beta_mode,
-                    help="★ 背隙死区中心 β 的来源（**必需数据**；`fit` 已移除）: "
-                         "auto（默认）= 与拟合帧匹配（est 帧用 `backlash_center`、true 帧用 "
-                         "`beta_true`）；column = 强制估计帧 `backlash_center`；"
-                         "true = 强制真值帧 `beta_true`（只用于仿真数据）。"
-                         "加载时会先把 β 以 2π 为单位对齐、使 Δ=θm−θp−β 落进 (−π,π]，"
-                         "再校验其相邻差（>π 会询问是否跳过该段）；缺列的段直接报错")
+    ap.add_argument("--fix-mu", action="store_true",
+                    help="★ 把 μ（m_s）钉在初值上、不参与优化。默认**不固定**（μ 可学习）；"
+                         "μ 是规范自由度（只以 μ|D|²、X_b+μD_x、Y_b+μD_y、(X_s²+Y_s²)/μ "
+                         "组合进入动力学）⇒ 学习它时拟合会多一条平方向")
     ap.add_argument("--batch-segments", action="store_true",
                     help="★ 全批加速: 每 epoch 仍对每段随机抽 1 个 seg_steps 片段，但把所有段"
                          "拼成一个 batch 做**一次** Adam 步（损失 = 各段损失均值）。"
@@ -221,6 +219,8 @@ def _parse_vecN(s, what: str, n: int = NPARAM) -> np.ndarray:
 
 def main(argv=None) -> int:
     args = _build_argparser().parse_args(argv)
+    # ★ 必须在读数据之前生效（符号在加载时施加）
+    set_tau_sign(big=args.tau_sign_big, small=args.tau_sign_small)
     base = PlanarParams(dx=args.dx, dy=args.dy, friction_lambda=args.model_lambda)
 
     if args.selftest:
@@ -261,12 +261,11 @@ def main(argv=None) -> int:
     val_segs = _cap_eval(val_segs)
 
     # ── ★ β 是必需数据: 缺 β 的段用 [Y/n] 提示跳过（与 β 连续性校验同一套；非交互默认跳过）──
-    segs = filter_beta_segments(segs, args.state_mode, args.beta_mode, "训练集")
+    # 2-DOF 模型不使用 β（背隙不建模）⇒ 不再按 β 过滤数据段
     if not segs:
         print("[error] 没有可用的数据段（所有段都因缺 β 被跳过）", file=sys.stderr)
         return 2
-    val_segs = (filter_beta_segments(val_segs, args.state_mode, args.beta_mode, "留出集")
-                if val_segs else val_segs)
+    # （留出集同样不按 β 过滤）
     if args.val_data and not val_segs:
         print("[error] 留出集的段都因缺 β 被跳过", file=sys.stderr)
         return 2
@@ -283,24 +282,11 @@ def main(argv=None) -> int:
         else:
             print(f"[ok] 留出集与训练集无重合（{len(val_segs)} 段，指纹比对）")
 
-    # ── 处理后的 β（必需数据；真实来源由 fit 里的 beta_source 按拟合帧决定）──
-    _frame_true = (str(args.state_mode) == "true")
-    _bsrc = [(sg.beta_true if _frame_true else sg.beta) for sg in segs]
-    _bsrc = [b for b in _bsrc if b is not None]
-    n_beta = len(_bsrc)
-    if n_beta:
-        bvals = np.concatenate(_bsrc)
-        print(f"[beta] {n_beta}/{len(segs)} 段有 β（拟合帧 = {args.state_mode}，"
-              f"mode={args.beta_mode}）: 处理后范围 "
-              f"[{bvals.min():+.4f}, {bvals.max():+.4f}] rad")
-    # Δ = θm − θp − β 必须落在 (−π,π]，否则去 wrap 的 loss 会炸
-    _dn = float(np.abs(np.concatenate([sg.theta[:, 0] - sg.theta[:, 1] - sg.beta
-                                       for sg in segs if sg.beta is not None])).max()) \
-        if any(sg.beta is not None for sg in segs) else float("nan")
-    if np.isfinite(_dn):
-        print(f"[beta] 处理后 |Δ=θm−θp−β| 全局最大 = {_dn:.4f} rad（须 ≤ π：模型看到的是物理量级）")
+    # ── 通道/几何自检: 2-DOF 模型用 (θ_b, θ_s) = (云台侧, 小 yaw)，没有电机通道 ──
+    print(f"[ok] 2-DOF 辨识: {len(segs)} 段；状态通道 = (云台侧 θ_b, 小 yaw θ_s)；"
+          "ω_c 取各段 `chassis_yaw_rate` 均值")
 
-    cfg = FitConfig(fit_axis=args.fit_axis, iters=args.iters, lbfgs_iters=args.lbfgs_iters,
+    cfg = FitConfig(
                     lr=args.lr, seed=args.seed, substeps=args.substeps,
                     huber_delta=args.huber_delta, vel_weight=args.vel_weight,
                     free_init_vel=args.free_init_vel, p_bound=args.p_bound,
@@ -320,8 +306,7 @@ def main(argv=None) -> int:
                     windows_per_seg=args.windows_per_seg, batch_size=args.batch_size,
                     p_constraint=args.p_constraint, fix_p=args.fix_p,
                     p_zero_angle_deg=args.p_zero_angle,
-                    beta_mode=args.beta_mode, batch_segments=args.batch_segments,
-                    freeze_backlash_through=args.freeze_backlash_through,
+                    batch_segments=args.batch_segments, fix_mu=args.fix_mu,
                     state_mode=args.state_mode, eval_every=args.eval_every,
                     eval_segs=val_segs)
     if args.legacy_recipe:
@@ -348,11 +333,10 @@ def main(argv=None) -> int:
           f"想快就用 --eval-max-segs", flush=True)
     _t0 = time.time()
     rm = channel_rmse(eval_segs, res.phi, base, integrator=cfg.integrator, substeps=cfg.substeps,
-                      state_mode=cfg.state_mode, beta_mode=cfg.beta_mode)
+                      state_mode=cfg.state_mode)
     _t1 = time.time()
     rm0 = channel_rmse(eval_segs, res.phi0, base, integrator=cfg.integrator,
-                       substeps=cfg.substeps, state_mode=cfg.state_mode,
-                       beta_mode=cfg.beta_mode)
+                       substeps=cfg.substeps, state_mode=cfg.state_mode)
     print(f"[eval] 完成: 估计参数 {_t1 - _t0:.1f}s + 初值对照 {time.time() - _t1:.1f}s",
           flush=True)
     print(f"全批前向仿真 val_loss = {res.val_loss:.6e}")
@@ -382,8 +366,8 @@ def main(argv=None) -> int:
         step = max(1, len(res.eval_hist) // 10)
         for e, r in res.eval_hist[::step] + ([res.eval_hist[-1]]
                                              if (len(res.eval_hist) - 1) % step else []):
-            print(f"  epoch {e:6d}: 角度 RMSE[°] {r['motor_deg']:.3f}/{r['platform_deg']:.3f}"
-                  f"/{r['small_deg']:.3f}   角速度 {r['motor_rate']:.4f}/"
+            print(f"  epoch {e:6d}: 角度 RMSE[°] {r['platform_deg']:.3f}/{r['small_deg']:.3f}"
+                  f"   角速度 {r['platform_rate']:.4f}/"
                   f"{r['platform_rate']:.4f}/{r['small_rate']:.4f}")
 
     # ── 收敛曲线 / 轨迹对比（默认写 PNG；无显示环境也不报错）──
@@ -395,7 +379,7 @@ def main(argv=None) -> int:
             plot_convergence(res, conv_png, show_plot=args.show_plot, title_note=note)
             plot_trajectory(res, eval_segs, base, integrator=cfg.integrator,
                             out_path=traj_png, show_plot=args.show_plot,
-                            state_mode=cfg.state_mode, beta_mode=cfg.beta_mode)
+                            state_mode=cfg.state_mode)
             if res.eval_hist:
                 learn_png = conv_png[:-4] + "_learning.png"
                 plot_learning(res, learn_png, show_plot=args.show_plot)

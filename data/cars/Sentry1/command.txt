@@ -32,3 +32,82 @@ python3 python/scripts/identify_params/cli.py \
   --eval-every=100 --print-every=100 \
   --plot-out=data/cars/Sentry1/ident/ident \
   --out=data/cars/Sentry1/ident/params.txt
+
+
+cd /home/huhu233/rm2027/TorqueControllerForBigSmallYaw
+PYTHONPATH=python/scripts python3 -m identify_params.cmaes_fit \
+  --data='data/cars/Sentry1/sysid/*.npz' --hold-max-sec=3 \
+  --window-len=0 --max-segs=0 \
+  --generations=4000 --popsize=24 --sigma=0.3 --restarts=3 --lr-adapt \
+  --bounds-lo=1e-4 --bounds-hi=500 --real-bound=10 \
+  --eval-max-segs=40 --checkpoint-every=500 \
+  --out=data/cars/Sentry1/ident/params_cmaes.txt \
+  --plot-out=data/cars/Sentry1/ident/ident_cmaes
+
+
+PYTHONPATH=python/scripts python3 -m identify_params.cmaes_fit \
+  --data='data/cars/Sentry1/sysid/*.npz' --hold-max-sec=3 \
+  --window-len=0 --max-segs=0 \
+  --generations=40000 --popsize=24 --sigma=2.0 --restarts=10 --lr-adapt \
+  --bounds-lo=1e-4 --bounds-hi=500 --real-bound=10 \
+  --eval-max-segs=40 --checkpoint-every=500 \
+  --out=data/cars/Sentry1/ident/params_cmaes.txt \
+  --plot-out=data/cars/Sentry1/ident/ident_cmaes
+
+PYTHONPATH=python/scripts python3 -m identify_params.cmaes_fit \
+  --data='data/cars/Sentry1/sysid/*.npz' --hold-max-sec=3 \
+  --window-len=0 --max-segs=0 \
+  --generations=4000 --popsize=24 --sigma=1.0 --restarts=10 --lr-adapt \
+  --bounds-lo=1e-4 --bounds-hi=500 --real-bound=10 \
+  --eval-max-segs=40 --checkpoint-every=500 \
+  --out=data/cars/Sentry1/ident/params_cmaes.txt \
+  --plot-out=data/cars/Sentry1/ident/ident_cmaes
+
+python3 python/scripts/identify_params/cli.py \
+  --data='data/cars/Sentry1/sysid/*.npz' \
+  --epochs=4000 --lr=3e-4 --cos-decay-steps=1000 \
+  --seg-steps=100 \
+  --batch-segments --substeps=4 --threads=4 \
+  --eval-every=100 --print-every=100 \
+  --plot-out=data/cars/Sentry1/ident_long_single/ident \
+  --out=data/cars/Sentry1/ident_long_single/params.txt
+
+python3 python/scripts/identify_params/cli.py \
+  --data='data/cars/Sentry1/sysid/*.npz' \
+  --epochs=4000 --lr=3e-4 --cos-decay-steps=1000 \
+  --seg-steps=10 \
+  --batch-segments --substeps=4 --threads=4 \
+  --eval-every=100 --print-every=100 \
+  --plot-out=data/cars/Sentry1/ident_long_single/ident \
+  --out=data/cars/Sentry1/ident_long_single/params.txt \
+  --eval-max-segs=10
+
+python3 python/scripts/identify_params/cli.py \
+  --data='data/cars/Sentry1/sysid/*.npz' \
+  --epochs=400 --lr=1e-3 --cos-decay-steps=100 \
+  --seg-steps=100 \
+  --batch-segments --substeps=4 --threads=4 \
+  --eval-every=100 --print-every=10 \
+  --plot-out=data/cars/Sentry1/ident_long_single/ident \
+  --out=data/cars/Sentry1/ident_long_single/params.txt \
+  --eval-max-segs=10
+
+python3 python/scripts/identify_params/cli.py \
+  --data='data/cars/Sentry1/sysid/*.npz' \
+  --epochs=400 --lr=3e-4 --cos-decay-steps=100 \
+  --seg-steps=299 \
+  --batch-segments --substeps=4 --threads=4 \
+  --eval-every=100 --print-every=10 \
+  --plot-out=data/cars/Sentry1/ident_long_single/ident \
+  --out=data/cars/Sentry1/ident_long_single/params.txt \
+  --eval-max-segs=10
+
+python3 python/scripts/identify_params/cli.py \
+  --data='data/cars/Sentry1/sysid/*.npz' \
+  --epochs=4000 --lr=3e-4 --cos-decay-steps=1000 \
+  --seg-steps=299 \
+  --batch-segments --substeps=4 --threads=4 \
+  --eval-every=100 --print-every=10 \
+  --plot-out=data/cars/Sentry1/ident_long_single/ident \
+  --out=data/cars/Sentry1/ident_long_single/params.txt \
+  --eval-max-segs=10

@@ -89,13 +89,12 @@ def pair_loss(th_pred, dth_pred, th_true, dth_true, mask=None, ax_w=None, *,
 # 「前向 + 损失」一步到位（前向用的就是已有的 torch 模型）
 # ============================================================================
 def rollout_states(sim, params, seq_const, seq_var):
-    """跑一次可微前向，把模型返回的 ``(pos, vel)`` 三元组堆成 ``[B,T,3]``。
+    """跑一次可微前向，返回 ``(theta[B,T,C], dtheta[B,T,C])``（C = 2: 云台/小 yaw）。
 
     ★ ``sim`` 就是 :class:`~identify_params.model.DifferentiableSimulator`（不含可学习参数）,
-    调用方按 batch 传 ``params``（物理量）。
+    调用方按 batch 传 ``params``（物理量）。模型直接返回已堆好的张量。
     """
-    pos, vel = sim(params, seq_const, seq_var)
-    return torch.stack(pos, dim=-1), torch.stack(vel, dim=-1)
+    return sim(params, seq_const, seq_var)
 
 
 def sequence_loss(sim, params, seq_const, seq_var, theta, dtheta, mask=None, ax_w=None,
@@ -111,8 +110,8 @@ class WindowObjective:
 
     ``forward_fn(raw_np) -> (theta_pred, dtheta_pred)``：由调用方按"用哪个前向"注入
       · torch 模型 : ``layout.to_physical`` → ``DifferentiableSimulator`` → stack
-      · numpy 批量 : :func:`~identify_params.model.rollout_backlash_batched_np`
-      · 手写 C++   : :class:`~identify_params.fast_sim.FastSimulator`
+      · numpy 批量 : :func:`~identify_params.model.rollout_batched_np`
+      · 手写 C++   : :class:`~identify_params.planar2_sim.FastSimulator`
     返回的张量/数组都会走 **同一份损失实现**（``pair_loss``）—— 损失只有这一处。
 
     ★ 内部 ``torch.no_grad()``：不建图、不反向 —— 用无梯度优化器时**梯度全程关闭**。

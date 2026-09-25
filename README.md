@@ -67,6 +67,28 @@
 |---|---|
 | `Jbig_eff`, `Js` | 大 yaw 侧惯量（含 `m_u\|d\|²`）、上装绕小 yaw 轴惯量（含 `m_u\|ρ\|²`） |
 | `Px`, `Py` | 上装一阶矩 `m_u·ρ` |
+
+> ★ **辨识模型与主模型不同**：`python/scripts/identify_params/` 用的是**两刚体平面拉格朗日
+> 模型的缩合参数版（2-DOF）**——没有电机自由度、没有背隙；主模型（`include/tcbs/mpc/`）
+> 仍是 3-DOF 含背隙版，**本批改动没有动主模型**。辨识出的缩合参数可用
+> `PlanarParams.to_header_params()` 换算回主模型那 6 个惯量/重力参数：
+> `Jbig_eff = A`、`Js = J_s`、`(Px,Py) = (X_s,Y_s)`、`(Pbx,Pby) = (X_b+μdx, Y_b+μdy)`
+> （`generate_header_snippet()` 输出的就是换算后的行）。
+>
+> 辨识参数 11 个（`PARAM_NAMES`；`D=(dx,dy)` **已知**、不辨识）：
+> `X_b, Y_b, X_s, Y_s`（实）、`I_b, I_s, μ, f_bc, f_bv, f_sc, f_sv`（正）。
+> `J_b = I_b+(X_b²+Y_b²)`、`J_s = I_s+(X_s²+Y_s²)/μ`、`A = J_b+μ|D|²`、`B = J_s`、
+> `μK = D·R(θ_s)(X_s,Y_s)`、`Δ = A·B−(μK)² ≥ J_s·J_b+μ|D|²·I_s > 0`（**构造保证**——
+> 用 `(I_b,I_s)` 而不是 `(J_b,J_s)` 当自由参数就是为了这个：`I_s<0` 会让 Δ 在某些 θ_s 变负、
+> 加速度爆炸）。`μ` 是**规范自由度**（只以 `μ|D|²`、`X_b+μdx`、`Y_b+μdy`、`(X_s²+Y_s²)/μ`
+> 组合进入动力学），**默认固定**（`--free-mu` 放开，会多一条平方向）。
+>
+> 数据口径：`θ_b = theta_big_platform`、`θ_s = small_joint_angle_est`、
+> `T_b = tau_big`、`T_s = tau_small`（无减速比，τ 即关节侧力矩）、
+> 重力用 **A 系逐样本** `gravity_ax/ay`（与模型里世界系 g + 绝对角 ψ 的写法严格等价，
+> 已验证到 1e-17，所以不需要 θ_c 通道）、`ω_c = chassis_yaw_rate` 的段均值。
+> 前向后端：**C++ `planar2_sim`（默认）/ numpy / torch**，三者同一张量契约
+> `seq_const[B,5] = (q0_b,q0_s,qd0_b,qd0_s,ω_c)`、`seq_var[B,T,4] = (τ_b,τ_s,g_ax,g_ay)`。
 | `fc_big/fv_big/fc_small/fv_small` | 两轴库仑/粘滞摩擦 |
 | ★ `backlash_delta` | 大 yaw **背隙宽度**（唯一可离线标定的背隙量；每台车都要重标） |
 | ★ `backlash_k`, `backlash_c` | 背隙接触刚度/阻尼（**当前是占位值**，等 3-DOF 拟合给实测值） |
@@ -105,22 +127,58 @@ PYTHONPATH=python/scripts python3 -m identify_params --data='data/sysid/*.npz' \
 # ③ 结果填进 include/tcbs/mpc/planar_yaw_params.h 的 defaultModelParams()（或运行时 setModelParams）
 
 # ②' 无梯度 **CMA-ES**（可选；同一个 `--out` / 同一套参数与数据口径）
-#   · 默认前向 = **手写 C++**（fast_sim，分块向量化 + std::thread，满线程）；
-#     `--forward=numpy|torch|auto` 可切换（torch 后端默认 1 线程：多线程反而更慢）
-#   · 损失只有一处实现（identify_params/loss.py）⇒ 与前向无关、两条优化路径共用
-#   · `--max-sigma` 是**搜索盒**（raw 空间 ±m·σ）：不加盒会在病态目标上飘进非物理区
-#     （实测跑出 J=4.3e4、fc=3e4、δ=8.8 rad 而 RMSE 几乎没改善）
-#   · `--windows-per-seg=3` = 每段取段首/中/尾三个窗口（只取 1 个会把目标限制在段首 100 点）
+#   · 默认前向 = **手写 C++**（fast_sim，分块向量化 + std::thread，满线程）；C++ 精度自检:
+#         python3 -m identify_params.fast_sim.selftest
+#   · **目标 = 全量数据**（`--window-len=0` = 每段整段一个窗口、按有效点 mask 平均），
+#     不抽随机片段 ⇒ 确定性 loss、不会被退化解钻空子
+#   · **搜索盒是物理量**：正参数 φ ∈ [--bounds-lo, --bounds-hi]（log 空间），
+#     实参数 |φ| ≤ --real-bound。不加盒会飘进非物理区（实测跑出 J=4.3e4、fc=3e4、δ=8.8 rad）
+#   · `--restarts N` = IPOP-style 重启（popsize ×2、sigma 重置、从当前最优出发）跳出局部最优；
+#     ⚠ cmaes 自带的收敛判据（_tolfun=1e-12 / _tolx=3e-13）在本目标上**几乎永不触发**，
+#     所以另有放宽判据: `--restart-patience 300 --restart-delta 1e-3`
+#     （连续 300 代相对改善 < 0.1% 就结束本轮、准备重启；0 = 关）
+#   · 实机数据里重力列是全的（gravity_ax/ay 逐点非零，与 tilted 标记无关），模型按逐点重力算
 PYTHONPATH=python/scripts python3 -m identify_params.cmaes_fit \
         --data='data/cars/Sentry1/sysid/*.npz' --hold-max-sec=3 \
-        --window-len=100 --windows-per-seg=3 --max-segs=200 \
-        --generations=3000 --popsize=16 --sigma=0.15 --max-sigma=20 \
+        --window-len=0 --max-segs=0 \
+        --generations=4000 --popsize=24 --sigma=0.3 --restarts=3 --lr-adapt \
+        --bounds-lo=1e-4 --bounds-hi=500 --real-bound=10 \
         --eval-max-segs=40 --checkpoint-every=500 \
         --out=data/cars/Sentry1/ident/params_cmaes.txt \
         --plot-out=data/cars/Sentry1/ident/ident_cmaes
-# ↑ --max-segs 控制目标开销（CMA-ES 要评估几万次）；C++ 精度自检:
-#   python3 -m identify_params.fast_sim.selftest
+# ↑ 全量数据 607 段 ≈ 31 ms/次评估（C++ 满线程）⇒ 4000 代 × popsize 24 ≈ 1 h 量级
+#   （numpy/torch 后端同样口径要 16~26 h；torch 后端默认 1 线程：多线程反而更慢）
+
+★ **控制力矩符号（两路独立，只作用于辨识环境；主工程/控制器不受影响）**
+
 ```
+--tau-sign-big    τ_cmd   （大 yaw 电机通道）  默认 +1 = 原样
+--tau-sign-small  τ_small （小 yaw 通道）      默认 −1 = ★ 取反
+```
+
+**默认约定 = 大 yaw 不取反、小 yaw 取反**。想回到"两路都原样"（原始记录符号），
+显式给 `--tau-sign-small=1`：
+
+```bash
+# 默认（小 yaw 取反）
+PYTHONPATH=python/scripts python3 -m identify_params.cmaes_fit \
+        --data='data/cars/Sentry1/sysid/*.npz' \
+        --out=data/cars/Sentry1/ident/params_cmaes.txt
+
+# 恢复原始符号（两路都不反）
+PYTHONPATH=python/scripts python3 -m identify_params.cmaes_fit \
+        --data='data/cars/Sentry1/sysid/*.npz' --tau-sign-small=1 \
+        --out=data/cars/Sentry1/ident/params_cmaes_raw_sign.txt
+```
+
+`identify_params`（Adam）/ `identify_params.cmaes_fit` / `identify_params.manual_tune`
+三个入口都支持这两个参数；GUI 里是两个勾选框 **`大 yaw 电机 τ_cmd 取反`** /
+**`小 yaw τ_small 取反`**（默认状态就是 未勾选 / 已勾选），切换会重新读当前组数据、实时重算。
+
+施加点是 `data.segment_from_arrays`（数据进入辨识环境的唯一入口）⇒ torch / numpy / C++
+三个前向后端、损失、评测、画图**共用同一组符号**，不会只改一半。
+**只动控制力矩**：重力列、β 列、θ/ω、以及所有模型参数（含 `tau_offset_*`）都不参与取反。
+当前符号会写进结果文件的配方行（`τ符号[默认/改过]: 大yaw=+1 小yaw=-1`），参数文件自描述。
 
 要点：**两轴力矩都必须记录**（被保持轴的力矩是 `P` 的观测量）；**小 yaw 要尽量用满行程**；
 **水平数据下 `Px/Py` 不可辨识** ⇒ 必须加**静态倾斜段**（固定一个倾角贯穿全程即可，
@@ -591,6 +649,30 @@ python/
 
 ---
 
+### 手动标定（PyQt5 GUI）
+
+参数拟合完之后想手调、或想直接看"当前参数下实测 vs 仿真"，用::
+
+    PYTHONPATH=python/scripts python3 -m identify_params.manual_tune \
+            --data='data/cars/Sentry1/sysid'
+    # 或直接: python3 python/scripts/identify_params/manual_tune.py --data=<目录/glob>
+
+* 左侧: **3 行（当前 3 个采样文件）× 2 列（云台 θ_b / 小 yaw θ_s）** 的整段曲线，
+  实线 = 实测 θ、虚线 = 当前参数下的仿真 θ（从各段记录初值出发，用该段记录的 τ / 重力 / β
+  前向积分），**点线（右轴）= 喂给模型的控制力矩**（云台列 `T_b`、小 yaw 列 `T_s`；
+  与滑块无关，但**含上面的 τ 符号**（默认小 yaw 已取反）⇒ 和仿真用的是同一个值；
+  仿真走 **C++ `planar2_sim` 内核**（不可用时自动回退 numpy），状态栏显示派生量与正定余量）；
+  每格标题标了整段角度 RMSE，仿真超出实测范围会标 `⚠仿真出界`。
+* 右侧: 「上一组 / 下一组」按 3 个文件一组滚动；「数据」分组里两个 **τ 取反** 勾选框
+  （`大 yaw 电机 τ_cmd` / `小 yaw τ_small`，默认 未勾选 / 已勾选）勾选后重新读数据；
+  每个参数一行（名 → 滑块 → 数值框，双向同步、
+  拖动实时重算），**正数参数在对数范围内调节**（默认 [1e-4, 500]，与 CMA-ES 搜索盒一致），
+  实数参数（Px/Py/β/Pbx/Pby）线性；β 在有 `backlash_center` 列时自动停用（由数据逐点给）。
+* 「载入… / 另存为… / 复位」读写 `--out` 那种 `名字 = 值` 参数文件（另存为的配方行里会记下当前 τ 符号）。
+* 依赖: PyQt5 + matplotlib（Qt5Agg 后端），无需额外安装。
+
+---
+
 ## 9. 安全与实时性注意事项
 
 1. **摩擦软符号系数 λ 与积分子步必须配套**：模型 λ=100（`planar_yaw_params.h`）、
@@ -633,5 +715,9 @@ python/
    尤其 `small.max_torque`（小 yaw 力矩能力）与 `max_torque_rate` 直接影响控制权限。
    另注意两个**不可分辨**的量: `m_u` 与质心偏置 `ρ` 只能得到乘积
    `P=m_u·ρ`；大 yaw 自身惯量与 `m_u|d|²` 只能得到和 `Jbig_eff`。
+   ⇒ 辨识侧据此把自由参数取成 `(Jbig_slack, Js, Px, Py)`（见 §D 的注），
+   等价于把 `(J_A⁰, J_s⁰, m_u, ρ)` 的规范自由度固定掉，既不多引入不可辨识方向，
+   又让惯量矩阵正定成为**构造性质**；拟合结果里的 `Jbig_eff` 由 `Jbig_slack` 派生，
+   `m_u`（若需要）请用电子秤实测后作为已知量填进 `m_u_known`。
 5. 结构柔度/回差未建模；若非共轴偏置较大且上装较重，注意低频谐振。
 6. 电控协议需要电控侧同步改到 v0x03（示例代码已给）。

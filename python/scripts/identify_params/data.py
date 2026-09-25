@@ -30,7 +30,7 @@ from dataclasses import dataclass, fields as _dataclass_fields, replace
 
 import numpy as np
 
-from .params import AXIS_BIG, AXIS_SMALL, DT_DEFAULT, QUANT_STEP
+from .params import AXIS_BIG, AXIS_SMALL, DT_DEFAULT, QUANT_STEP, apply_tau_sign
 
 
 # ============================================================================
@@ -164,7 +164,10 @@ class Segment:
     gravity: np.ndarray | None = None      # [T,2] A 系重力平面分量 (m/s²)；None = 水平(0,0)
     # ★ [T] 背隙死区中心 β（**在线**估计值）= 数据列 `backlash_center`；None = 没有该列
     beta: np.ndarray | None = None
-    beta_true: np.ndarray | None = None    # [T] 仿真真值 β（仅诊断/画图；实机恒 None/0）
+    beta_true: np.ndarray | None = None    # [T] 仿真真值 β（**旧 3-DOF 模型遗留**; 2-DOF 不用）
+    # ★ ω_c: 底盘绕关节轴的角速度（rad/s）的**段代表值**（记录列的均值；缺列 ⇒ 0）。
+    #   2-DOF 模型用它做科氏修正；seq_const 每个 batch 元素只有一个 ω_c。
+    base_omega: float = 0.0
     ddtheta: np.ndarray | None = None      # [T,3]（可选；oracle 消融用）
     theta_true: np.ndarray | None = None   # [T,3]（仅仿真数据有；评测用）
     dtheta_true: np.ndarray | None = None
@@ -377,6 +380,18 @@ def segment_from_arrays(rec: dict, dt: float, source: str = "?") -> Segment:
             beta = None
         elif not np.any(beta != 0.0):
             beta = None            # 全 0 = 没有可用信息（老数据/实机恒 0）
+    # ── ★ ω_c（底盘角速度的段代表值）: 优先 chassis_yaw_rate，其次 base_omega_z ──
+    base_omega = 0.0
+    for _k in ("chassis_yaw_rate", "base_omega_z", "chassis_omega"):
+        _v = rec.get(_k)
+        if _v is None:
+            continue
+        _v = np.asarray(_v, dtype=np.float64).reshape(-1)
+        _v = _v[np.isfinite(_v)]
+        if _v.size:
+            base_omega = float(np.mean(_v))
+            break
+
     bt = rec.get("backlash_beta_true")
     beta_true = None if bt is None else np.asarray(bt, dtype=np.float64).reshape(-1)
     dd = rec.get("ddtheta")
@@ -414,10 +429,14 @@ def segment_from_arrays(rec: dict, dt: float, source: str = "?") -> Segment:
         if beta_true is not None:
             beta_true, _ = align_beta(beta_true, th_true, th_true_raw)
 
+    # ── ★ 控制力矩符号（两路独立；默认 大yaw=+1 / 小yaw=−1，见 params.set_tau_sign）──
+    #   放在这里 = 数据进入整个辨识环境的**唯一入口**，三个前向后端自然共用同一组符号。
+    tau = apply_tau_sign(tau)
+
     return Segment(t=t, theta=theta, dtheta=dtheta, tau=tau, axis=axis, held_target=held,
                    dt=dt, mcu2_seq=seq, gravity=grav, beta=beta, ddtheta=dd,
                    theta_true=th_true, dtheta_true=dth_true, ddtheta_true=dd_true,
-                   source=source, beta_true=beta_true)
+                   source=source, beta_true=beta_true, base_omega=base_omega)
 
 
 def _read_csv(path: str) -> list:

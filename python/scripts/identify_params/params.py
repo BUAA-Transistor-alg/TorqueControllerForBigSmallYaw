@@ -18,11 +18,26 @@
 
 参数顺序与 ``include/tcbs/mpc/planar_yaw_model.h`` / ``planar_yaw_params.h`` 保持一致:
 
-    0 Jbig_eff  1 Js        2 Px      3 Py       4 fc_big   5 fv_big
-    6 fc_small  7 fv_small
-    8 backlash_delta(δ)     9 backlash_k     10 backlash_c    11 backlash_through(γ)
-    12 Jmotor   13 fc_motor 14 fv_motor      15 backlash_beta(β)
-    16 Pbx      17 Pby
+    0 X_b   1 Y_b   2 X_s   3 Y_s   4 I_b   5 I_s
+    6 mu    7 f_bc  8 f_bv  9 f_sc  10 f_sv
+
+★ **辨识模型 = 两刚体平面拉格朗日模型的缩合参数版**（`D=(dx,dy)` 已知、不辨识）:
+
+    J_b = I_b + (X_b²+Y_b²)              （m_b 固定为 1）
+    J_s = I_s + (X_s²+Y_s²)/μ
+    A   = J_b + μ|D|²,   B = J_s
+    μK  = D·R(θ_s)·(X_s,Y_s) = D_x·Q_x + D_y·Q_y
+    Δ   = A·B − (μK)²                    ≥ J_s·J_b + μ|D|²·I_s > 0  ★构造保证
+
+★ 用 `(I_b, I_s)` 而不是字面上的 `(J_b, J_s)` 当自由参数: 两者等价、个数相同，但
+  `I_b, I_s, μ > 0` 让 `Δ > 0` 成为**构造性质**（否则 `I_s<0` 会让 Δ 在某些 θ_s 上变负、
+  加速度爆炸——这正是旧 3-DOF 模型 `det2<0` 那条 NaN 通路）。
+★ `μ` 是**规范自由度**（只以 `μ|D|²`、`X_b+μD_x`、`Y_b+μD_y`、`(X_s²+Y_s²)/μ` 组合进入），
+  **默认参与辨识**（不固定任何参数）；若希望拟合里不带这条平方向，用 `--fix-mu` 把它钉住。
+
+★ **`(I_b, I_s)` 而不是字面上的 `(J_b, J_s)`**：`J_b = I_b+(X_b²+Y_b²)`、
+  `J_s = I_s+(X_s²+Y_s²)/μ`。两者等价、个数相同，但 `I_b, I_s, μ > 0` 让
+  `Δ = A·B − (μK)² ≥ J_s·J_b + μ|D|²·I_s > 0` 成为**构造性质**。
 """
 
 from __future__ import annotations
@@ -50,7 +65,97 @@ ENCODER_CPR = 8192                     # 编码器计数/整圈
 QUANT_STEP = 2.0 * math.pi / ENCODER_CPR   # ≈ 7.669e-4 rad
 AXIS_BIG, AXIS_SMALL = 0, 1
 # ── 状态通道 ↔ 被激励轴（3-DOF: q = 电机, 云台, 小 yaw）──
-AXIS_CHANNELS = {AXIS_BIG: (0, 1), AXIS_SMALL: (2,)}
+AXIS_CHANNELS = {AXIS_BIG: (0,), AXIS_SMALL: (1,)}   # 2-DOF: 0=b(云台), 1=s(小yaw)
+
+
+# ============================================================================
+# ★★ 控制力矩符号（**只作用于辨识环境**；主工程/控制器完全不受影响）
+#   两路**独立**控制:
+#     · big   → `tau[:, 0]` = τ_cmd   （发给大 yaw 电机的力矩）
+#     · small → `tau[:, 1]` = τ_small （发给小 yaw 的力矩）
+#   ★ 默认: **大 yaw 不取反 (+1)、小 yaw 取反 (−1)**。想恢复"两路都原样"就显式给
+#     `--tau-sign-small=1`。
+#
+#   施加点是**唯一**的: `data.segment_from_arrays` 构造 Segment 时统一施加 ⇒
+#   Adam / CMA-ES / 手动标定 GUI / 画图脚本、以及三个前向后端（torch / numpy / C++）
+#   看到的是同一组符号，不需要在每个模型实现里再加一份开关（否则很容易只改一半）。
+#   ★ 只动控制力矩: 重力列、β 列、θ/ω、以及所有模型参数（含 `tau_offset_*`）都不参与。
+#   两路都为 +1 时 `apply_tau_sign` 原样返回输入对象 ⇒ 该组合下数值**逐位不变**。
+# ============================================================================
+TAU_SIGN_BIG_DEFAULT = 1.0        # 大 yaw 电机通道 τ_cmd
+TAU_SIGN_SMALL_DEFAULT = -1.0     # ★ 小 yaw 通道 τ_small（默认**取反**）
+
+_TAU_SIGN = (TAU_SIGN_BIG_DEFAULT, TAU_SIGN_SMALL_DEFAULT)     # (big, small)
+
+
+def _check_sign(v, what: str) -> float:
+    s = float(v)
+    if s not in (-1.0, 1.0):
+        raise ValueError(f"{what} 的 τ 符号只接受 +1 或 -1，收到 {v!r}")
+    return s
+
+
+def set_tau_sign_big(v) -> float:
+    """设置**大 yaw 电机**通道（τ_cmd）的符号；返回生效后的值。"""
+    global _TAU_SIGN
+    _TAU_SIGN = (_check_sign(v, "大 yaw"), _TAU_SIGN[1])
+    return _TAU_SIGN[0]
+
+
+def set_tau_sign_small(v) -> float:
+    """设置**小 yaw** 通道（τ_small）的符号；返回生效后的值。"""
+    global _TAU_SIGN
+    _TAU_SIGN = (_TAU_SIGN[0], _check_sign(v, "小 yaw"))
+    return _TAU_SIGN[1]
+
+
+def set_tau_sign(big=None, small=None):
+    """同时/分别设置两路符号（None = 保持不变）。返回 ``(big, small)``。"""
+    if big is not None:
+        set_tau_sign_big(big)
+    if small is not None:
+        set_tau_sign_small(small)
+    return _TAU_SIGN
+
+
+def reset_tau_sign():
+    """恢复默认符号（大 yaw +1、小 yaw −1）。"""
+    global _TAU_SIGN
+    _TAU_SIGN = (TAU_SIGN_BIG_DEFAULT, TAU_SIGN_SMALL_DEFAULT)
+    return _TAU_SIGN
+
+
+def tau_sign() -> tuple:
+    """当前两路符号 ``(big, small)``。"""
+    return _TAU_SIGN
+
+
+def tau_sign_big() -> float:
+    return _TAU_SIGN[0]
+
+
+def tau_sign_small() -> float:
+    return _TAU_SIGN[1]
+
+
+def tau_sign_desc() -> str:
+    """一行描述当前 τ 符号（写进结果文件的配方行，保证参数文件自描述）。"""
+    sb, ss = _TAU_SIGN
+    tag = "默认" if _TAU_SIGN == (TAU_SIGN_BIG_DEFAULT, TAU_SIGN_SMALL_DEFAULT) else "改过"
+    return f"τ符号[{tag}]: 大yaw={sb:+.0f} 小yaw={ss:+.0f}"
+
+
+def apply_tau_sign(tau):
+    """按两路符号给控制力矩 ``[..., 2]`` 加符号；两路都是 +1 时**原样返回**。"""
+    sb, ss = _TAU_SIGN
+    if sb == 1.0 and ss == 1.0:
+        return tau
+    out = np.array(tau, dtype=np.float64, copy=True)
+    if sb != 1.0:
+        out[..., 0] *= sb
+    if ss != 1.0:
+        out[..., 1] *= ss
+    return out
 
 # ★ 无参数限位（与原仓库 `param_ident.py` 一致）：不存在任何上下界 / clamp / 投影。
 #   · 正数（可取值范围 = (0, +∞)）用 **log 参数化** φ = exp(raw) ⇒ 正性隐式保证；
@@ -80,24 +185,17 @@ class ParamSpec:
 #    要改初值就只改这张表；`--init-vector` 是"整体替换"的显式用户输入，不是另一份默认值。
 # ════════════════════════════════════════════════════════════════════════════
 PARAM_SPECS: tuple[ParamSpec, ...] = (
-    ParamSpec("Jbig_eff", "kg·m²", True, 0.1, "大 yaw 等效惯量（含上装）"),
-    ParamSpec("Js", "kg·m²", True, 0.1, "小 yaw 惯量"),
-    ParamSpec("Px", "kg·m", False, 0.1, "上装一阶矩 x（可正可负）"),
-    ParamSpec("Py", "kg·m", False, 0.1, "上装一阶矩 y（可正可负）"),
-    ParamSpec("fc_big", "N·m", True, 0.1, "大 yaw 库仑摩擦"),
-    ParamSpec("fv_big", "N·m·s/rad", True, 0.1, "大 yaw 粘滞摩擦"),
-    ParamSpec("fc_small", "N·m", True, 0.1, "小 yaw 库仑摩擦"),
-    ParamSpec("fv_small", "N·m·s/rad", True, 0.1, "小 yaw 粘滞摩擦"),
-    ParamSpec("backlash_delta", "rad", True, 0.1, "δ: 背隙宽度"),
-    ParamSpec("backlash_k", "N·m/rad", True, 200.0, "k: 接触刚度"),
-    ParamSpec("backlash_c", "N·m·s/rad", True, 0.1, "c: 接触阻尼"),
-    ParamSpec("backlash_through", "—", False, 0.002, "γ: 死区直通线性项（梯度引导，**默认固定**）"),
-    ParamSpec("Jmotor", "kg·m²", True, 0.1, "电机侧等效惯量"),
-    ParamSpec("fc_motor", "N·m", True, 0.1, "电机侧库仑摩擦"),
-    ParamSpec("fv_motor", "N·m·s/rad", True, 0.1, "电机侧粘滞摩擦"),
-    ParamSpec("backlash_beta", "rad", False, 0.0, "β: 死区中心偏置（可正可负；★ 必为数据列，不参与拟合）"),
-    ParamSpec("Pbx", "kg·m", False, 0.1, "大 yaw 侧一阶矩 x（只随大 yaw 转的偏心）"),
-    ParamSpec("Pby", "kg·m", False, 0.1, "大 yaw 侧一阶矩 y"),
+    ParamSpec("X_b", "kg·m", False, -0.004230, "m_b·P_bx（b 侧一阶矩 x，可正可负）"),
+    ParamSpec("Y_b", "kg·m", False, -0.022760, "m_b·P_by"),
+    ParamSpec("X_s", "kg·m", False, 0.003943, "m_s·P_sx（s 侧一阶矩 x）"),
+    ParamSpec("Y_s", "kg·m", False, 0.009707, "m_s·P_sy"),
+    ParamSpec("I_b", "kg·m²", True, 0.002113, "b 绕**质心**转动惯量（J_b = |X_b|²+I_b）"),
+    ParamSpec("I_s", "kg·m²", True, 0.000307, "s 绕**质心**转动惯量（J_s = |X_s|²/μ+I_s）"),
+    ParamSpec("mu", "kg", True, 0.257475, "★ m_s（规范自由度；默认**可学习**，--fix-mu 可钉住）"),
+    ParamSpec("f_bc", "N·m", True, 0.001163, "b 侧库仑摩擦"),
+    ParamSpec("f_bv", "N·m·s/rad", True, 0.018365, "b 侧粘滞摩擦"),
+    ParamSpec("f_sc", "N·m", True, 0.005668, "s 侧库仑摩擦"),
+    ParamSpec("f_sv", "N·m·s/rad", True, 0.325935, "s 侧粘滞摩擦"),
 )
 
 PARAM_NAMES = tuple(s.name for s in PARAM_SPECS)
@@ -118,12 +216,15 @@ def _spec_default(name: str) -> float:
     """参数表里的**初值**（唯一来源；供 `PlanarParams` 字段默认值派生）。"""
     return spec_of(name).default
 
-# ── 兼容旧分组名（打印/文档/旧脚本对照用；**参数分组以可取值范围为准**）──
-CORE_PARAM_NAMES = PARAM_NAMES[:8]
+# ── 便捷子集（打印/`fit_axis` 用；**参数分组以可取值范围为准**）──
+CORE_PARAM_NAMES = PARAM_NAMES[:6]                       # X_b,Y_b,X_s,Y_s,I_b,I_s
 NCORE = len(CORE_PARAM_NAMES)
-EXTRA_PARAM_NAMES = PARAM_NAMES[8:16]
-PB_PARAM_NAMES = PARAM_NAMES[16:18]
-NPB = len(PB_PARAM_NAMES)
+# `fit_axis="small"` 时要固定的 b 侧参数（b 侧惯量/摩擦在小 yaw 数据里不可观测）
+EXTRA_PARAM_NAMES = ("X_b", "Y_b", "I_b", "f_bc", "f_bv")
+# ★ 默认**不固定任何参数**（μ 也是可学习的）。注意 μ 是规范自由度（只以 μ|D|²、
+#   X_b+μdx、Y_b+μdy、(X_s²+Y_s²)/μ 组合进入动力学）⇒ 拟合里它有一条平方向，
+#   想消掉就用 `--fix-mu` 把它钉在初值上。
+DEFAULT_FIXED = ()
 
 # ── ★ 两组: 按可取值范围 ──
 POSITIVE_PARAM_NAMES = tuple(s.name for s in PARAM_SPECS if s.positive)
@@ -156,32 +257,56 @@ class PlanarParams:
     friction_lambda: float = FRICTION_LAMBDA
     tau_offset_big: float = 0.0
     tau_offset_small: float = 0.0
-    # ── ★ 18 个辨识参数的字段默认值 = **参数表 PARAM_SPECS 的 `default`**（唯一来源）──
-    # ── 8 个核心辨识参数（平面 2-DOF 子块）──
-    Jbig_eff: float = _spec_default("Jbig_eff")
-    Js: float = _spec_default("Js")
-    Px: float = _spec_default("Px")
-    Py: float = _spec_default("Py")
-    fc_big: float = _spec_default("fc_big")
-    fv_big: float = _spec_default("fv_big")
-    fc_small: float = _spec_default("fc_small")
-    fv_small: float = _spec_default("fv_small")
-    # ── 8 个背隙/电机侧辨识参数 ──
-    backlash_delta: float = _spec_default("backlash_delta")      # δ: 背隙宽度（rad）
-    backlash_k: float = _spec_default("backlash_k")              # k: 接触刚度 (N·m/rad)
-    backlash_c: float = _spec_default("backlash_c")              # c: 接触阻尼 (N·m·s/rad)
-    backlash_through: float = _spec_default("backlash_through")  # γ: 死区直通项（**默认固定**）
-    Jmotor: float = _spec_default("Jmotor")                      # 电机侧等效惯量 (kg·m²)
-    fc_motor: float = _spec_default("fc_motor")                  # 电机侧库仑摩擦 (N·m)
-    fv_motor: float = _spec_default("fv_motor")                  # 电机侧粘滞摩擦 (N·m·s/rad)
-    backlash_beta: float = _spec_default("backlash_beta")        # β: 死区中心（Δ = θ_m−θ_p−β）
-    # ── 2 个大 yaw 侧一阶矩（kg·m）: Pbx/Pby ──
-    #   Gb = (Pbx + m_u_known·dx)·gy − (Pby + m_u_known·dy)·gx + Gs
-    Pbx: float = _spec_default("Pbx")
-    Pby: float = _spec_default("Pby")
-    # ── 固定量（**不**辨识）──
-    backlash_smooth_eps: float = 1.0e-4  # 平滑死区 ε（= C++ ModelParams 默认）
-    tau_offset_motor: float = 0.0        # 电机侧力矩偏置（默认关）
+    # ── ★ 11 个辨识参数的字段默认值 = **参数表 PARAM_SPECS 的 `default`**（唯一来源）──
+    X_b: float = _spec_default("X_b")
+    Y_b: float = _spec_default("Y_b")
+    X_s: float = _spec_default("X_s")
+    Y_s: float = _spec_default("Y_s")
+    I_b: float = _spec_default("I_b")
+    I_s: float = _spec_default("I_s")
+    mu: float = _spec_default("mu")
+    f_bc: float = _spec_default("f_bc")
+    f_bv: float = _spec_default("f_bv")
+    f_sc: float = _spec_default("f_sc")
+    f_sv: float = _spec_default("f_sv")
+
+    # ── 派生量（不是自由参数）──
+    @property
+    def J_b(self):
+        """J_b = I_b + m_b|P_b|²（m_b = 1）。"""
+        return self.I_b + self.X_b * self.X_b + self.Y_b * self.Y_b
+
+    @property
+    def J_s(self):
+        """J_s = I_s + m_s|P_s|² = I_s + (X_s²+Y_s²)/μ。"""
+        return self.I_s + (self.X_s * self.X_s + self.Y_s * self.Y_s) / self.mu
+
+    @property
+    def D2(self):
+        """|D|² = dx² + dy²。"""
+        return self.dx * self.dx + self.dy * self.dy
+
+    @property
+    def A(self):
+        return self.J_b + self.mu * self.D2
+
+    @property
+    def B(self):
+        return self.J_s
+
+    def Delta_min(self):
+        """Δ 的下界 = J_s·J_b + μ|D|²·I_s（> 0 ⇒ 恒正定）。"""
+        return self.J_s * self.J_b + self.mu * self.D2 * self.I_s
+
+    # ── 回写主模型头文件的 6 个参数（主模型仍是 3-DOF 背隙版，用这个换算）──
+    def to_header_params(self) -> dict:
+        """缩合参数 → `include/tcbs/mpc/planar_yaw_model.h` 的 6 个惯量/重力参数。
+
+            Jbig_eff = A,  Js = J_s,  (Px,Py) = (X_s,Y_s),  (Pbx,Pby) = (X_b+μdx, Y_b+μdy)
+        （背隙/电机那 6 个参数本模型不辨识，需沿用主模型现有值。）
+        """
+        return {"Jbig_eff": self.A, "Js": self.J_s, "Px": self.X_s, "Py": self.Y_s,
+                "Pbx": self.X_b + self.mu * self.dx, "Pby": self.Y_b + self.mu * self.dy}
 
     # ── 向量化接口（顺序与 PARAM_NAMES 一致）──
     def vector(self) -> np.ndarray:
@@ -240,19 +365,18 @@ def _nonzero(v) -> bool:
 
 @dataclass
 class Exo:
-    """外生量（ModelExo 的 python 版）。
+    """外生量（2-DOF 模型的输入）。
 
-    `gravity_a` 的分量可以是标量，也可以是**逐样本数组**（numpy 形状 [N] / torch 形状 [B]），
-    此时会与状态的前导维广播 —— 用于"底盘静态倾斜、大 yaw 转动导致 A 系重力方向随之旋转"。
+    `gravity_a = (g_ax, g_ay)` 是**A 系（随 b 转的转子系）**重力平面分量 (m/s²)，
+    可以逐样本（数组）—— 数据列 `gravity_ax/ay` 就是这个，直接喂。
+    `base_omega` 是底盘绕关节轴的角速度 ω_c（`chassis_yaw_rate`）。
+
+    ★ 模型里**没有** α_c 项（α_c = 0）；θ_c 也不需要（A 系重力已含 ψ_b 的转动）。
     """
 
-    gravity_a: tuple = (0.0, 0.0)   # ★ A 系（大 yaw 转子系）重力平面分量 (m/s²)；水平 = (0,0)
-    base_omega: float = 0.0         # 底盘绕关节轴角速度（本任务 = 0）
-    base_alpha: float = 0.0         # 底盘绕关节轴角加速度（本任务 = 0）
-    gravity_on: bool | None = None  # None ⇒ 自动判定（张量不能直接做 if 判断）
-    # ★ 背隙死区中心 β：可以是标量，也可以是**逐样本**数组（np [T,B] / torch [B] 广播）。
-    #   ``None`` ⇒ 用模型参数 `PlanarParams.backlash_beta`。
-    backlash_beta: float | None = None
+    gravity_a: tuple = (0.0, 0.0)
+    base_omega: float = 0.0
+    gravity_on: bool | None = None
 
     def __post_init__(self):
         if self.gravity_on is None:
@@ -263,14 +387,9 @@ class Exo:
 EXO_ZERO = Exo()
 
 
-def exo_from_gravity(gx, gy, base_omega: float = 0.0, base_alpha: float = 0.0) -> Exo:
-    """按 A 系重力平面分量构造 Exo（自动置 gravity_on ⇒ eom 会自动启用重力项）。"""
-    return Exo(gravity_a=(gx, gy), base_omega=base_omega, base_alpha=base_alpha)
-
-
-def beta_of(p: PlanarParams, exo: Exo):
-    """背隙死区中心 β: 优先用 Exo 里的（可逐样本），否则用模型参数。"""
-    return p.backlash_beta if exo.backlash_beta is None else exo.backlash_beta
+def exo_from_gravity(gx, gy, base_omega: float = 0.0) -> Exo:
+    """按 A 系重力平面分量构造 Exo（自动置 gravity_on）。"""
+    return Exo(gravity_a=(gx, gy), base_omega=base_omega)
 
 
 def p_direction(dx: float, dy: float, zero_angle_deg: float = 0.0):
@@ -321,7 +440,7 @@ class ParamGroups:
             if n < 1e-12:
                 raise ValueError("p_along_d 需要 |d| > 0（几何偏置为 0 时方向无定义）")
             self.p_along_d = (u[0] / n, u[1] / n)
-            fixed |= {"Px", "Py"}
+            fixed |= {"X_s", "Y_s"}
         else:
             self.p_along_d = None
         self.fixed_names = tuple(n for n in PARAM_NAMES if n in fixed)
@@ -371,7 +490,7 @@ class ParamGroups:
 
     def _p_along_init(self, phi0: np.ndarray) -> float:
         ux, uy = self.p_along_d
-        return float(phi0[PARAM_INDEX["Px"]]) * ux + float(phi0[PARAM_INDEX["Py"]]) * uy
+        return float(phi0[PARAM_INDEX["X_s"]]) * ux + float(phi0[PARAM_INDEX["Y_s"]]) * uy
 
     def to_physical(self, raw):
         """raw（np 或 torch，长度 = n_learnable）→ 长度 n_learnable 的物理参数（同类型）。"""
@@ -396,8 +515,8 @@ class ParamGroups:
             v = values[:, k] if two_d else values[k]
             if nm == P_ALONG_D_NAME:
                 ux, uy = self.p_along_d
-                kw["Px"] = v * ux
-                kw["Py"] = v * uy
+                kw["X_s"] = v * ux
+                kw["Y_s"] = v * uy
             else:
                 kw[nm] = v
         return replace(base, **kw)
@@ -409,8 +528,8 @@ class ParamGroups:
         for k, nm in enumerate(self.learnable_names):
             if nm == P_ALONG_D_NAME:
                 ux, uy = self.p_along_d
-                out[PARAM_INDEX["Px"]] = v[k] * ux
-                out[PARAM_INDEX["Py"]] = v[k] * uy
+                out[PARAM_INDEX["X_s"]] = v[k] * ux
+                out[PARAM_INDEX["Y_s"]] = v[k] * uy
             else:
                 out[PARAM_INDEX[nm]] = v[k]
         return out
@@ -430,36 +549,28 @@ class ParamGroups:
         return "; ".join(parts) if parts else "（全部固定，无可学习参数）"
 
 
-def resolve_fixed_names(fit_axis: str = "both", freeze_params=(), freeze_backlash_through: bool = True,
-                        p_constraint: str = "free", use_beta_column: bool = True) -> tuple:
-    """把旧的"冻结语义"（fit_axis / 下标冻结 / γ / P 约束 / β 列）翻译成**固定参数名**。
+def resolve_fixed_names(fit_axis: str = "both", freeze_params=(), p_constraint: str = "free",
+                        fix_mu: bool = False) -> tuple:
+    """把 ``fit_axis`` / 下标冻结 / P 约束 / 是否钉住 μ，翻译成**固定参数名**。
 
-    返回的名字交给 :class:`ParamGroups`，它们就完全不属于两组可学习参数了。
-
-    ★ ``backlash_beta`` 现在**恒为固定参数**：β 是必需数据、永远取当前拟合帧的数据列
-      （``--beta-mode=fit`` 已移除，β 不再是可学习参数）。
+    返回的名字交给 :class:`ParamGroups`，它们就完全不属于两组可学习参数。
+    ★ 默认**不固定任何参数**（μ 也可学习）；`fix_mu=True` 才把 μ 钉在初值上。
     """
-    fixed = set()
+    fixed = set(DEFAULT_FIXED) | ({"mu"} if fix_mu else set())
     if fit_axis == "big":
-        # 只拟合大 yaw：小 yaw 摩擦不可辨识 → 固定
-        fixed |= {"fc_small", "fv_small"}
+        # 只拟合 b 通道：s 侧摩擦在 b 的数据里不可观测 → 固定
+        fixed |= {"f_sc", "f_sv"}
     elif fit_axis == "small":
-        # 只拟合小 yaw：大 yaw 惯量/摩擦、以及电机侧+背隙那 8 个参数都不进可观测量
-        fixed |= {"Jbig_eff", "fc_big", "fv_big"}
+        # 只拟合 s 通道：b 侧的惯量/一阶矩/摩擦都不进可观测量
+        fixed |= {"X_b", "Y_b", "I_b", "f_bc", "f_bv"}
         fixed |= set(EXTRA_PARAM_NAMES)
     elif fit_axis != "both":
         raise ValueError("fit_axis 必须是 both / big / small")
     for j in freeze_params:
         fixed.add(PARAM_NAMES[int(j)])
-    if freeze_backlash_through:
-        # γ：默认钉在初值上。它的定位只是死区内给优化器一个非零梯度；一旦放开，优化器会
-        # 拿它去"填"刚性接触的台阶（实测 δ 被撑到 0.25 rad，真值 0.087）。
-        fixed.add("backlash_through")
     mode = str(p_constraint).replace("-", "_")
     if mode not in ("free", "along_d", "zero"):
         raise ValueError("p_constraint 必须是 free / along_d / zero")
     if mode == "zero":
-        fixed |= {"Px", "Py"}
-    # ★ β 恒固定（必需数据列给出，不参与优化；--beta-mode=fit 已移除）
-    fixed.add("backlash_beta")
+        fixed |= {"X_s", "Y_s"}
     return tuple(fixed)

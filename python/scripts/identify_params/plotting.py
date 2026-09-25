@@ -9,18 +9,19 @@ import os
 
 import numpy as np
 
-from .model import simulate_backlash_np
+from .model import simulate_np
 from .params import (
     AXIS_BIG,
     AXIS_SMALL,
     EXO_ZERO,
+    exo_from_gravity,
     NPARAM,
     PARAM_NAMES,
     PARAM_UNITS,
     PlanarParams,
     Exo,
 )
-from .train import FitResult, beta_source
+from .train import FitResult
 
 
 def resolve_plot_paths(plot_out: str | None, default_prefix: str = "data/sysid/ident_torch"):
@@ -142,7 +143,8 @@ def plot_trajectory(res: FitResult, segs, base: PlanarParams, exo: Exo = EXO_ZER
     """★ 图 2: 实测 vs 模型前向（至少两段: 一段大 yaw 激励、一段小 yaw 激励）。
 
     行 = 数据段，列 = 角度 θ / 角速度 θ̇；
-    每个子图画**三个通道**（电机 / 云台 / 小 yaw）的实测(实线)与仿真(虚线)，标题里标注 RMSE。
+    每个子图画**两个通道**（θ_b 云台侧 / θ_s 小 yaw）的实测(实线)与仿真(虚线)，标题标注 RMSE。
+    （辨识模型是 2-DOF，没有电机通道；电机侧的记录值仍在 `seg.theta[:,0]`，只是不参与建模。）
     """
     plt = _lazy_pyplot(show_plot)
     phi = np.asarray(res.phi, dtype=np.float64)
@@ -164,33 +166,31 @@ def plot_trajectory(res: FitResult, segs, base: PlanarParams, exo: Exo = EXO_ZER
         raise ValueError("没有可画的数据段")
 
     nrow = len(used)
-    has_beta = any(s.beta_true is not None for s in used)      # 仿真数据才画 β 那一列
-    ncol = 3 if has_beta else 2
-    fig, axes = plt.subplots(nrow, ncol, figsize=(5.2 * ncol, 3.6 * nrow), squeeze=False)
-    fig.suptitle("实测（仿真环境） vs 模型前向（参数辨识后，同一段力矩输入）", fontsize=11)
+    fig, axes = plt.subplots(nrow, 2, figsize=(10.4, 3.6 * nrow), squeeze=False)
+    fig.suptitle("实测 vs 模型前向（2-DOF 缩合参数辨识后，同一段力矩输入）", fontsize=11)
 
     for i, seg in enumerate(used):
-        # 用记录力矩从**该段实测初值**前向仿真（与辨识/评测一致的积分器与 β 帧）
-        q0 = np.asarray(seg.theta[0], dtype=np.float64)
-        qd0 = np.asarray(seg.dtheta[0], dtype=np.float64)
-        beta_seq = beta_source(seg, state_mode, beta_mode)[0]
-        th_sim, dth_sim = simulate_backlash_np(p_model, q0, qd0, seg.tau, seg.dt, exo,
-                                               substeps=4, integrator=integrator,
-                                               beta_seq=beta_seq)
+        # 用记录力矩从**该段实测初值**前向仿真（与辨识/评测一致的积分器）
+        q0 = np.asarray(seg.theta[0, 1:], dtype=np.float64)
+        qd0 = np.asarray(seg.dtheta[0, 1:], dtype=np.float64)
+        exo_seq = None
+        if seg.gravity is not None:
+            exo_seq = [exo_from_gravity(float(seg.gravity[k, 0]), float(seg.gravity[k, 1]),
+                                        float(getattr(seg, "base_omega", 0.0) or 0.0))
+                       for k in range(seg.T)]
+        th_sim, dth_sim = simulate_np(p_model, q0, qd0, seg.tau, seg.dt, exo,
+                                      substeps=4, integrator=integrator, exo_seq=exo_seq)
         t = np.arange(seg.T) * seg.dt
         axis_name = "大 yaw 激励段" if int(seg.axis) == AXIS_BIG else "小 yaw 激励段"
         for col, (meas, sim, lab, unit) in enumerate((
-                (seg.theta, th_sim, "θ", "rad"),
-                (seg.dtheta, dth_sim, "θ̇", "rad/s"))):
+                (seg.theta[:, 1:], th_sim, "θ", "rad"),
+                (seg.dtheta[:, 1:], dth_sim, "θ̇", "rad/s"))):
             a = axes[i][col]
             ann = []
-            for k, (ax_name, ax_c) in enumerate((("电机", "C0"), ("云台", "C3"),
-                                                 ("小 yaw", "C1"))):
-                a.plot(t, meas[:, k], color=ax_c, lw=1.1, alpha=0.85,
-                       label=f"实测 {ax_name}")
+            for k, ax_name, ax_c in ((0, "云台 θ_b", "C3"), (1, "小 yaw θ_s", "C1")):
+                a.plot(t, meas[:, k], color=ax_c, lw=1.1, alpha=0.85, label=f"实测 {ax_name}")
                 a.plot(t, sim[:, k], color=ax_c, lw=1.1, ls="--", alpha=0.9,
                        label=f"仿真 {ax_name}")
-                # ★ 标注与**该子图的量**对应的 RMSE：角度用度，角速度用 rad/s
                 if col == 0:
                     ann.append(f"{ax_name}: RMSE={angle_rmse_deg(sim[:, k], meas[:, k]):.3f}°")
                 else:
@@ -201,23 +201,6 @@ def plot_trajectory(res: FitResult, segs, base: PlanarParams, exo: Exo = EXO_ZER
             a.set_ylabel(f"{lab} [{unit}]")
             a.grid(True, alpha=0.3)
             a.legend(fontsize=7, ncol=2, loc="best")
-        # ── 第 3 列: 背隙中心 β（真值 / 在线估计 / 观测极差中心）──
-        if has_beta:
-            a = axes[i][2]
-            tt = t
-            if seg.beta_true is not None:
-                a.plot(tt, seg.beta_true, "k-", lw=1.3, label="β 真值（仿真环境）")
-            if seg.beta is not None:
-                a.plot(tt, seg.beta, "C3--", lw=1.3, label="β 在线估计（控制器用）")
-                D = seg.theta[:, 0] - seg.theta[:, 1]
-                obs = 0.5 * (D.max() + D.min())
-                a.axhline(obs, color="C0", ls=":", lw=1.2,
-                          label=f"本段 Δ 极差中心（观测上限）={obs:+.4f}")
-            a.set_title(f"背隙中心 β（{axis_name}）: 只在穿越死区的段里可观测", fontsize=9)
-            a.set_xlabel("t [s]")
-            a.set_ylabel("β [rad]")
-            a.grid(True, alpha=0.3)
-            a.legend(fontsize=7, loc="best")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     _save_fig(fig, out_path, show_plot)
     return out_path
@@ -229,7 +212,7 @@ def plot_learning(res: FitResult, out_path: str, show_plot: bool = False) -> str
         raise ValueError("没有 eval_hist（要用 --eval-every>0 且给了 --val-data）")
     plt = _lazy_pyplot(show_plot)
     ep = np.array([e for e, _ in res.eval_hist], dtype=float)
-    names = (("motor", "电机"), ("platform", "云台"), ("small", "小 yaw"))
+    names = (("platform", "云台 θ_b"), ("small", "小 yaw θ_s"))
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.2))
     fig.suptitle("留出集开环误差 vs epoch（窗口 0.1 s）—— 学习曲线", fontsize=11)
     for ax, key, unit in ((axes[0], "_deg", "角度 RMSE [°]"),

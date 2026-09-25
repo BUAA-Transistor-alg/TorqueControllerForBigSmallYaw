@@ -55,6 +55,12 @@ public:
         bool               mcu_valid = false;
         mcu::ReceivePacket mcu_packet{};   // 已映射
         uint8_t            mcu2_seq = 0;               // MCU2 新样本序号（值保持时不变）
+        // ★ 新增（追加在末尾，不改已有字段顺序）: **处理前**的原始串口包。
+        //   mcu_packet 是 McuDataPreprocessor 的输出；raw_mcu_packet 是它的输入
+        //   （采集脚本可据此同时保存"处理前 + 处理后"的数据）。
+        //   IMU 不经预处理器，imu_packet 本身即原始包；raw_imu_packet 为对称命名的副本。
+        mcu::ReceivePacket raw_mcu_packet{};
+        imu::ReceivePacket raw_imu_packet{};
     };
 
     explicit RobotCommunication(
@@ -81,6 +87,7 @@ public:
             std::lock_guard<std::mutex> lock(imu_mutex_);
             if (has_imu_data_) {
                 data.imu_packet = latest_imu_packet_;
+                data.raw_imu_packet = latest_imu_packet_;   // IMU 无预处理 → 与 imu_packet 相同
                 data.imu_valid = true;
             }
         }
@@ -88,11 +95,25 @@ public:
             std::lock_guard<std::mutex> lock(mcu_mutex_);
             if (has_mcu_data_) {
                 data.mcu_packet = latest_mcu_packet_;
+                data.raw_mcu_packet = latest_mcu_raw_;      // ★ 处理前原始包
                 data.mcu2_seq = latest_mcu2_seq_;
                 data.mcu_valid = true;
             }
         }
         return data;
+    }
+
+    // ── 原始（处理前）串口包的只读访问器 ──
+    // 返回**副本**而非 const&: onXxxReceive 由串口后台线程写入，若返回引用会与写入竞争
+    // （调用方拿到的引用可能在读取过程中被后台线程改写）。需要"同一次加锁的一致快照"
+    // 时请用 getLatestData()。
+    mcu::ReceivePacket lastRawMcuPacket() {
+        std::lock_guard<std::mutex> lock(mcu_mutex_);
+        return latest_mcu_raw_;
+    }
+    imu::ReceivePacket lastImuPacket() {
+        std::lock_guard<std::mutex> lock(imu_mutex_);
+        return latest_imu_packet_;
     }
 
     // 发送 MCU 数据（发送前按映射参数预处理）
@@ -131,6 +152,12 @@ private:
     }
 
     void onMcuReceive(const mcu::ReceivePacket& packet) {
+        // ★ 在 processReceive **之前**保留处理前的原始串口包
+        //   （latest_mcu_packet_ 是它的输出；两者供采集脚本"处理前 + 处理后"同时保存）
+        {
+            std::lock_guard<std::mutex> lock(mcu_mutex_);
+            latest_mcu_raw_ = packet;
+        }
         const mcu::ReceivePacket processed = preprocessor_.processReceive(packet);
         {
             std::lock_guard<std::mutex> lock(mcu_mutex_);
@@ -155,7 +182,8 @@ private:
     bool               has_imu_data_ = false;
 
     std::mutex         mcu_mutex_;
-    mcu::ReceivePacket latest_mcu_packet_{};
+    mcu::ReceivePacket latest_mcu_packet_{};   // McuDataPreprocessor 输出（已映射）
+    mcu::ReceivePacket latest_mcu_raw_{};      // ★ 处理前原始串口包（processReceive 输入）
     uint8_t            latest_mcu2_seq_ = 0;
     bool               has_mcu_data_ = false;
 };

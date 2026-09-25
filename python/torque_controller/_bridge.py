@@ -47,6 +47,9 @@ __all__ = [
     "TcbsRobotMcuData",
     "TcbsRobotImuData",
     "TcbsRobotLatestData",
+    "TcbsRobotRawMcu",
+    "TcbsRobotRawImu",
+    "TcbsRobotRawPackets",
     "TcbsRobotSourceInfo",
     "TcbsRobotProvenance",
     "TcbsRobotEstimate",
@@ -207,6 +210,55 @@ class TcbsRobotLatestData(Structure):
     _fields_ = [
         ("mcu", TcbsRobotMcuData),
         ("imu", TcbsRobotImuData),
+    ]
+
+
+class TcbsRobotRawMcu(Structure):
+    """**处理前**（原始串口、未过 McuDataPreprocessor）的 MCU 包。"""
+
+    _fields_ = [
+        ("sizeof_raw_mcu", c_uint32),        # = sizeof(TcbsRobotRawMcu)（版本握手）
+        ("valid", c_uint8),                  # 是否收到过
+        ("age_s", c_double),                 # 值年龄 s（-1 = 从未收到）
+        ("bullet_velocity", c_float),        # —— 以下全部为处理前原始值 ——
+        ("pitch_angle", c_float),
+        ("yaw_big_angle", c_double),
+        ("yaw_big_omega", c_float),
+        ("yaw_small_angle", c_float),
+        ("yaw_small_omega", c_float),
+        ("chassis_imu_yaw", c_float),
+        ("chassis_imu_omega", c_float),
+        ("mark", c_uint8),
+        ("color", c_uint8),
+        ("auto_aim_switch", c_uint8),
+        ("yaw_big_temperature", c_uint8),
+        ("yaw_small_temperature", c_uint8),
+        ("mcu2_seq", c_uint8),
+    ]
+
+
+class TcbsRobotRawImu(Structure):
+    """**处理前**（原始串口）的 IMU 包（IMU 本就不经 McuDataPreprocessor）。"""
+
+    _fields_ = [
+        ("sizeof_raw_imu", c_uint32),        # = sizeof(TcbsRobotRawImu)（版本握手）
+        ("valid", c_uint8),                  # 是否收到过
+        ("gx", c_float), ("gy", c_float), ("gz", c_float),
+        ("ax", c_float), ("ay", c_float), ("az", c_float),
+        ("euler_yaw", c_double),
+        ("euler_pitch", c_double),
+        ("euler_roll", c_double),
+        ("dt_one_tenth_ms", c_uint32),
+    ]
+
+
+class TcbsRobotRawPackets(Structure):
+    """MCU + IMU 处理前原始包的组合（一次调用取全，同一快照）。"""
+
+    _fields_ = [
+        ("sizeof_raw_packets", c_uint32),    # = sizeof(TcbsRobotRawPackets)（版本握手）
+        ("mcu", TcbsRobotRawMcu),
+        ("imu", TcbsRobotRawImu),
     ]
 
 
@@ -511,6 +563,7 @@ _SIGNATURES = [
     ("tcbs_robot_comm_destroy", [c_void_p], None),
     ("tcbs_robot_comm_stop", [c_void_p], None),
     ("tcbs_robot_comm_get_latest_data", [c_void_p, POINTER(TcbsRobotLatestData)], ctypes.c_int),
+    ("tcbs_robot_comm_get_raw_packets", [c_void_p, POINTER(TcbsRobotRawPackets)], ctypes.c_int),
     ("tcbs_robot_comm_get_estimate", [c_void_p, POINTER(TcbsRobotEstimate)], ctypes.c_int),
     ("tcbs_robot_comm_send_to_mcu",
      [c_void_p, c_uint8, c_uint8, c_float, c_uint8, c_double, c_float, c_float,
@@ -548,6 +601,7 @@ _SIGNATURES = [
       POINTER(c_double), c_int32, POINTER(c_double), c_int32, POINTER(c_double), c_int32,
       POINTER(c_uint8), c_int32, c_uint8], ctypes.c_int),
     ("tcbs_robot_controller_get_state", [c_void_p, POINTER(TcbsRobotControllerState)], ctypes.c_int),
+    ("tcbs_robot_controller_get_raw_packets", [c_void_p, POINTER(TcbsRobotRawPackets)], ctypes.c_int),
     ("tcbs_robot_controller_get_ref_sequence", [c_void_p, c_int32, POINTER(c_double), c_int32], ctypes.c_int),
     ("tcbs_robot_controller_get_pred_sequence", [c_void_p, c_int32, POINTER(c_double), c_int32], ctypes.c_int),
     ("tcbs_robot_controller_get_pred_joint_sequence",
@@ -704,6 +758,24 @@ def _u8_array(seq):
     return (c_uint8 * len(vals))(*vals), len(vals)
 
 
+def _check_raw_packet_sizes(pkts: TcbsRobotRawPackets) -> None:
+    """版本握手: 库回填的 ``sizeof_*`` 必须与 Python 侧 ctypes 结构体一致。
+
+    不一致时说明 ``RobotCommunicationC.h`` 与 ``_bridge.py`` 不同步
+    （或加载了旧的 .so），直接报错，避免按错误布局解读数据。
+    """
+    checks = (
+        ("TcbsRobotRawPackets_C", pkts.sizeof_raw_packets, sizeof(TcbsRobotRawPackets)),
+        ("TcbsRobotRawMcu_C", pkts.mcu.sizeof_raw_mcu, sizeof(TcbsRobotRawMcu)),
+        ("TcbsRobotRawImu_C", pkts.imu.sizeof_raw_imu, sizeof(TcbsRobotRawImu)),
+    )
+    for name, lib_size, py_size in checks:
+        if lib_size != py_size:
+            raise TorqueControllerError(
+                f"原始包布局不匹配 {name}: 库={lib_size}, Python={py_size}"
+                f"（C 头文件与 _bridge.py 不同步？）")
+
+
 # ============================================================================
 # 默认配置
 # ============================================================================
@@ -787,6 +859,22 @@ class TcbsRobotCommunication:
         _check(lib.tcbs_robot_comm_get_latest_data(self._handle, byref(data)),
                "tcbs_robot_comm_get_latest_data")
         return _to_obj(data)
+
+    def get_raw_packets(self) -> SimpleNamespace:
+        """预处理前的原始串口包（MCU 未过 McuDataPreprocessor；IMU 本就不经预处理器）。
+
+        返回 ns.mcu.<字段> / ns.imu.<字段>，字段名与 C 结构体 (`TcbsRobotRawMcu_C` /
+        `TcbsRobotRawImu_C`) 逐字一致，例如 ns.mcu.yaw_small_angle、ns.mcu.yaw_small_omega、
+        ns.mcu.chassis_imu_omega、ns.mcu.valid、ns.mcu.age_s、ns.mcu.mcu2_seq、
+        ns.imu.euler_yaw、ns.imu.dt_one_tenth_ms。
+        无硬件时也 must 能调用成功（valid=0），不要抛异常。
+        """
+        lib = _require_lib()
+        pkts = TcbsRobotRawPackets()
+        _check(lib.tcbs_robot_comm_get_raw_packets(self._handle, byref(pkts)),
+               "tcbs_robot_comm_get_raw_packets")
+        _check_raw_packet_sizes(pkts)
+        return _to_obj(pkts)
 
     def get_estimate(self) -> SimpleNamespace:
         """完整状态估计（可信量 / 大 yaw 补偿 / 反解位姿 / 外生量 / 数据来源）。"""
@@ -1042,6 +1130,15 @@ class TcbsRobotController:
         mpc.pred_joint_seq = [self._get_sequence(lib.tcbs_robot_controller_get_pred_joint_sequence, i)
                               for i in (0, 1)]
         return obj
+
+    def get_raw_packets(self) -> SimpleNamespace:
+        """返回处理前(原始串口)的 MCU/IMU 包: ns.mcu.<field> / ns.imu.<field>（字段名与 C 结构一致）。"""
+        lib = _require_lib()
+        pkts = TcbsRobotRawPackets()
+        _check(lib.tcbs_robot_controller_get_raw_packets(self._handle, byref(pkts)),
+               "tcbs_robot_controller_get_raw_packets")
+        _check_raw_packet_sizes(pkts)
+        return _to_obj(pkts)
 
     def _get_sequence(self, fn, which: int):
         n = fn(self._handle, int(which), None, 0)      # 先查询长度

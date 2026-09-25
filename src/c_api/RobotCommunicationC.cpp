@@ -124,6 +124,57 @@ void fillImuFromRaw(const RobotCommunication::LatestData& raw, TcbsRobotImuData_
     d.dt_one_tenth_ms = im.dt_one_tenth_ms;
 }
 
+// ── 处理前（原始串口）包 → C ──
+// 只读快照，不做任何映射；sizeof_* 回填本库结构体大小（供 ctypes 版本握手）。
+void fillRawMcu(const mcu::ReceivePacket& m, bool valid, double age_s,
+                TcbsRobotRawMcu_C& d) {
+    d = TcbsRobotRawMcu_C{};
+    d.sizeof_raw_mcu = static_cast<uint32_t>(sizeof(TcbsRobotRawMcu_C));
+    d.valid = b2u(valid);
+    d.age_s = age_s;                     // -1 = 从未收到（与估计器 age 语义一致）
+    if (!valid) return;
+    d.bullet_velocity = m.bullet_velocity;
+    d.pitch_angle = m.pitch_angle;       // ★ 未过 McuDataPreprocessor（处理前原始值）
+    d.yaw_big_angle = m.yaw_big_angle;
+    d.yaw_big_omega = m.yaw_big_omega;
+    d.yaw_small_angle = m.yaw_small_angle;
+    d.yaw_small_omega = m.yaw_small_omega;
+    d.chassis_imu_yaw = m.chassis_imu_yaw;
+    d.chassis_imu_omega = m.chassis_imu_omega;
+    d.mark = m.mark;
+    d.color = m.color;
+    d.auto_aim_switch = m.auto_aim_switch;
+    d.yaw_big_temperature = m.yaw_big_temperature;
+    d.yaw_small_temperature = m.yaw_small_temperature;
+    d.mcu2_seq = m.mcu2_seq;
+}
+
+void fillRawImu(const imu::ReceivePacket& im, bool valid, TcbsRobotRawImu_C& d) {
+    d = TcbsRobotRawImu_C{};
+    d.sizeof_raw_imu = static_cast<uint32_t>(sizeof(TcbsRobotRawImu_C));
+    d.valid = b2u(valid);
+    if (!valid) return;
+    d.gx = im.gx;
+    d.gy = im.gy;
+    d.gz = im.gz;
+    d.ax = im.ax;
+    d.ay = im.ay;
+    d.az = im.az;
+    d.euler_yaw = im.euler_yaw;
+    d.euler_pitch = im.euler_pitch;
+    d.euler_roll = im.euler_roll;
+    d.dt_one_tenth_ms = im.dt_one_tenth_ms;
+}
+
+void fillRawPackets(const mcu::ReceivePacket& m, bool mcu_valid, double mcu_age_s,
+                    const imu::ReceivePacket& im, bool imu_valid,
+                    TcbsRobotRawPackets_C& d) {
+    d = TcbsRobotRawPackets_C{};
+    d.sizeof_raw_packets = static_cast<uint32_t>(sizeof(TcbsRobotRawPackets_C));
+    fillRawMcu(m, mcu_valid, mcu_age_s, d.mcu);
+    fillRawImu(im, imu_valid, d.imu);
+}
+
 // 高层: RobotController::McuData / ImuData → C
 void fillMcu(const RobotController::McuData& s, TcbsRobotMcuData_C& d) {
     d = TcbsRobotMcuData_C{};
@@ -678,6 +729,28 @@ extern "C" int tcbs_robot_comm_get_latest_data(TcbsRobotCommHandle* handle, Tcbs
     }
 }
 
+// 取**处理前**的原始串口包（低层句柄）: 直接从 RobotCommunication 的原始快照填。
+// age_s 取估计器的大 yaw 值年龄（big_enc_age，与 MCU2 新样本序号同源；-1 = 从未收到）。
+extern "C" int tcbs_robot_comm_get_raw_packets(TcbsRobotCommHandle* handle,
+                                               TcbsRobotRawPackets_C* out) {
+    if (handle == nullptr) return TCBS_ROBOT_COMM_ERR_NULL_HANDLE;
+    if (out == nullptr) return TCBS_ROBOT_COMM_ERR_INVALID_ARG;
+    try {
+        std::lock_guard<std::mutex> lock(handle->mtx);
+        if (!handle->comm) return TCBS_ROBOT_COMM_ERR_RUNTIME;
+        const RobotCommunication::LatestData raw = handle->comm->getLatestData();
+        const double mcu_age_s = handle->comm->getEstimate().big_enc_age;
+        fillRawPackets(raw.raw_mcu_packet, raw.mcu_valid, mcu_age_s,
+                       raw.raw_imu_packet, raw.imu_valid, *out);
+        return TCBS_ROBOT_COMM_OK;
+    } catch (const std::exception& e) {
+        reportException("tcbs_robot_comm_get_raw_packets", e);
+        return TCBS_ROBOT_COMM_ERR_RUNTIME;
+    } catch (...) {
+        return TCBS_ROBOT_COMM_ERR_UNKNOWN;
+    }
+}
+
 extern "C" int tcbs_robot_comm_get_estimate(TcbsRobotCommHandle* handle, TcbsRobotEstimate_C* out) {
     if (handle == nullptr) return TCBS_ROBOT_COMM_ERR_NULL_HANDLE;
     if (out == nullptr) return TCBS_ROBOT_COMM_ERR_INVALID_ARG;
@@ -1135,6 +1208,27 @@ extern "C" int tcbs_robot_controller_get_state(TcbsRobotController_C* handle, Tc
         return TCBS_ROBOT_COMM_OK;
     } catch (const std::exception& e) {
         reportException("tcbs_robot_controller_get_state", e);
+        return TCBS_ROBOT_COMM_ERR_RUNTIME;
+    } catch (...) {
+        return TCBS_ROBOT_COMM_ERR_UNKNOWN;
+    }
+}
+
+// 取**处理前**的原始串口包（高层句柄）: 对应 RobotController::State 的 raw_mcu / raw_imu
+// （即 McuDataPreprocessor 之前的帧）。age_s 取 est.big_enc_age（-1 = 从未收到）。
+extern "C" int tcbs_robot_controller_get_raw_packets(TcbsRobotController_C* handle,
+                                                     TcbsRobotRawPackets_C* out) {
+    if (handle == nullptr) return TCBS_ROBOT_COMM_ERR_NULL_HANDLE;
+    if (out == nullptr) return TCBS_ROBOT_COMM_ERR_INVALID_ARG;
+    try {
+        std::lock_guard<std::mutex> lock(handle->mtx);
+        if (!handle->rc) return TCBS_ROBOT_COMM_ERR_RUNTIME;
+        const RobotController::State st = handle->rc->getState();
+        fillRawPackets(st.raw_mcu, st.mcu.valid, st.est.big_enc_age,
+                       st.raw_imu, st.imu.valid, *out);
+        return TCBS_ROBOT_COMM_OK;
+    } catch (const std::exception& e) {
+        reportException("tcbs_robot_controller_get_raw_packets", e);
         return TCBS_ROBOT_COMM_ERR_RUNTIME;
     } catch (...) {
         return TCBS_ROBOT_COMM_ERR_UNKNOWN;

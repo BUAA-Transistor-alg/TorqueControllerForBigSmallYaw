@@ -421,8 +421,20 @@ CSV_HEADER = [
     "mcu_yaw_small_angle", "mcu_yaw_small_omega",
     "mcu_chassis_imu_yaw", "mcu_chassis_imu_omega",
     "mcu_mark", "mcu_color", "mcu_auto_aim_switch",
-    "mcu_temp_big", "mcu_temp_small",
-    # ── IMU 反馈（原始值，未滤波）──
+    "mcu_temp_big", "mcu_temp_small", "mcu2_seq",
+    # ── IMU 反馈（★ 该链路本来就不经 McuDataPreprocessor，所以这一组就是**原始值**）──
+    # ── ★★ 预处理**前**的原始 MCU 包（`McuDataPreprocessor::processReceive` 的输入）──
+    #   与上面那组 `mcu_*`（= **处理后**、已按 LinearParams 映射）逐一对应，
+    #   两组都存 ⇒ 可离线复核映射是否正确，也可从原始包完全重放整条链路。
+    #   关系: `mcu_x = lin_recv_*_scale * raw_mcu_x (+ offset)`（参数见 npz 的 `lin_*` 标量）。
+    "raw_mcu_valid", "raw_mcu_age",
+    "raw_mcu_bullet_velocity", "raw_mcu_pitch_angle",
+    "raw_mcu_yaw_big_angle", "raw_mcu_yaw_big_omega",
+    "raw_mcu_yaw_small_angle", "raw_mcu_yaw_small_omega",
+    "raw_mcu_chassis_imu_yaw", "raw_mcu_chassis_imu_omega",
+    "raw_mcu_mark", "raw_mcu_color", "raw_mcu_auto_aim_switch",
+    "raw_mcu_temp_big", "raw_mcu_temp_small", "raw_mcu2_seq",
+
     "imu_gx", "imu_gy", "imu_gz", "imu_ax", "imu_ay", "imu_az",
     "imu_euler_yaw", "imu_euler_pitch", "imu_euler_roll", "imu_dt_one_tenth_ms",
     # ── 下发（本拍实际发出的值; 力矩 N·m / 关节角 rad）──
@@ -465,6 +477,17 @@ _SAMPLE_FIELDS = (
     "mcu_chassis_imu_yaw", "mcu_chassis_imu_omega",
     "mcu_mark", "mcu_color", "mcu_auto_aim_switch",
     "mcu_temp_big", "mcu_temp_small", "mcu2_seq",
+    # ── ★★ 预处理**前**的原始 MCU 包（`McuDataPreprocessor::processReceive` 的输入）──
+    #   与上面那组 `mcu_*`（= **处理后**、已按 LinearParams 映射）逐一对应，
+    #   两组都存 ⇒ 可离线复核映射是否正确，也可从原始包完全重放整条链路。
+    #   关系: `mcu_x = lin_recv_*_scale * raw_mcu_x (+ offset)`（参数见 npz 的 `lin_*` 标量）。
+    "raw_mcu_valid", "raw_mcu_age",
+    "raw_mcu_bullet_velocity", "raw_mcu_pitch_angle",
+    "raw_mcu_yaw_big_angle", "raw_mcu_yaw_big_omega",
+    "raw_mcu_yaw_small_angle", "raw_mcu_yaw_small_omega",
+    "raw_mcu_chassis_imu_yaw", "raw_mcu_chassis_imu_omega",
+    "raw_mcu_mark", "raw_mcu_color", "raw_mcu_auto_aim_switch",
+    "raw_mcu_temp_big", "raw_mcu_temp_small", "raw_mcu2_seq",
     "backlash_center", "backlash_beta_true",
     "theta_true_motor", "theta_true_platform", "theta_true_small",
     "dtheta_true_motor", "dtheta_true_platform", "dtheta_true_small",
@@ -829,6 +852,105 @@ def make_planners() -> dict:
 # ============================================================================
 # 数据容器
 # ============================================================================
+# ============================================================================
+# ★★ 原始（预处理前）/ 处理后 的 MCU 数据
+#   `McuDataPreprocessor` 只作用于 MCU（IMU 链路由 `imu::ReceivePacket` 直接给出，
+#   不经过预处理器 ⇒ `imu_*` 那组本来就是原始值）。
+#   这里两组都存: `mcu_*` = 处理后（已映射）、`raw_mcu_*` = 处理前（原始串口）。
+#   关系: `mapped = scale * raw + offset`，映射常量随段写进 npz 的 `lin_*` 标量。
+# ============================================================================
+def _lin_params_dict():
+    """当前生效的 LinearParams（C++ 默认值；采集脚本不覆盖 set_linear_params）。"""
+    try:
+        from torque_controller import default_linear_params
+        lp = default_linear_params()
+        return {k: float(getattr(lp, k)) for k in (
+            "send_pitch_scale", "send_pitch_offset", "recv_pitch_scale", "recv_pitch_offset",
+            "recv_big_yaw_scale", "recv_big_yaw_offset", "recv_big_omega_scale",
+            "send_big_yaw_scale", "send_big_yaw_offset", "send_big_velocity_scale",
+            "send_big_torque_scale",
+            "recv_small_yaw_scale", "recv_small_yaw_offset", "recv_small_omega_scale",
+            "send_small_yaw_scale", "send_small_yaw_offset", "send_small_velocity_scale",
+            "send_small_torque_scale")}
+    except Exception:
+        return {}
+
+
+LIN_PARAMS = _lin_params_dict()
+
+
+def _NS(**kw):
+    """轻量命名空间（给 raw_mcu_kwargs 传"处理后的 MCU 快照"用）。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(**kw)
+
+
+def _inv(v: float, scale_key: str, offset_key: str | None = None) -> float:
+    """反推原始值: raw = (mapped − offset) / scale（scale=0 时返回 0）。"""
+    sc = LIN_PARAMS.get(scale_key, 1.0)
+    off = LIN_PARAMS.get(offset_key, 0.0) if offset_key else 0.0
+    return (float(v) - off) / sc if sc else 0.0
+
+
+_RAW_WARNED = [False]
+
+
+def raw_mcu_kwargs(get_raw, mcu) -> dict:
+    """构造 ``raw_mcu_*`` 字段。
+
+    ``get_raw`` = 能调 ``comm.get_raw_packets()`` 时传入该函数（**优先，来自串口原始包**）；
+    拿不到（旧库/无硬件）时回退成"用映射常量从处理后的值反推"，并只警告一次 ——
+    回退值只能用于自洽，**不能**用来验证映射本身。
+    """
+    if get_raw is not None:
+        try:
+            raw = get_raw()
+            rm = raw.mcu
+            return {k: getattr(rm, k) for k in (
+                "valid", "age_s", "bullet_velocity", "pitch_angle", "yaw_big_angle",
+                "yaw_big_omega", "yaw_small_angle", "yaw_small_omega", "chassis_imu_yaw",
+                "chassis_imu_omega", "mark", "color", "auto_aim_switch",
+                "yaw_big_temperature", "yaw_small_temperature", "mcu2_seq")} and {
+                "raw_mcu_valid": float(rm.valid), "raw_mcu_age": float(rm.age_s),
+                "raw_mcu_bullet_velocity": float(rm.bullet_velocity),
+                "raw_mcu_pitch_angle": float(rm.pitch_angle),
+                "raw_mcu_yaw_big_angle": float(rm.yaw_big_angle),
+                "raw_mcu_yaw_big_omega": float(rm.yaw_big_omega),
+                "raw_mcu_yaw_small_angle": float(rm.yaw_small_angle),
+                "raw_mcu_yaw_small_omega": float(rm.yaw_small_omega),
+                "raw_mcu_chassis_imu_yaw": float(rm.chassis_imu_yaw),
+                "raw_mcu_chassis_imu_omega": float(rm.chassis_imu_omega),
+                "raw_mcu_mark": float(rm.mark), "raw_mcu_color": float(rm.color),
+                "raw_mcu_auto_aim_switch": float(rm.auto_aim_switch),
+                "raw_mcu_temp_big": float(rm.yaw_big_temperature),
+                "raw_mcu_temp_small": float(rm.yaw_small_temperature),
+                "raw_mcu2_seq": float(rm.mcu2_seq)}
+        except Exception:
+            pass
+    if not _RAW_WARNED[0]:
+        _RAW_WARNED[0] = True
+        print("[warn] 拿不到原始 MCU 包（get_raw_packets 不可用）⇒ raw_mcu_* 由映射常量反推；"
+              "该值只能自洽，不能用于验证映射")
+    return {
+        "raw_mcu_valid": float(getattr(mcu, "valid", 0.0)),
+        "raw_mcu_age": float(getattr(mcu, "age_s", -1.0)),
+        "raw_mcu_bullet_velocity": float(mcu.bullet_velocity),
+        "raw_mcu_pitch_angle": _inv(mcu.pitch_angle, "recv_pitch_scale", "recv_pitch_offset"),
+        "raw_mcu_yaw_big_angle": _inv(mcu.yaw_big_angle, "recv_big_yaw_scale",
+                                      "recv_big_yaw_offset"),
+        "raw_mcu_yaw_big_omega": _inv(mcu.yaw_big_omega, "recv_big_omega_scale"),
+        "raw_mcu_yaw_small_angle": _inv(mcu.yaw_small_angle, "recv_small_yaw_scale",
+                                        "recv_small_yaw_offset"),
+        "raw_mcu_yaw_small_omega": _inv(mcu.yaw_small_omega, "recv_small_omega_scale"),
+        "raw_mcu_chassis_imu_yaw": float(mcu.chassis_imu_yaw),
+        "raw_mcu_chassis_imu_omega": -float(mcu.chassis_imu_omega),   # 预处理器里硬编码取负
+        "raw_mcu_mark": float(mcu.mark), "raw_mcu_color": float(mcu.color),
+        "raw_mcu_auto_aim_switch": float(mcu.auto_aim_switch),
+        "raw_mcu_temp_big": float(getattr(mcu, "yaw_big_temperature", 0.0)),
+        "raw_mcu_temp_small": float(getattr(mcu, "yaw_small_temperature", 0.0)),
+        "raw_mcu2_seq": float(getattr(mcu, "mcu2_seq", 0.0))}
+
+
 class RobotSample:
     """一次读数。两种链路（真实/仿真）的 ``read()`` 返回同一种对象，
     采集逻辑因此与硬件完全解耦 —— dry-run 与实机走同一条代码路径。"""
@@ -1044,6 +1166,8 @@ class HwRobotLink:
             mcu_temp_big=int(mcu.yaw_big_temperature),
             mcu_temp_small=int(mcu.yaw_small_temperature),
             mcu2_seq=int(mcu.mcu2_seq),
+            # ── ★★ 预处理**前**的原始 MCU 包（优先来自串口原始包；见 raw_mcu_kwargs）──
+            **raw_mcu_kwargs(getattr(self.comm, "get_raw_packets", None), mcu),
             # ── IMU 反馈（原始 6 轴 + 欧拉 + 帧间隔）──
             imu_gx=float(imu.gx), imu_gy=float(imu.gy), imu_gz=float(imu.gz),
             imu_ax=float(imu.ax), imu_ay=float(imu.ay), imu_az=float(imu.az),
@@ -1664,6 +1788,18 @@ class SimRobotLink:
             mcu_yaw_small_angle=q[2], mcu_yaw_small_omega=qd[2],
             mcu_chassis_imu_yaw=psi_c_held, mcu_chassis_imu_omega=w_c_held,
             mcu_mark=0, mcu_color=0, mcu_auto_aim_switch=1,
+            # ★ 仿真里同样区分"原始/处理后": 把上面那组 mcu_*（电控侧被保持值=处理后）
+            #   用映射常量反推成原始包 ⇒ 满足 `mcu_x = scale·raw_mcu_x + offset`，
+            #   离线重放时与实机口径一致。
+            **raw_mcu_kwargs(None, _NS(
+                valid=1, age_s=float(age),
+                bullet_velocity=0.0, pitch_angle=0.0,
+                yaw_big_angle=float(self._meas["q0"]), yaw_big_omega=motor_rate,
+                yaw_small_angle=q[2], yaw_small_omega=qd[2],
+                chassis_imu_yaw=psi_c_held, chassis_imu_omega=w_c_held,
+                mark=0, color=0, auto_aim_switch=1,
+                yaw_big_temperature=30, yaw_small_temperature=30,
+                mcu2_seq=int(self._meas["seq"]))),
             imu_gx=0.0, imu_gy=0.0, imu_gz=qd[1] + w_c_true,
             imu_ax=0.0, imu_ay=0.0, imu_az=9.81,
             imu_euler_yaw=q[1] + psi_c_true, imu_euler_pitch=0.0, imu_euler_roll=0.0,
@@ -1946,6 +2082,37 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
                               arr("dtheta_true_small")], axis=-1),
         # ── 重力 A 系平面分量（m/s²）: 水平静置全 0；倾斜静置非 0 ⇒ 下游启用重力项 ──
         gravity_ax=arr("gravity_ax"), gravity_ay=arr("gravity_ay"),
+        # ── ★ MCU 反馈**处理后**（已按 LinearParams 映射；原先只在 CSV 里，这里补进 npz）──
+        mcu_bullet_velocity=arr("mcu_bullet_velocity"), mcu_pitch_angle=arr("mcu_pitch_angle"),
+        mcu_yaw_big_angle=arr("mcu_yaw_big_angle"), mcu_yaw_big_omega=arr("mcu_yaw_big_omega"),
+        mcu_yaw_small_angle=arr("mcu_yaw_small_angle"),
+        mcu_yaw_small_omega=arr("mcu_yaw_small_omega"),
+        mcu_chassis_imu_yaw=arr("mcu_chassis_imu_yaw"),
+        mcu_chassis_imu_omega=arr("mcu_chassis_imu_omega"),
+        mcu_mark=arr("mcu_mark"), mcu_color=arr("mcu_color"),
+        mcu_auto_aim_switch=arr("mcu_auto_aim_switch"),
+        mcu_temp_big=arr("mcu_temp_big"), mcu_temp_small=arr("mcu_temp_small"),
+        # ── IMU 反馈（★ 该链路不经预处理器 ⇒ 这一组本身就是**原始值**）──
+        imu_gx=arr("imu_gx"), imu_gy=arr("imu_gy"), imu_gz=arr("imu_gz"),
+        imu_ax=arr("imu_ax"), imu_ay=arr("imu_ay"), imu_az=arr("imu_az"),
+        imu_euler_yaw=arr("imu_euler_yaw"), imu_euler_pitch=arr("imu_euler_pitch"),
+        imu_euler_roll=arr("imu_euler_roll"),
+        imu_dt_one_tenth_ms=arr("imu_dt_one_tenth_ms"),
+        # ── ★★ 预处理**前**的原始 MCU 包（与上面 mcu_* 处理后那组逐一对应）──
+        raw_mcu_valid=arr("raw_mcu_valid"), raw_mcu_age=arr("raw_mcu_age"),
+        raw_mcu_bullet_velocity=arr("raw_mcu_bullet_velocity"),
+        raw_mcu_pitch_angle=arr("raw_mcu_pitch_angle"),
+        raw_mcu_yaw_big_angle=arr("raw_mcu_yaw_big_angle"),
+        raw_mcu_yaw_big_omega=arr("raw_mcu_yaw_big_omega"),
+        raw_mcu_yaw_small_angle=arr("raw_mcu_yaw_small_angle"),
+        raw_mcu_yaw_small_omega=arr("raw_mcu_yaw_small_omega"),
+        raw_mcu_chassis_imu_yaw=arr("raw_mcu_chassis_imu_yaw"),
+        raw_mcu_chassis_imu_omega=arr("raw_mcu_chassis_imu_omega"),
+        raw_mcu_mark=arr("raw_mcu_mark"), raw_mcu_color=arr("raw_mcu_color"),
+        raw_mcu_auto_aim_switch=arr("raw_mcu_auto_aim_switch"),
+        raw_mcu_temp_big=arr("raw_mcu_temp_big"),
+        raw_mcu_temp_small=arr("raw_mcu_temp_small"),
+        raw_mcu2_seq=arr("raw_mcu2_seq"),
         # ── 下发的参考（便于复核/画图）──
         target_big=arr("target_big"), target_small=arr("target_small"),
         # ── 标量元数据（规格要求）──
@@ -1959,6 +2126,9 @@ def save_segment(rec: SegmentRecord, plan: SegmentPlan, out_dir: str,
         rate=np.float64(RATE),
         pid_out_limit=np.float64(PID_OUT_MAX),
         max_torque_delta=np.float64(MAX_TORQUE_DELTA),
+        # ── ★★ McuDataPreprocessor::LinearParams（本段实际生效的映射常量）──
+        #   `mapped = scale·raw + offset`；`imu_*` 不经预处理器（本身就是原始值）
+        **{f"lin_{k}": np.float64(v) for k, v in LIN_PARAMS.items()},
         tag=np.str_(tag),
         source_file=np.str_(plan.src_file),
         source_start=np.int32(plan.src_start),

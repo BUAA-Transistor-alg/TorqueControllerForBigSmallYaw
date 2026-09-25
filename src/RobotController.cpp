@@ -49,6 +49,10 @@ RobotController::State RobotController::getState() {
         st.imu.euler_roll = im.euler_roll;
         st.imu.dt_one_tenth_ms = im.dt_one_tenth_ms;
     }
+    // ★ 处理前（原始串口）包: 与上面 st.mcu.* / st.imu.* 同处组装
+    //   （st.mcu 是 McuDataPreprocessor 的输出，st.raw_mcu 是它的输入；未收到时全 0）
+    st.raw_mcu = raw.raw_mcu_packet;
+    st.raw_imu = raw.raw_imu_packet;
 
     // ── 状态估计 ──
     auto e = comm_.getEstimate();

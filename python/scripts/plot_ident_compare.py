@@ -55,9 +55,8 @@ def main(argv=None) -> int:
     ap.add_argument("--log", required=True, help="日志路径（逗号分隔）")
     ap.add_argument("--names", default="", help="每份日志的图例名（逗号分隔；默认用文件名）")
     ap.add_argument("--out", required=True, help="输出 PNG")
-    ap.add_argument("--which", default="backlash_delta,backlash_k,backlash_through,Jbig_eff,"
-                                       "fc_big,fv_big,Jmotor",
-                    help="要画哪些参数（逗号分隔的参数名）")
+    ap.add_argument("--which", default="X_b,Y_b,X_s,Y_s,I_b,I_s,mu,f_bc,f_bv,f_sc,f_sv",
+                    help="要画哪些参数（逗号分隔的参数名；2-DOF 缩合参数名）")
     ap.add_argument("--show-plot", action="store_true")
     a = ap.parse_args(argv)
 

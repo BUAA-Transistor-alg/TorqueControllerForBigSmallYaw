@@ -30,16 +30,14 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from identify_params.data import load_segments, state_arrays                    # noqa: E402
-from identify_params.model import simulate_backlash_np                          # noqa: E402
+from identify_params.model import simulate_np                                  # noqa: E402
 from identify_params.params import (AXIS_BIG, AXIS_SMALL, EXO_ZERO, PARAM_NAMES,  # noqa: E402
                                     PlanarParams, exo_from_gravity)
 from identify_params.plotting import _lazy_pyplot, _save_fig                     # noqa: E402
-from identify_params.train import beta_source, channel_rmse                      # noqa: E402
+from identify_params.train import channel_rmse                                 # noqa: E402
 
-CORE = ("Jbig_eff", "Js", "Px", "Py", "fc_big", "fv_big", "fc_small", "fv_small")
-EXTRA = ("backlash_delta", "backlash_k", "backlash_c", "backlash_through",
-         "Jmotor", "fc_motor", "fv_motor", "backlash_beta")
-PB = ("Pbx", "Pby")          # ★ 大 yaw 侧一阶矩（追加在末尾；只随大 yaw 转）
+CORE = ("X_b", "Y_b", "X_s", "Y_s", "I_b", "I_s")
+EXTRA = ("mu", "f_bc", "f_bv", "f_sc", "f_sv")
 
 
 def parse_params(path):
@@ -49,10 +47,12 @@ def parse_params(path):
         m = re.match(r"\s*([A-Za-z_]+)\s*=\s*([-+0-9.eE]+)", ln)
         if m:
             vals[m.group(1)] = float(m.group(2))
-    order = CORE + EXTRA + PB
+    order = CORE + EXTRA                      # 顺序必须与 PARAM_NAMES 一致
     missing = [k for k in order if k not in vals]
     if missing:
-        raise SystemExit(f"[error] {path} 里缺少这些参数: {missing}")
+        raise SystemExit(f"[error] {path} 里缺少这些参数: {missing}\n"
+                         f"（2-DOF 参数名: {order}；旧的 18 参 3-DOF 文件请先用 "
+                         f"manual_tune 载入并另存为新格式）")
     return np.array([vals[k] for k in order], dtype=np.float64)
 
 
@@ -76,17 +76,15 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="开环仿真 vs 实际采集 曲线对比")
     ap.add_argument("--data", required=True, help="数据 glob（逗号分隔）")
     ap.add_argument("--params", default=None, help="辨识输出参数文件（--out 写的那个）")
-    ap.add_argument("--init-vector", default=None, help="或直接给 18 个数（逗号分隔）")
+    ap.add_argument("--init-vector", default=None, help="或直接给 11 个数（逗号分隔）")
     ap.add_argument("--n", type=int, default=6, help="画几段（默认 6，大小 yaw 各一半）")
     ap.add_argument("--substeps", type=int, default=2, help="开环仿真每控制步的子步（与训练一致）")
     ap.add_argument("--integrator", choices=["rk4", "euler"], default="rk4")
-    ap.add_argument("--beta-mode", choices=["auto", "column", "true"], default="auto",
-                    help="与训练一致（β 必需）: auto = 与拟合帧匹配（est→backlash_center、"
-                         "true→beta_true）")
-    ap.add_argument("--state-mode", choices=["est", "true"], default="est")
     ap.add_argument("--dx", type=float, default=0.0)
     ap.add_argument("--dy", type=float, default=0.07)
     ap.add_argument("--dt", type=float, default=None)
+    ap.add_argument("--state-mode", choices=["est", "true"], default="est",
+                    help="状态目标帧（true 只对仿真数据有意义）")
     ap.add_argument("--out", required=True, help="输出 PNG")
     ap.add_argument("--show-plot", action="store_true")
     a = ap.parse_args(argv)
@@ -104,35 +102,33 @@ def main(argv=None) -> int:
     segs = load_segments([a.data], dt_override=a.dt, verbose=False)
     if not segs:
         raise SystemExit("[error] 没读到数据")
-    beta_tag = beta_source(segs[0], a.state_mode, a.beta_mode)[1]
     sel = pick_segments(segs, a.n)
 
     print("参数: " + " ".join(f"{k}={v:+.5f}" for k, v in zip(PARAM_NAMES, phi)))
-    print(f"逐样本 β: {beta_tag}（必需数据、按拟合帧取）"
-          f"；状态目标: {a.state_mode}；积分 {a.integrator}/substeps={a.substeps}")
+    print(f"2-DOF 缩合模型；状态目标: {a.state_mode}；积分 {a.integrator}/substeps={a.substeps}")
 
     rows = []
     for s in sel:
-        th_m, dth_m = state_arrays(s, a.state_mode)
+        _th_all, _dth_all = state_arrays(s, a.state_mode)
+        th_m, dth_m = _th_all[:, 1:], _dth_all[:, 1:]        # (云台, 小 yaw)
         seq = None
         if s.gravity is not None:
-            seq = [exo_from_gravity(float(s.gravity[i, 0]), float(s.gravity[i, 1]))
+            _wc = float(getattr(s, "base_omega", 0.0) or 0.0)
+            seq = [exo_from_gravity(float(s.gravity[i, 0]), float(s.gravity[i, 1]), _wc)
                    for i in range(s.T)]
-        bs = beta_source(s, a.state_mode, a.beta_mode)[0]
-        th, dth = simulate_backlash_np(p_model, th_m[0], dth_m[0], s.tau, s.dt, EXO_ZERO,
-                                       a.substeps, exo_seq=seq, beta_seq=bs,
-                                       integrator=a.integrator)
+        th, dth = simulate_np(p_model, th_m[0], dth_m[0], s.tau, s.dt, EXO_ZERO,
+                             a.substeps, exo_seq=seq, integrator=a.integrator)
         win = channel_rmse([s], phi, base, integrator=a.integrator, substeps=a.substeps,
-                           state_mode=a.state_mode, beta_mode=a.beta_mode)
+                           state_mode=a.state_mode)
         rows.append((s, th_m, dth_m, th, dth, win))
 
-    print(f"\n{'段':<28} {'轴':<6} {'窗口 0.1s RMSE 电机/云台/小yaw':<32} "
-          f"{'整段 RMSE 电机/云台/小yaw'}")
+    print(f"\n{'段':<28} {'轴':<6} {'窗口 0.1s RMSE 云台/小yaw':<32} "
+          f"{'整段 RMSE 云台/小yaw'}")
     for s, th_m, _d, th, _dd, win in rows:
         ax = "大yaw" if s.axis == AXIS_BIG else "小yaw"
         print(f"{os.path.basename(s.source)[:28]:<28} {ax:<6} "
-              f"{win['motor_deg']:6.3f}/{win['platform_deg']:6.3f}/{win['small_deg']:6.3f}°"
-              f"{'':<12} {win['motor_full_deg']:6.2f}/{win['platform_full_deg']:6.2f}/"
+              f"{win['platform_deg']:6.3f}/{win['small_deg']:6.3f}°"
+              f"{'':<18} {win['platform_full_deg']:6.2f}/"
               f"{win['small_full_deg']:6.2f}°")
 
     plt = _lazy_pyplot(a.show_plot)
@@ -140,7 +136,7 @@ def main(argv=None) -> int:
     fig, axes = plt.subplots(nrow, 3, figsize=(16.5, 3.2 * nrow), squeeze=False)
     fig.suptitle("开环仿真（识别参数） vs 实际采集曲线　—— 只喂记录的力矩与本段实测初值",
                  fontsize=11)
-    chans = (("电机", "C0"), ("云台", "C3"), ("小 yaw", "C1"))
+    chans = (("云台 θ_b", "C3"), ("小 yaw θ_s", "C1"))
     for i, (s, th_m, dth_m, th, dth, win) in enumerate(rows):
         t = np.arange(s.T) * s.dt
         ax = axes[i][0]
@@ -150,12 +146,12 @@ def main(argv=None) -> int:
         ax.set_title(f"{'大yaw' if s.axis == AXIS_BIG else '小yaw'}激励段 "
                      f"（{os.path.basename(s.source)[:26]}）　窗口 RMSE="
                      + "/".join(f"{win[k]:.3f}" for k in
-                                ("motor_deg", "platform_deg", "small_deg")) + "°",
+                                ("platform_deg", "small_deg")) + "°",
                      fontsize=9)
         ax.set_xlabel("t [s]")
         ax.set_ylabel("θ [rad]")
         ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=6, ncol=3, loc="best")
+        ax.legend(fontsize=6, ncol=2, loc="best")
 
         ax = axes[i][1]
         for k, (_nm, c) in enumerate(chans):
@@ -165,7 +161,7 @@ def main(argv=None) -> int:
         ax.set_xlabel("t [s]")
         ax.set_ylabel("误差 [rad]")
         ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=6, ncol=3, loc="best")
+        ax.legend(fontsize=6, ncol=2, loc="best")
 
         ax = axes[i][2]
         for k, (nm, c) in enumerate(chans):
@@ -175,13 +171,13 @@ def main(argv=None) -> int:
         ax.set_xlabel("t [s]")
         ax.set_ylabel("θ̇ [rad/s]")
         ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=6, ncol=3, loc="best")
+        ax.legend(fontsize=6, ncol=2, loc="best")
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     _save_fig(fig, a.out, a.show_plot)
 
     # 顺带把"角度 RMSE"和"角速度 RMSE"分别汇总一遍（便于贴报告）
     print("\n汇总（角度 ° / 角速度 rad/s，窗口）：")
-    for k in ("motor", "platform", "small"):
+    for k in ("platform", "small"):
         v = np.array([[r[5][k + "_deg"], r[5][k + "_rate"]] for r in rows])
         print(f"  {k:<9} 平均 {v[:, 0].mean():7.3f}°  /  {v[:, 1].mean():7.4f}")
     return 0

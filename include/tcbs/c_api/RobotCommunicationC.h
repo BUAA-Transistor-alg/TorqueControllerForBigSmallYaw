@@ -136,6 +136,54 @@ typedef struct TcbsRobotLatestData_C {
     TcbsRobotImuData_C imu;   // imu.valid=0 → 未收到
 } TcbsRobotLatestData_C;
 
+// ============================================================================
+// 处理前（原始串口）包 —— McuDataPreprocessor **之前**的 MCU 帧 + IMU 帧
+//
+// 用途: 采集脚本同时保存"处理前 + 处理后"的数据（处理后见 TcbsRobotMcuData_C）。
+// 说明:
+//   * 只读快照，不参与任何映射/估计，填的都是**串口收到的原始值**
+//     （pitch_angle 未经 recv_pitch_* 映射、yaw_big_angle 未经 recv_big_yaw_* 映射等）。
+//   * 结构体按平台默认对齐（不 pack）；字段顺序与 C++ 的 mcu::ReceivePacket /
+//     imu::ReceivePacket 载荷一一对应。
+//   * 每个结构体首字段是本结构体的 sizeof，供调用方（ctypes）做**版本握手**:
+//     调用方可用 sizeof(TcbsRobotRawMcu_C) 与返回的 sizeof_raw_mcu 比对，
+//     两者不一致说明头文件/库不同步。库侧在每次 get 时回填该字段。
+//   * 本组结构体与函数是**纯新增**（不改已有结构体布局/导出函数签名），
+//     故未纳入 tcbs_robot_comm_check_abi()/TcbsRobotCommAbiInfo_C（保持旧绑定可用）。
+// ============================================================================
+
+// 处理前的 MCU 原始反馈（未过 McuDataPreprocessor）
+typedef struct TcbsRobotRawMcu_C {
+    uint32_t sizeof_raw_mcu;        // = sizeof(TcbsRobotRawMcu_C)（版本握手）
+    uint8_t  valid;                 // 是否收到过
+    double   age_s;                 // 值年龄 s（沿用现有 age 的语义；-1 = 从未收到）
+    float    bullet_velocity;       // —— 以下全部为**处理前**原始值 ——
+    float    pitch_angle;
+    double   yaw_big_angle;
+    float    yaw_big_omega;
+    float    yaw_small_angle;
+    float    yaw_small_omega;
+    float    chassis_imu_yaw;
+    float    chassis_imu_omega;
+    uint8_t  mark, color, auto_aim_switch, yaw_big_temperature, yaw_small_temperature, mcu2_seq;
+} TcbsRobotRawMcu_C;
+
+// 处理前的 IMU 原始反馈（IMU 本就不经 McuDataPreprocessor，这里同样保留整帧）
+typedef struct TcbsRobotRawImu_C {
+    uint32_t sizeof_raw_imu;        // = sizeof(TcbsRobotRawImu_C)（版本握手）
+    uint8_t  valid;                 // 是否收到过
+    float    gx, gy, gz, ax, ay, az;
+    double   euler_yaw, euler_pitch, euler_roll;
+    uint32_t dt_one_tenth_ms;
+} TcbsRobotRawImu_C;
+
+// MCU + IMU 处理前原始包的组合（一次调用取全，保证来自同一快照）
+typedef struct TcbsRobotRawPackets_C {
+    uint32_t sizeof_raw_packets;    // = sizeof(TcbsRobotRawPackets_C)（版本握手）
+    TcbsRobotRawMcu_C mcu;
+    TcbsRobotRawImu_C imu;
+} TcbsRobotRawPackets_C;
+
 // 单个数据源的更新情况（年龄/间隔均由**上位机计时**；MCU 侧没有时钟）
 typedef struct TcbsRobotSourceInfo_C {
     uint8_t  valid;        // 是否有可用数据（对"值保持"通道 = 已收到过；1 = 可用）
@@ -451,6 +499,12 @@ void tcbs_robot_comm_stop(TcbsRobotCommHandle* handle);
 // 取最新一帧原始反馈（MCU 已按映射换算）；out 必须非空
 int tcbs_robot_comm_get_latest_data(TcbsRobotCommHandle* handle, TcbsRobotLatestData_C* out);
 
+// 取**处理前**的原始串口包（MCU 未映射 + IMU 原始帧）；out 必须非空
+//   valid 全为 0 时表示尚未收到（此时 age_s = -1）；无硬件时同样成功返回。
+//   注: 本函数为**低层补充接口**（TcbsRobotCommunication.get_raw_packets 用），
+//       使得低层句柄也能取原始包（高层句柄见 tcbs_robot_controller_get_raw_packets）。
+int tcbs_robot_comm_get_raw_packets(TcbsRobotCommHandle* handle, TcbsRobotRawPackets_C* out);
+
 // 取完整状态估计（可信量 + 大 yaw 延迟补偿 + 反解真实位姿 + 外生量 + 数据来源）
 int tcbs_robot_comm_get_estimate(TcbsRobotCommHandle* handle, TcbsRobotEstimate_C* out);
 
@@ -569,6 +623,12 @@ int tcbs_robot_controller_set_sequence_unchecked(TcbsRobotController_C* handle,
 // 取完整状态（含 mcu/imu/est/mpc 四组；序列长度在 out->mpc.*_seq_len 中，
 // 序列内容用下面的 get_*_sequence 取）
 int tcbs_robot_controller_get_state(TcbsRobotController_C* handle, TcbsRobotControllerState_C* out);
+
+// 取**处理前**（原始串口）的 MCU/IMU 包（对应 RobotController::State 的 raw_mcu / raw_imu，
+// 即 McuDataPreprocessor 之前的帧）；out 必须非空
+//   age_s 取状态估计里的大 yaw 值年龄（est.big_enc_age，与 MCU2 新样本序号同源；
+//   -1 = 从未收到）。valid 全为 0 表示尚未收到。
+int tcbs_robot_controller_get_raw_packets(TcbsRobotController_C* handle, TcbsRobotRawPackets_C* out);
 
 // 取参考世界方位角序列（which: 0 = 大 yaw, 1 = 小 yaw）
 // 返回序列实际长度（>= 0，可能大于 max_len 表示被截断）；out 为 NULL 或 max_len <= 0

@@ -33,7 +33,7 @@ import numpy as np
 
 from .data import ask_skip_segment, state_arrays
 from .loss import pair_loss
-from .model import DifferentiableSimulator, simulate_backlash_np
+from .model import NHORIZON_CH, DifferentiableSimulator, simulate_np
 from .params import (
     AXIS_BIG,
     AXIS_CHANNELS,
@@ -47,6 +47,7 @@ from .params import (
     PlanarParams,
     ParamGroups,
     Exo,
+    tau_sign_desc,
     default_param_vector,
     exo_from_gravity,
     p_direction,
@@ -104,7 +105,9 @@ class FitConfig:
     #   它的定位只是"死区内的梯度引导"；一旦放开拟合，它会被优化器拿来**替模型填"刚性接触"
     #   的台阶**（实测 γ 从 0.002 涨到 0.27~0.39、δ 被撑到 0.25 rad，真值 0.087）。
     #   要复现"γ 自由"的消融：`--no-freeze-backlash-through`。
-    freeze_backlash_through: bool = True
+    freeze_backlash_through: bool = True   # 旧 3-DOF 遗留字段，2-DOF 不用
+    # ★ 默认**不固定任何参数**；`--fix-mu` 可把 μ（规范自由度）钉在初值上
+    fix_mu: bool = False
     # ── 背隙中心 β 的来源（★ β 是**必需数据**，不再是可学习参数；--beta-mode=fit 已移除）──
     #   auto  : 与拟合帧匹配 —— state_mode=est 用估计帧 `backlash_center`；
     #           state_mode=true（该段有 theta_true）用真值帧 `beta_true`
@@ -249,72 +252,64 @@ def filter_beta_segments(segs, state_mode: str = "est", beta_mode: str = "auto",
 
 
 def _pack_windows(segs, cfg: FitConfig, chan_sel, dtype, dev):
-    """把数据切成等长**窗口**并打包成张量。
+    """把每段整段打包成张量（batch-first: 第 0 维 = 段）。
 
-    ★ batch-first: 第 0 维 = 窗口（= 可微仿真模型的 batch），第 1 维 = 时间。
-    状态是 3-DOF: theta/dtheta [W,L,3]（电机 / 云台 / 小 yaw）；tau [W,L,2]。
-    `chan_sel` = 参与损失的状态通道（big ⇒ (0,1)、small ⇒ (2,)、both ⇒ (0,1,2)）。
-    返回 dict: tau/theta/dtheta, mask [W,L], q0/qd0 [W,3], w_axis [W,3] 以及来源信息。
+    状态是 **2-DOF**: ``theta/dtheta [W,L,2]`` = (θ_b 云台侧, θ_s 小 yaw)；
+    ``tau [W,L,2]`` = (T_b, T_s)；``grav [W,L,2]`` = A 系重力；``omega [W]`` = ω_c。
+    ``chan_sel`` = 参与损失的状态通道（big ⇒ (0,)、small ⇒ (1,)、both ⇒ (0,1)）。
+    返回 dict: tau/theta/dtheta, grav, omega, mask, q0/qd0 [W,2], w_axis [W,2], lens。
     """
     dt = segs[0].dt
     for s in segs:
         if abs(s.dt - dt) > 1e-12:
             raise ValueError("所有数据段的 dt 必须一致")
 
-    # 每个窗口的 (段, 起点)；window_len=0 ⇒ 整段，windows_per_seg 个等间隔窗口
     specs = []
     for si, s in enumerate(segs):
         n = s.T if cfg.max_points <= 0 else min(s.T, cfg.max_points)
         if cfg.window_len <= 0 or cfg.window_len >= n:
-            starts = [0]
-            L = n
+            starts, L = [0], n
         else:
             L = int(cfg.window_len)
             k = max(1, int(cfg.windows_per_seg))
-            if k == 1:
-                starts = [0]
-            else:
-                starts = sorted({int(round(v)) for v in np.linspace(0, n - L, k)})
+            starts = [0] if k == 1 else sorted({int(round(v)) for v in np.linspace(0, n - L, k)})
         for st in starts:
             specs.append((si, st, L))
     L = max(sp[2] for sp in specs)
     W = len(specs)
 
     tau = np.zeros((W, L, 2))
-    theta = np.zeros((W, L, 3))
-    dtheta = np.zeros((W, L, 3))
+    theta = np.zeros((W, L, NHORIZON_CH))
+    dtheta = np.zeros((W, L, NHORIZON_CH))
     grav = np.zeros((W, L, 2))
-    beta = np.zeros((W, L))
     mask = np.zeros((W, L))
-    q0 = np.zeros((W, 3))
-    qd0 = np.zeros((W, 3))
-    w_axis = np.zeros((W, 3))
+    q0 = np.zeros((W, NHORIZON_CH))
+    qd0 = np.zeros((W, NHORIZON_CH))
+    omega = np.zeros(W)
+    w_axis = np.zeros((W, NHORIZON_CH))
     for wi, (si, st, l) in enumerate(specs):
         s = segs[si]
         sl = slice(st, st + l)
         th_s, dth_s = state_arrays(s, cfg.state_mode)
         tau[wi, :l] = s.tau[sl]
-        theta[wi, :l] = th_s[sl]
-        dtheta[wi, :l] = dth_s[sl]
+        theta[wi, :l] = th_s[sl, 1:]           # 丢掉记录列 0（电机侧），留 (云台, 小 yaw)
+        dtheta[wi, :l] = dth_s[sl, 1:]
         if s.gravity is not None:
             grav[wi, :l] = s.gravity[sl]
-        bsrc = beta_source(s, cfg.state_mode, cfg.beta_mode)[0]
-        if bsrc is not None:
-            beta[wi, :l] = bsrc[sl]
+        omega[wi] = float(getattr(s, "base_omega", 0.0) or 0.0)
         mask[wi, :l] = 1.0
-        q0[wi] = th_s[st]
-        qd0[wi] = dth_s[st]
+        q0[wi] = th_s[st, 1:]
+        qd0[wi] = dth_s[st, 1:]
         for c in chan_sel:
             w_axis[wi, c] = 1.0 / len(chan_sel)
 
-    t = lambda x: torch.tensor(x, dtype=dtype, device=dev)          # noqa: E731
+    t = lambda x: torch.tensor(x, dtype=dtype, device=dev)      # noqa: E731
     return {"tau": t(tau), "theta": t(theta), "dtheta": t(dtheta), "mask": t(mask),
             "q0": t(q0), "qd0": t(qd0), "w_axis": t(w_axis), "grav": t(grav),
-            "beta": t(beta),
+            "omega": t(omega),
             "has_gravity": bool(np.any(grav != 0.0)),
-            "has_beta": bool(np.any(beta != 0.0)),
             "dt": dt, "L": L, "W": W,
-            "lens": [int(sp[2]) for sp in specs],          # 每个窗口的**有效**长度（未 padding）
+            "lens": [int(sp[2]) for sp in specs],
             "specs": [("seg%d" % sp[0], sp[1], sp[2]) for sp in specs],
             "seg_of_window": [sp[0] for sp in specs]}
 
@@ -365,7 +360,7 @@ def _config_summary(cfg: FitConfig, layout: "ParamGroups", W: int, dt: float,
         recipe = f"旧精细配方：Adam {cfg.iters} 步(lr={cfg.lr:g}, {cfg.lr_schedule})"
         if cfg.lbfgs_iters > 0:
             recipe += f" + LBFGS {cfg.lbfgs_iters} 步"
-        recipe += f"，{cfg.loss_mode} 损失，{cfg.integrator.upper()} 积分"
+        recipe += f"，{cfg.loss_mode} 损失，{cfg.integrator.upper()} 积分，{tau_sign_desc()}"
     else:
         _lr_desc = (f"lr={cfg.lr:g}（常数）"
                     + (f"，最后 {cfg.cos_decay_steps} epoch 余弦衰减到 0"
@@ -373,11 +368,9 @@ def _config_summary(cfg: FitConfig, layout: "ParamGroups", W: int, dt: float,
         recipe = (f"原仓库配方：epochs={cfg.epochs} × 段数{W} 个 Adam 步"
                   f"（= 原仓库 num_epochs 同轮数），每次 {cfg.seg_steps} 步(0.1 s)随机片段，"
                   f"{_lr_desc}，损失 = 角度 MSE(**不 wrap**) + 角速度 MSE(等权)，"
-                  f"3-DOF {cfg.integrator.upper()} 积分(substeps={cfg.substeps})，"
-                  f"无限位(两组: 全体实数 / 正数)")
+                  f"2-DOF {cfg.integrator.upper()} 积分(substeps={cfg.substeps})，"
+                  f"无限位(两组: 全体实数 / 正数)，{tau_sign_desc()}")
     return {"recipe": recipe, "epochs": int(cfg.epochs), "iters": int(cfg.iters),
-            "use_beta_column": bool(cfg.use_beta_column),
-            "freeze_backlash_through": bool(cfg.freeze_backlash_through),
             "seg_steps": int(cfg.seg_steps), "lr": float(cfg.lr), "loss_mode": cfg.loss_mode,
             "integrator": cfg.integrator, "substeps": int(cfg.substeps),
             "lr_schedule": cfg.lr_schedule, "lbfgs_iters": int(cfg.lbfgs_iters),
@@ -413,19 +406,16 @@ def format_param_table(phi, phi0) -> list:
 
 
 def format_header_snippet(phi) -> list:
-    """可直接粘进 `include/tcbs/mpc/planar_yaw_params.h` 的几行。"""
-    p = np.asarray(phi, dtype=np.float64)
+    """可直接粘进 `include/tcbs/mpc/planar_yaw_params.h` 的行（主模型仍是 3-DOF 背隙版）。
+
+    ★ 辨识模型是 2-DOF 缩合参数，头文件要的是 3-DOF 的那 6 个惯量/重力参数 ⇒
+      用 `PlanarParams.to_header_params()` 换算（背隙/电机那几项不辨识，沿用主模型现值）。
+    """
+    h = PlanarParams().with_vector(phi).to_header_params()
     return [
-        f"  p.Jbig_eff = {p[0]:.6f};  p.Js = {p[1]:.6f};",
-        f"  p.Px = {p[2]:.6f};  p.Py = {p[3]:.6f};",
-        f"  p.fcBig = {p[4]:.6f};  p.fvBig = {p[5]:.6f};",
-        f"  p.fcSmall = {p[6]:.6f};  p.fvSmall = {p[7]:.6f};",
-        f"  p.backlash_delta = {p[8]:.6f};  p.backlash_k = {p[9]:.4f};",
-        f"  p.backlash_c = {p[10]:.4f};  p.backlash_through = {p[11]:.6f};",
-        f"  p.Jmotor = {p[12]:.6f};  p.fcMotor = {p[13]:.6f};",
-        f"  p.fvMotor = {p[14]:.6f};  // β 由估计器在线给（离线拟合值 {p[15]:+.6f} 仅供参考）",
-        f"  p.Pbx = {p[16]:.6f};  p.Pby = {p[17]:.6f};"
-        f"  // 大 yaw 侧一阶矩（只有倾斜数据才可辨识）",
+        f"  p.Jbig_eff = {h['Jbig_eff']:.6f};  p.Js = {h['Js']:.6f};",
+        f"  p.Px = {h['Px']:.6f};  p.Py = {h['Py']:.6f};",
+        f"  p.Pbx = {h['Pbx']:.6f};  p.Pby = {h['Pby']:.6f};",
     ]
 
 
@@ -480,10 +470,9 @@ class FitContext:
     qd0_all: object
     w_axis_all: object
     grav_all: object
-    beta_all: object
+    omega_all: object
+    seq_const: object
     seq_var: object
-    use_beta_col: bool
-    beta_tag: str
     raw: object
     v0_free: object
     n_free: int
@@ -511,79 +500,54 @@ def build_fit_context(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_Z
         np.random.seed(cfg.seed)
 
     # ① 只对参与拟合的状态通道计误差（big ⇒ 电机+云台；small ⇒ 小 yaw；both ⇒ 3 个通道）
-    chan_sel = ((0, 1, 2) if cfg.fit_axis == "both"
+    chan_sel = (AXIS_CHANNELS[AXIS_BIG] + AXIS_CHANNELS[AXIS_SMALL]
+                if cfg.fit_axis == "both"
                 else AXIS_CHANNELS[AXIS_BIG if cfg.fit_axis == "big" else AXIS_SMALL])
 
-    # ② Adam 新配方 = 每段一个 sample（不分窗、不 mini-batch）；显式给了分窗设置时提示被忽略。
-    #    ★ 无梯度优化器（CMA-ES）用**固定窗口**当目标 ⇒ honor_windows=True 时**不**忽略窗口设置。
+    # ② Adam 新配方 = 每段一个 sample；显式给了分窗设置时提示被忽略。
+    #    ★ 无梯度优化器（CMA-ES）用固定窗口当目标 ⇒ honor_windows=True 时不忽略。
     pack_cfg = cfg
-    if (not honor_windows and not cfg.use_legacy_path
-            and (cfg.window_len > 0 or cfg.windows_per_seg > 1
-                 or (cfg.batch_size > 0 and not cfg.batch_segments))):
-        if cfg.verbose:
-            print("[torch] ★ 新配方按「整段 = 一个 sample」采样，忽略 "
-                  f"window_len={cfg.window_len}, windows_per_seg={cfg.windows_per_seg}, "
-                  f"batch_size={cfg.batch_size}（要旧配方请用 --iters>0 或 --legacy-recipe）")
+    if (not honor_windows and (cfg.window_len > 0 or cfg.windows_per_seg > 1)
+            and getattr(cfg, "verbose", True)):
+        print("[fit] 忽略 --window-len/--windows-per-seg（Adam 配方按整段 1 个 sample）")
         pack_cfg = replace(cfg, window_len=0, windows_per_seg=1, batch_size=0)
 
-    # ── ★ β: **必需数据**，永远从所选帧的数据列来（--beta-mode=fit 已移除）──
-    #   缺 β 的段用 [Y/n] 提示**跳过**（与 β 连续性校验同一套），不再直接报错。
-    if cfg.beta_mode not in ("auto", "column", "true"):
-        raise ValueError("beta_mode 必须是 auto / column / true")
-    segs = filter_beta_segments(segs, cfg.state_mode, cfg.beta_mode, what)
-    if not segs:
-        raise ValueError(f"没有可用的数据段（{what}全部因缺 β 被跳过）")
-    if cfg.eval_segs:
-        cfg.eval_segs = filter_beta_segments(cfg.eval_segs, cfg.state_mode, cfg.beta_mode,
-                                             "留出集")
-    beta_tag = beta_source(segs[0], cfg.state_mode, cfg.beta_mode)[1]
-    use_beta_col = True
-    cfg.use_beta_column = True
-
     batch = _pack_windows(segs, pack_cfg, chan_sel, dtype, dev)
-    dt, L, W = batch["dt"], batch["L"], batch["W"]
+    W, L = batch["W"], batch["L"]
     lens = batch["lens"]
+    dt = batch["dt"]
 
-    # ③ 初值（★ 唯一来源 = 参数表 PARAM_SPECS；`--init-vector` 是整体替换）
+    # ⑤ P 方向约束 → 固定参数 → ParamGroups
     phi0 = (default_param_vector() if cfg.init_vector is None
-            else np.asarray(cfg.init_vector, dtype=np.float64).copy())
-
-    # ④ P 的方向约束（可选）: P = |P|·R(−θ*)·d̂ ⇒ Px/Py 退化成 real 组末尾一个派生标量
-    mode = str(cfg.p_constraint).replace("-", "_")
-    if mode not in ("free", "along_d", "zero"):
-        raise ValueError("p_constraint 必须是 free / along_d / zero")
-    p_along = None
-    if mode == "along_d":
-        p_along = p_direction(base.dx, base.dy, cfg.p_zero_angle_deg)
-        print(f"[torch] P 方向约束: θ* = {cfg.p_zero_angle_deg:+.2f}° ⇒ "
-              f"P ∝ ({p_along[0]:+.5f}, {p_along[1]:+.5f})")
-
-    # ⑤ 固定参数 = 冻结的那些（★ 不属于"全体实数/正数"任何一组）
-    fixed = resolve_fixed_names(cfg.fit_axis, cfg.freeze_params,
-                                cfg.freeze_backlash_through, cfg.p_constraint, use_beta_col)
-    base_phi = base.with_vector(phi0)          # 固定参数取初值
+            else np.asarray(cfg.init_vector, dtype=np.float64))
+    p_along = p_direction(base.dx, base.dy, cfg.p_zero_angle) if cfg.p_constraint == "along_d" \
+        else None
+    fixed = resolve_fixed_names(cfg.fit_axis, cfg.freeze_params, cfg.p_constraint,
+                                fix_mu=getattr(cfg, "fix_mu", False))
+    base_phi = base.with_vector(phi0)
     layout = ParamGroups(base_phi, fixed_names=fixed, p_along_d=p_along)
-    if layout.fixed_names and cfg.verbose:
-        print("[torch] ★ 固定参数（不参与优化，恒保持初值）: "
+    if layout.fixed_names and getattr(cfg, "verbose", True):
+        print("[fit] ★ 固定参数（不参与优化，恒保持初值）: "
               + ", ".join(f"{n}={layout.fixed_value(n):.6g}" for n in layout.fixed_names))
 
     raw = torch.tensor(layout.to_raw_init(phi0), dtype=dtype, device=dev, requires_grad=True)
-    # ★ 每段的初始角速度自由量: 3-DOF ⇒ [W,3]（旧脚本这里是 [W,2]，状态从 2-DOF 扩到 3-DOF
-    #   之后没同步，导致 `--free-init-vel` 一开就崩；这里修正为 3 个通道）。
-    v0_free = (torch.zeros(W, 3, dtype=dtype, device=dev, requires_grad=True)
-               if cfg.free_init_vel else None)
 
     tau_t, th_t, dth_t = batch["tau"], batch["theta"], batch["dtheta"]
     mask_t, q0_all, qd0_all, w_axis_all = (batch["mask"], batch["q0"], batch["qd0"],
                                            batch["w_axis"])
     grav_all = batch["grav"] if batch["has_gravity"] else None
-    beta_all = batch["beta"] if use_beta_col else None
+    omega_all = batch["omega"]
 
-    # ⑥ seq_const / seq_var 打包成模型的输入契约（力矩在 seq_var 头两个通道）
-    seq_var = DifferentiableSimulator.pack_seq_var(tau_t[..., 0], tau_t[..., 1],
-                                                   grav_all, beta_all)
+    # ⑥ seq_const / seq_var 打包成模型的输入契约
+    v0_free = (torch.zeros(W, NHORIZON_CH, dtype=dtype, device=dev, requires_grad=True)
+               if getattr(cfg, "free_init_vel", False) else None)
+    seq_const = DifferentiableSimulator.pack_seq_const(q0_all, qd0_all, omega_all)
+    seq_var = DifferentiableSimulator.pack_seq_var(
+        tau_t[..., 0], tau_t[..., 1],
+        None if grav_all is None else grav_all[..., 0],
+        None if grav_all is None else grav_all[..., 1])
     sim = DifferentiableSimulator(dt=dt, substeps=cfg.substeps, integrator=cfg.integrator,
-                                  layout=layout, base=base_phi, beta_from_input=use_beta_col)
+                                  layout=layout, base=base_phi)
     n_free = layout.n_learnable
     summary = _config_summary(cfg, layout, W, dt, n_free)
     return FitContext(
@@ -592,9 +556,12 @@ def build_fit_context(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_Z
         dt=dt, L=L, W=W, lens=lens, chan_sel=chan_sel,
         tau_t=tau_t, th_t=th_t, dth_t=dth_t, mask_t=mask_t,
         q0_all=q0_all, qd0_all=qd0_all, w_axis_all=w_axis_all,
-        grav_all=grav_all, beta_all=beta_all, seq_var=seq_var,
-        use_beta_col=use_beta_col, beta_tag=beta_tag, raw=raw, v0_free=v0_free,
-        n_free=n_free, summary=summary)
+        grav_all=grav_all, omega_all=omega_all, seq_const=seq_const, seq_var=seq_var,
+        raw=raw, v0_free=v0_free, n_free=n_free, summary=summary)
+
+
+
+
 
 
 # ============================================================================
@@ -632,7 +599,8 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
     th_t, dth_t = ctx.th_t, ctx.dth_t
     mask_t, w_axis_all = ctx.mask_t, ctx.w_axis_all
     q0_all, qd0_all = ctx.q0_all, ctx.qd0_all
-    seq_var, beta_tag = ctx.seq_var, ctx.beta_tag
+    seq_var = ctx.seq_var
+    omega_all = ctx.omega_all
     n_free, summary = ctx.n_free, ctx.summary
 
     loss_mode = cfg.loss_mode
@@ -660,7 +628,8 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
             v0 = None if v0_free is None else v0_free[idx]
         if v0 is not None:
             qd0 = qd0 + v0
-        return DifferentiableSimulator.pack_seq_const(q0, qd0, exo.base_omega, exo.base_alpha)
+        return DifferentiableSimulator.pack_seq_const(
+            q0, qd0, (omega_all if idx is None else omega_all[idx]))
 
     def seq_const_at(wid, starts):
         """片段起点的 seq_const（起点状态用**实测** θ/ω，与原仓库一致）。"""
@@ -668,20 +637,18 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
         qd0 = dth_t[wid, starts]
         if v0_free is not None:
             qd0 = qd0 + v0_free[wid]
-        return DifferentiableSimulator.pack_seq_const(q0, qd0, exo.base_omega, exo.base_alpha)
+        return DifferentiableSimulator.pack_seq_const(q0, qd0, omega_all[wid])
 
     def _rollout_windows(idx=None):
-        """整窗/整段前向仿真 → [B,L,3] 的位置与速度。"""
+        """整窗/整段前向仿真 → (θ[B,L,2], θ̇[B,L,2])。"""
         sv = seq_var if idx is None else seq_var[idx]
-        pos, vel = sim(params_b(int(sv.shape[0])), seq_const_windows(idx), sv)
-        return torch.stack(pos, dim=-1), torch.stack(vel, dim=-1)
+        return sim(params_b(int(sv.shape[0])), seq_const_windows(idx), sv)
 
     def _rollout_slices(wid, starts, n: int):
-        """从 ``starts`` 起的 n 步片段（可跨多个窗口）→ [B,n,3]。"""
+        """从 ``starts`` 起的 n 步片段（可跨多个窗口）→ (θ[B,n,2], θ̇[B,n,2])。"""
         ii = starts[:, None] + torch.arange(n, device=dev)[None, :]
-        sv = seq_var[wid[:, None], ii]                    # [B,n,5]
-        pos, vel = sim(params_b(int(wid.numel())), seq_const_at(wid, starts), sv)
-        return torch.stack(pos, dim=-1), torch.stack(vel, dim=-1)
+        sv = seq_var[wid[:, None], ii]                    # [B,n,4]
+        return sim(params_b(int(wid.numel())), seq_const_at(wid, starts), sv)
 
     # ★ 损失本体只在 `loss.py` 定义一次（角度不 wrap、两项等权 / Huber）；
     #   这里只负责"取哪一段数据、怎么归约"。
@@ -729,8 +696,8 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
         eval_hist.append((int(ep_idx) + 1, rm))
         if cfg.verbose:
             print(f"[eval@{ep_idx + 1:6d}] 留出集窗口 RMSE[°] 电机/云台/小yaw = "
-                  f"{rm['motor_deg']:.3f}/{rm['platform_deg']:.3f}/{rm['small_deg']:.3f}"
-                  f"  角速度 = {rm['motor_rate']:.4f}/{rm['platform_rate']:.4f}/"
+                  f"{rm['platform_deg']:.3f}/{rm['small_deg']:.3f}"
+                  f"  角速度 = {rm['platform_rate']:.4f}/"
                   f"{rm['small_rate']:.4f}")
 
     if cfg.verbose:
@@ -739,7 +706,7 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
         print(f"[torch] 数据: {len(segs)} 段 → {W} 个 sample（最长 {L} 点 = {L*dt:.2f} s，"
               f"{_grav}）；拟合轴={cfg.fit_axis}，可学习参数={n_free}；参数分组: "
               f"{summary['param_space']}；参数限位: {summary['limits']}")
-        print(f"[torch] β 来源（必需数据）: {beta_tag}；损失**不 wrap**（模型对圈数负责）")
+        print("[torch] 2-DOF 缩合模型；损失**不 wrap**（模型对圈数负责）；ω_c 逐段来自数据")
         print("[torch] 初值 φ0 = " + _fmt_vec(phi0) + f"（来源: {summary['init_source']}）")
         if loss_mode != "mse" or cfg.vel_weight not in (0.0, 1.0):
             print(f"[torch] 提示: loss_mode={loss_mode}；mse 模式下角速度项**固定等权**(1.0)，"
@@ -960,9 +927,8 @@ def fit_params_torch(segs, cfg: FitConfig, base: PlanarParams, exo: Exo = EXO_ZE
 # 全批开环前向仿真误差（比 loss 好读；口径 = 整段/窗口 + 同一积分器）
 # ============================================================================
 def channel_rmse(segs, phi, base: PlanarParams, integrator: str = "rk4",
-                 substeps: int = 4, window: int = 10, state_mode: str = "est",
-                 beta_mode: str = "auto") -> dict:
-    """用给定参数做开环前向仿真（numpy 参考实现），返回三通道的角度/角速度 RMSE（两套口径）。
+                 substeps: int = 4, window: int = 10, state_mode: str = "est") -> dict:
+    """用给定参数做开环前向仿真（numpy 参考实现），返回**两个通道**（云台/小 yaw）的 RMSE。
 
     · ``*_deg`` / ``*_rate``（**窗口口径**）: 每 ``window`` 步（默认 10 步 = 0.1 s）从记录
       初值重新起跑一次，覆盖整段所有起点。这是"模型有多准"的**主指标**；
@@ -970,35 +936,34 @@ def channel_rmse(segs, phi, base: PlanarParams, integrator: str = "rk4",
       **模型误差的累积**与**初值偏差**，只能当参考。
 
     角度误差**不 wrap**（与损失口径一致：加载时已连续化，模型必须对圈数负责），用度；
-    角速度用 rad/s。β 按 `state_mode` 对应的帧取（`beta_source`）。
+    角速度用 rad/s。状态取记录列的 (云台, 小 yaw)（列 1:3；电机列不建模）。
     """
     p = base.with_vector(np.asarray(phi, dtype=np.float64))
-    names = ("motor", "platform", "small")
-    se_w = np.zeros(3); sv_w = np.zeros(3); n_w = 0
-    se_f = np.zeros(3); sv_f = np.zeros(3); n_f = 0
+    names = ("platform", "small")
+    se_w = np.zeros(2); sv_w = np.zeros(2); n_w = 0
+    se_f = np.zeros(2); sv_f = np.zeros(2); n_f = 0
     w = max(1, int(window))
     for s in segs:
-        th_m, dth_m = state_arrays(s, state_mode)
+        th_all, dth_all = state_arrays(s, state_mode)
+        th_m, dth_m = th_all[:, 1:], dth_all[:, 1:]          # (云台, 小 yaw)
         seq = None
         if s.gravity is not None:
-            seq = [exo_from_gravity(float(s.gravity[i, 0]), float(s.gravity[i, 1]))
+            _wc = float(getattr(s, "base_omega", 0.0) or 0.0)
+            seq = [exo_from_gravity(float(s.gravity[i, 0]), float(s.gravity[i, 1]), _wc)
                    for i in range(s.T)]
-        bs = beta_source(s, state_mode, beta_mode)[0]
         # 窗口口径
         for st in range(0, max(1, s.T - w), w):
             sl = slice(st, st + w + 1)
-            th, dth = simulate_backlash_np(
+            th, dth = simulate_np(
                 p, th_m[st], dth_m[st], s.tau[sl], s.dt, EXO_ZERO, substeps,
-                exo_seq=(None if seq is None else seq[sl]),
-                beta_seq=(None if bs is None else bs[sl]), integrator=integrator)
+                exo_seq=(None if seq is None else seq[sl]), integrator=integrator)
             d = th - th_m[sl]                                   # ★ 不 wrap（对圈数负责）
             se_w += np.sum(d * d, axis=0)
             sv_w += np.sum((dth - dth_m[sl]) ** 2, axis=0)
             n_w += int(th.shape[0])
         # 整段口径
-        th, dth = simulate_backlash_np(p, th_m[0], dth_m[0], s.tau, s.dt,
-                                       EXO_ZERO, substeps, exo_seq=seq, beta_seq=bs,
-                                       integrator=integrator)
+        th, dth = simulate_np(p, th_m[0], dth_m[0], s.tau, s.dt,
+                              EXO_ZERO, substeps, exo_seq=seq, integrator=integrator)
         d = th - th_m                                           # ★ 不 wrap
         se_f += np.sum(d * d, axis=0)
         sv_f += np.sum((dth - dth_m) ** 2, axis=0)
@@ -1013,13 +978,14 @@ def channel_rmse(segs, phi, base: PlanarParams, integrator: str = "rk4",
 
 
 def _fmt_rmse(rm: dict) -> str:
-    return ("窗口(0.1s) RMSE: 角度[°] 电机/云台/小yaw = "
-            f"{rm['motor_deg']:.3f} / {rm['platform_deg']:.3f} / {rm['small_deg']:.3f}; "
+    return ("窗口(0.1s) RMSE: 角度[°] 云台/小yaw = "
+            f"{rm['platform_deg']:.3f} / {rm['small_deg']:.3f}; "
             "角速度[rad/s] = "
-            f"{rm['motor_rate']:.4f} / {rm['platform_rate']:.4f} / {rm['small_rate']:.4f}")
+            f"{rm['platform_rate']:.4f} / {rm['small_rate']:.4f}")
 
 
 def _fmt_rmse_full(rm: dict) -> str:
-    return ("整段开环 RMSE: 角度[°] 电机/云台/小yaw = "
-            f"{rm['motor_full_deg']:.3f} / {rm['platform_full_deg']:.3f} / "
-            f"{rm['small_full_deg']:.3f}")
+    return ("整段开环 RMSE: 角度[°] 云台/小yaw = "
+            f"{rm['platform_full_deg']:.3f} / {rm['small_full_deg']:.3f}"
+            "  角速度[rad/s] = "
+            f"{rm['platform_full_rate']:.4f} / {rm['small_full_rate']:.4f}")

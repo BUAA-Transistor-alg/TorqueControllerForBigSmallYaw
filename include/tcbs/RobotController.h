@@ -144,6 +144,11 @@ public:
         //   与原仓库一致: **没有 valid 标志、始终解算**，缺失值用历史值或 0 参与，重构关系恒成立。
         dual_yaw::StrictPose strict_pose;
         MpcData mpc;
+        // ★ 新增（**追加在末尾**，不改已有字段顺序）: 处理前（原始串口）的 MCU/IMU 包。
+        //   mcu/imu 两组是解析并（MCU）映射后的量；这里保留 McuDataPreprocessor **之前**的
+        //   原始帧，供采集脚本同时保存"处理前 + 处理后"。即使从未收到也始终有值（全 0）。
+        mcu::ReceivePacket raw_mcu;
+        imu::ReceivePacket raw_imu;
     };
 
     enum class Mode { SINGLE = 0, SEQUENCE = 1 };
